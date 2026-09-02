@@ -6,7 +6,6 @@ import crypto from "crypto";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { store } from "./src/server/store.js";
@@ -3131,6 +3130,8 @@ ${sitemapEntries.join("\n")}
   // VITE OR STATIC ASSETS
   // ==========================================
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+    // Keep Vite out of the production/serverless module graph.
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false },
       appType: "spa",
