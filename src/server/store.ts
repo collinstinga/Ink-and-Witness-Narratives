@@ -137,6 +137,10 @@ let cachedMpesaSettings = {
 
 // Ensure data directory exists
 function ensureDataDir() {
+  // Vercel serverless deployments have a read-only deployment filesystem.
+  // Firestore is the persistent store in production, so never create local
+  // data directories there.
+  if (process.env.VERCEL) return;
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
@@ -150,6 +154,9 @@ function ensureDataDir() {
 
 // Helper to synchronously and safely write JSON to disk with atomic temp rename
 function writeJsonFileSync(filePath: string, data: any) {
+  // Local JSON files are only a development fallback. Production persistence
+  // is handled by Firestore.
+  if (process.env.VERCEL) return;
   try {
     ensureDataDir();
     const newContent = JSON.stringify(data, null, 2);
