@@ -1,0 +1,294 @@
+{
+  "entities": {
+    "Article": {
+      "title": "Article",
+      "description": "Published and draft literary pieces, essays, and erotica narratives",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "slug": { "type": "string" },
+        "category": { "type": "string" },
+        "topicId": { "type": "string" },
+        "status": { "type": "string", "enum": ["published", "draft", "archived"] },
+        "isPaid": { "type": "boolean" },
+        "priceKes": { "type": "number" },
+        "readTimeMinutes": { "type": "number" },
+        "publishedAt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "featured": { "type": "boolean" },
+        "downloadsCount": { "type": "number" },
+        "viewsCount": { "type": "number" },
+        "tags": { "type": "array" },
+        "coverImage": { "type": "string" },
+        "excerpt": { "type": "string" },
+        "previewParagraphs": { "type": "array" },
+        "content": { "type": "string" },
+        "pdfDownloadUrl": { "type": "string" },
+        "customPriceUSD": { "type": "number" },
+        "displayOrder": { "type": "number" },
+        "pinned": { "type": "boolean" }
+      },
+      "required": ["id", "title", "status", "createdAt"]
+    },
+    "Topic": {
+      "title": "Topic",
+      "description": "Literary topic category in the catalogue",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "slug": { "type": "string" },
+        "description": { "type": "string" },
+        "displayOrder": { "type": "number" },
+        "homepageVisible": { "type": "boolean" },
+        "pieceIds": { "type": "array" },
+        "sortMode": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "slug"]
+    },
+    "AffiliateAccount": {
+      "title": "AffiliateAccount",
+      "description": "Affiliate partner account details, referral code, and balances",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "referralCode": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending"] },
+        "payoutMethod": { "type": "string", "enum": ["mpesa", "bank", "pesapal_paypal"] },
+        "payoutDetails": { "type": "object" },
+        "commissionRate": { "type": "number" },
+        "totalEarningsKes": { "type": "number" },
+        "pendingBalanceKes": { "type": "number" },
+        "paidBalanceKes": { "type": "number" },
+        "totalClicks": { "type": "number" },
+        "totalSales": { "type": "number" },
+        "registeredAt": { "type": "string" },
+        "lastLoginAt": { "type": "string" },
+        "acceptedTerms": { "type": "boolean" },
+        "acceptedTermsAt": { "type": "string" },
+        "termsVersion": { "type": "string" }
+      },
+      "required": ["id", "email", "name", "referralCode", "status"]
+    },
+    "PaymentTransaction": {
+      "title": "PaymentTransaction",
+      "description": "Reader payment transaction and M-Pesa payment record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "checkoutRequestId": { "type": "string" },
+        "merchantRequestId": { "type": "string" },
+        "mpesaReceiptNumber": { "type": "string" },
+        "articleId": { "type": "string" },
+        "articleTitle": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "originalAmount": { "type": "number" },
+        "exchangeRate": { "type": "number" },
+        "exchangeRateTimestamp": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "type": { "type": "string", "enum": ["PURCHASE", "TIP"] },
+        "status": { "type": "string", "enum": ["PENDING", "SUCCESS", "COMPLETED", "FAILED"] },
+        "affiliateCode": { "type": "string" },
+        "campaignCode": { "type": "string" },
+        "shortcodeUsed": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "completedAt": { "type": "string" },
+        "failureReason": { "type": "string" }
+      },
+      "required": ["id", "status", "createdAt"]
+    },
+    "ReaderLicense": {
+      "title": "ReaderLicense",
+      "description": "Verified unlock license for a reader to access paid narrative pieces",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "articleId": { "type": "string" },
+        "phone": { "type": "string" },
+        "receipt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "number" },
+        "verified": { "type": "boolean" }
+      },
+      "required": ["token", "articleId", "phone"]
+    },
+    "HomepageConfig": {
+      "title": "HomepageConfig",
+      "description": "Curated layout, welcome background, hero quote, and section text",
+      "type": "object",
+      "properties": {
+        "welcomeBackground": { "type": "object" },
+        "startHerePieceIds": { "type": "array" },
+        "startHereHeading": { "type": "string" },
+        "startHereSubtitle": { "type": "string" },
+        "theWritingHeading": { "type": "string" },
+        "theWritingSubtitle": { "type": "string" },
+        "aboutTheWritingHeading": { "type": "string" },
+        "aboutTheWritingStatement": { "type": "string" },
+        "aboutTheWritingPurpose": { "type": "string" },
+        "aboutTheWritingButtonText": { "type": "string" },
+        "heroHeadline": { "type": "string" },
+        "heroQuote": { "type": "string" },
+        "heroSubheadline": { "type": "string" },
+        "heroCtaText": { "type": "string" },
+        "mostSellingPieceIds": { "type": "array" },
+        "pieceOfTheWeekId": { "type": "string" },
+        "mostSellingMode": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "AuthorProfile": {
+      "title": "AuthorProfile",
+      "description": "Jake's official author biography, avatar, cover photo, branding, and stats",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "handle": { "type": "string" },
+        "instagram": { "type": "string" },
+        "instagramUrl": { "type": "string" },
+        "title": { "type": "string" },
+        "bio": { "type": "string" },
+        "extendedBio": { "type": "string" },
+        "location": { "type": "string" },
+        "featuredQuote": { "type": "string" },
+        "stats": { "type": "object" },
+        "avatarUrl": { "type": "string" },
+        "avatarSavedPermanently": { "type": "boolean" },
+        "avatarSavedAt": { "type": "string" },
+        "coverPhotoUrl": { "type": "string" },
+        "coverPhotoSavedPermanently": { "type": "boolean" },
+        "coverPhotoSavedAt": { "type": "string" },
+        "welcomeBackgroundUrl": { "type": "string" },
+        "welcomeBackgroundSavedPermanently": { "type": "boolean" },
+        "welcomeBackgroundSavedAt": { "type": "string" },
+        "faviconUrl": { "type": "string" },
+        "faviconSavedPermanently": { "type": "boolean" },
+        "faviconSavedAt": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "logoSavedPermanently": { "type": "boolean" },
+        "logoSavedAt": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "SavedAsset": {
+      "title": "SavedAsset",
+      "description": "Permanently stored writer branding photo, monograph cover, or site asset",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "target": { "type": "string" },
+        "filename": { "type": "string" },
+        "url": { "type": "string" },
+        "dataUrl": { "type": "string" },
+        "mimeType": { "type": "string" },
+        "size": { "type": "number" },
+        "articleId": { "type": "string" },
+        "savedPermanently": { "type": "boolean" },
+        "savedAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "url", "savedPermanently"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Registered user account record with argon2id hashed credentials and role",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["client", "admin"] },
+        "passwordHash": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "lastLoginAt": { "type": "string" }
+      },
+      "required": ["id", "email", "role"]
+    },
+    "AuthSession": {
+      "title": "AuthSession",
+      "description": "Active authenticated user session record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["client", "admin"] },
+        "createdAt": { "type": "number" },
+        "expiresAt": { "type": "number" }
+      },
+      "required": ["id", "userId", "role"]
+    },
+    "ManualAccessGrant": {
+      "title": "ManualAccessGrant",
+      "description": "Administrator-granted manual reading access for specific readers without requiring M-Pesa payments",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "articleId": { "type": "string" },
+        "articleTitle": { "type": "string" },
+        "phone": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "grantedAt": { "type": "string" },
+        "grantedBy": { "type": "string" },
+        "accessType": { "type": "string", "enum": ["manual"] },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "articleId", "phone", "status", "grantedAt", "grantedBy", "accessType"]
+    }
+  },
+  "firestore": {
+    "/articles/{articleId}": {
+      "schema": "Article",
+      "description": "All literary pieces, essays, and stories"
+    },
+    "/uploaded_assets/{assetId}": {
+      "schema": "SavedAsset",
+      "description": "Permanently saved image assets and branding files"
+    },
+    "/topics/{topicId}": {
+      "schema": "Topic",
+      "description": "Curated topics for catalogue grouping"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Topic",
+      "description": "Curated categories for catalogue grouping"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User accounts and role definitions"
+    },
+    "/sessions/{sessionId}": {
+      "schema": "AuthSession",
+      "description": "Active user sessions"
+    },
+    "/affiliates/{affiliateId}": {
+      "schema": "AffiliateAccount",
+      "description": "Affiliate accounts and profiles"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "PaymentTransaction",
+      "description": "M-Pesa payment transactions and receipts"
+    },
+    "/reader_licenses/{token}": {
+      "schema": "ReaderLicense",
+      "description": "Verified reader unlock tokens"
+    },
+    "/manual_access/{grantId}": {
+      "schema": "ManualAccessGrant",
+      "description": "Admin manual access authorizations for monographs"
+    },
+    "/site_configs/{configId}": {
+      "schema": "HomepageConfig",
+      "description": "Global homepage and author profile configuration"
+    }
+  }
+}

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en" class="scroll-smooth">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- Sandbox & Dev WebSocket / Rejection Guard -->
+    <script>
+      (function() {
+        if (typeof window !== 'undefined') {
+          var originalError = console.error;
+          var originalWarn = console.warn;
+          var isBenignViteWs = function(args) {
+            try {
+              var str = Array.prototype.slice.call(args).map(function(a) {
+                return (a && (a.message || a.stack || a.toString())) || String(a);
+              }).join(' ');
+              return (
+                str.indexOf('[vite] failed to connect to websocket') !== -1 ||
+                str.indexOf('[vite] server connection lost') !== -1 ||
+                str.indexOf('WebSocket closed without opened') !== -1 ||
+                str.indexOf('closed without being opened') !== -1
+              );
+            } catch (e) {
+              return false;
+            }
+          };
+          console.error = function() {
+            if (isBenignViteWs(arguments)) return;
+            return originalError.apply(console, arguments);
+          };
+          console.warn = function() {
+            if (isBenignViteWs(arguments)) return;
+            return originalWarn.apply(console, arguments);
+          };
+          window.addEventListener('unhandledrejection', function(event) {
+            var reasonStr = String(event.reason && (event.reason.message || event.reason) || '');
+            if (
+              reasonStr.indexOf('WebSocket') !== -1 ||
+              reasonStr.indexOf('websocket') !== -1 ||
+              reasonStr.indexOf('vite') !== -1 ||
+              reasonStr.indexOf('closed without being opened') !== -1 ||
+              reasonStr.indexOf('failed to connect') !== -1
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }, true);
+          window.addEventListener('error', function(event) {
+            var errorStr = String(event.message || event.error || '');
+            if (
+              errorStr.indexOf('WebSocket') !== -1 ||
+              errorStr.indexOf('websocket') !== -1 ||
+              errorStr.indexOf('vite') !== -1 ||
+              errorStr.indexOf('closed without being opened') !== -1 ||
+              errorStr.indexOf('failed to connect') !== -1
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }, true);
+        }
+      })();
+    </script>
+
+    <!-- Primary SEO Metadata -->
+    <title>Ink &amp; Witness Narratives | Essays, Erotica, Love &amp; Life's Contradictions</title>
+    <meta name="description" content="Ink &amp; Witness Narratives is a collection of poetry, erotica, romance, personal reflections, and powerful stories exploring love, desire, life, and the human experience. Discover words that linger." />
+    <meta name="keywords" content="Ink &amp; Witness Narratives, Ink and Witness, Jake, love essays, erotica stories, intimacy and lust, life's contradictions, identity, society, relationships, creative nonfiction, personal essays, philosophy, lived experience" />
+    <meta name="author" content="Jake" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://inkandwitness.com/" />
+
+    <!-- Open Graph / Facebook / LinkedIn Metadata -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Ink &amp; Witness Narratives" />
+    <meta property="og:title" content="Ink &amp; Witness Narratives | Essays, Erotica, Love &amp; Life's Contradictions" />
+    <meta property="og:description" content="Ink &amp; Witness Narratives is a collection of poetry, erotica, romance, personal reflections, and powerful stories exploring love, desire, life, and the human experience. Discover words that linger." />
+    <meta property="og:url" content="https://inkandwitness.com/" />
+    <meta property="og:image" content="/uploads/author_cover-1786702522341-772b89830648.jpg" />
+
+    <!-- Twitter / X Card Metadata -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@its_bigboy_jake" />
+    <meta name="twitter:creator" content="@its_bigboy_jake" />
+    <meta name="twitter:title" content="Ink &amp; Witness Narratives | Essays, Erotica, Love &amp; Life's Contradictions" />
+    <meta name="twitter:description" content="Ink &amp; Witness Narratives is a collection of poetry, erotica, romance, personal reflections, and powerful stories exploring love, desire, life, and the human experience. Discover words that linger." />
+    <meta name="twitter:image" content="/uploads/author_cover-1786702522341-772b89830648.jpg" />
+
+    <!-- Schema.org JSON-LD Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://inkandwitness.com/#website",
+          "url": "https://inkandwitness.com/",
+          "name": "Ink & Witness Narratives",
+          "headline": "Ink & Witness Narratives | Essays, Erotica, Love & Life's Contradictions",
+          "description": "Ink & Witness Narratives is a collection of poetry, erotica, romance, personal reflections, and powerful stories exploring love, desire, life, and the human experience. Discover words that linger.",
+          "inLanguage": "en-US",
+          "author": {
+            "@type": "Person",
+            "@id": "https://inkandwitness.com/#author",
+            "name": "Jake",
+            "jobTitle": "Author & Essayist",
+            "sameAs": [
+              "https://www.instagram.com/its_bigboy_jake/"
+            ]
+          }
+        },
+        {
+          "@type": "Person",
+          "@id": "https://inkandwitness.com/#author",
+          "name": "Jake",
+          "jobTitle": "Author & Essayist",
+          "url": "https://www.instagram.com/its_bigboy_jake/",
+          "description": "Author and essayist examining life's contradictions, love essays, erotica stories, intimacy and lust, exploring identity, society, relationships, and lived experiences."
+        }
+      ]
+    }
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;800&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-[#0b101b] text-slate-100 antialiased selection:bg-sky-500/20 selection:text-sky-200">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

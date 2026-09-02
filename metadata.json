@@ -1,0 +1,6 @@
+{
+  "name": "Ink & Witness",
+  "description": "Ink & Witness Narratives is a collection of poetry, erotica, romance, personal reflections, and powerful stories exploring love, desire, life, and the human experience. Discover words that linger.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
