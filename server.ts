@@ -26,8 +26,18 @@ import {
 
 dotenv.config();
 
-// Initialize persistent data store
-store.init().catch(err => console.error("Store init error:", err));
+// Initialize the persistent store once per runtime instance.
+let storeInitPromise: Promise<void> | null = null;
+function ensureStoreInitialized(): Promise<void> {
+  if (!storeInitPromise) {
+    storeInitPromise = store.init().catch(err => {
+      storeInitPromise = null;
+      console.error("Store init error:", err);
+      throw err;
+    });
+  }
+  return storeInitPromise;
+}
 
 const SESSION_COOKIE_NAME = 'iw_session';
 const isProduction = process.env.NODE_ENV === 'production';
@@ -199,9 +209,9 @@ function generateToken(): string {
   return "ink_" + crypto.randomBytes(16).toString('hex');
 }
 
-async function startServer() {
+export async function createApp() {
+  await ensureStoreInitialized();
   const app = express();
-  const PORT = 3000;
 
   // Trust Cloud Run / reverse proxy for accurate client IP resolution & rate limiting
   app.set("trust proxy", 1);
@@ -3120,27 +3130,12 @@ ${sitemapEntries.join("\n")}
   // ==========================================
   // VITE OR STATIC ASSETS
   // ==========================================
-  const server = http.createServer(app);
-
-  if (process.env.NODE_ENV !== "production") {
-    const isHmrDisabled = process.env.DISABLE_HMR === "true";
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
-      server: { 
-        middlewareMode: true,
-        hmr: isHmrDisabled ? false : { server }
-      },
+      server: { middlewareMode: true, hmr: false },
       appType: "spa",
     });
     app.use(vite.middlewares);
-
-    // If HMR is disabled in dev/sandbox, gracefully close stray WebSocket upgrade requests
-    if (isHmrDisabled) {
-      server.on('upgrade', (req, socket) => {
-        if (req.url?.includes('vite-hmr') || req.headers['sec-websocket-protocol'] === 'vite-hmr') {
-          socket.end('HTTP/1.1 200 OK\r\n\r\n');
-        }
-      });
-    }
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
@@ -3149,12 +3144,18 @@ ${sitemapEntries.join("\n")}
     });
   }
 
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Ink & Witness] Server running on http://0.0.0.0:${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+// Local/AI Studio runtime. On Vercel the Express app is imported by api/[...path].
+if (!process.env.VERCEL) {
+  createApp().then((app) => {
+    const PORT = Number(process.env.PORT) || 3000;
+    http.createServer(app).listen(PORT, "0.0.0.0", () => {
+      console.log(`[Ink & Witness] Server running on http://0.0.0.0:${PORT}`);
+    });
+  }).catch((err) => {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  });
+}
