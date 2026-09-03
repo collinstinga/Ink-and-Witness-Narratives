@@ -377,7 +377,7 @@ export const store = {
       );
     const useStartupRead = async <T>(pending: Promise<StartupRead<T>>): Promise<T> => {
       const result = await pending;
-      if (!result.ok) throw result.error;
+      if (result.ok === false) throw result.error;
       return result.value;
     };
 
