@@ -81,6 +81,58 @@ function clearAffiliateSessionCookie(res: Response) {
   });
 }
 
+// Cookie-authenticated state changes must come from this same site. Combined
+// with SameSite cookies, this blocks cross-site request forgery without
+// exposing an anti-CSRF secret to browser storage.
+function requireSameOriginForCookieAuth(req: Request, res: Response, next: NextFunction) {
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return next();
+  }
+
+  const cookies = (req as any).cookies;
+  const hasCookieSession = Boolean(
+    cookies?.[SESSION_COOKIE_NAME] || cookies?.[AFFILIATE_SESSION_COOKIE_NAME]
+  );
+  if (!hasCookieSession) {
+    return next();
+  }
+
+  const origin = req.get('origin');
+  const forwardedHost = req.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const requestHost = forwardedHost || req.get('host');
+  const forwardedProtocol = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const requestProtocol = forwardedProtocol || req.protocol;
+  const fetchSite = req.get('sec-fetch-site');
+
+  let isSameOrigin = false;
+  try {
+    const originUrl = origin ? new URL(origin) : null;
+    isSameOrigin = Boolean(
+      originUrl &&
+      requestHost &&
+      originUrl.host.toLowerCase() === requestHost.toLowerCase() &&
+      originUrl.protocol === `${requestProtocol}:`
+    );
+  } catch {
+    isSameOrigin = false;
+  }
+
+  const isCrossSiteFetch = Boolean(
+    fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'same-site' && fetchSite !== 'none'
+  );
+
+  if (!isSameOrigin || isCrossSiteFetch) {
+    return res.status(403).json({
+      success: false,
+      error: 'This request was blocked because it did not originate from this site.',
+      code: 'ORIGIN_CHECK_FAILED'
+    });
+  }
+
+  return next();
+}
+
 // Session resolution middleware
 async function loadSessionUser(req: Request, res: Response, next: NextFunction) {
   try {
@@ -231,6 +283,7 @@ export async function createApp() {
   }));
 
   app.use(cookieParser());
+  app.use(requireSameOriginForCookieAuth);
   app.use(express.json({ limit: '20mb' }));
   app.use(express.urlencoded({ extended: true, limit: '20mb' }));
   app.use(loadSessionUser);
