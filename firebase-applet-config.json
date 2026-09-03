@@ -1,12 +1,14 @@
 {
-  "projectId": "divine-experience-pq6d2",
-  "appId": "1:664951845831:web:5afb2e262a1acebf14dfe2",
-  "apiKey": "AIzaSyBBWIVF6QY-qebIoAUh9XNgj6mBOSiwW_w",
-  "authDomain": "divine-experience-pq6d2.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-inkwitness-dec98f98-7fd5-48e7-b78f-2afc3b37afef",
-  "storageBucket": "divine-experience-pq6d2.firebasestorage.app",
-  "messagingSenderId": "664951845831",
+  "projectId": "ink-and-witness-narratives",
+  "appId": "1:97993243511:web:607ed5ac533f9536b63f72",
+  "apiKey": "AIzaSyD8--q1oc1u3KyHUFBbn7RaYzYmMB4DA9g",
+  "authDomain": "ink-and-witness-narratives.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "ink-and-witness-narratives.firebasestorage.app",
+  "messagingSenderId": "97993243511",
   "measurementId": "",
   "oAuthClientId": "664951845831-v9cdhlt09g4ehqika6glif47h3hegiia.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "recaptchaSiteKey": "",
+  "projectNumber": "97993243511",
+  "version": "2"
 }
