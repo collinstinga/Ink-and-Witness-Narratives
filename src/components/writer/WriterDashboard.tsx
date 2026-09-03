@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   LayoutDashboard, 
   FileText, 
@@ -122,6 +122,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
   const [editingPiece, setEditingPiece] = useState<Article | null>(null);
 
   const [loading, setLoading] = useState<boolean>(false);
+  const loadedSections = useRef<Set<string>>(new Set());
 
   // Verify auth session on mount
   useEffect(() => {
@@ -170,7 +171,31 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
     verify();
   }, [currentUser]);
 
-  // Fetch all dashboard data when authenticated
+  // Fetch the minimum needed to render the overview. Large, section-specific
+  // datasets are loaded only when the writer opens the corresponding section.
+  const loadOverviewData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    setLoading(true);
+    const startedAt = Date.now();
+    try {
+      const [statsData, piecesData] = await Promise.all([
+        api.getDashboardStats().catch(() => null),
+        api.getAdminArticles().catch(() => [])
+      ]);
+
+      if (statsData) setStats(statsData);
+      setPieces(piecesData);
+      loadedSections.current.add('overview');
+      console.info(`[Writer Studio] Overview ready in ${Date.now() - startedAt}ms`);
+    } catch (err) {
+      console.error('Failed to load writer overview', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [isAuthenticated]);
+
+  // Full refresh remains available after explicit save/edit actions, where all
+  // related views need to reflect the newly persisted state.
   const loadDashboardData = useCallback(async () => {
     if (!isAuthenticated) return;
     setLoading(true);
@@ -201,9 +226,49 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
   useEffect(() => {
     if (isAuthenticated) {
-      loadDashboardData();
+      loadOverviewData();
     }
-  }, [isAuthenticated, loadDashboardData]);
+  }, [isAuthenticated, loadOverviewData]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const loadSectionData = async () => {
+      if (currentTab === 'payments' && !loadedSections.current.has('payments')) {
+        const data = await api.getAdminTransactions().catch(() => ({ totalRevenueKes: 0, count: 0, transactions: [] }));
+        setTransactions(data.transactions || []);
+        loadedSections.current.add('payments');
+      } else if (currentTab === 'tips' && !loadedSections.current.has('tips')) {
+        const data = await api.getAdminTips().catch(() => ({ totalTipsKes: 0, count: 0, verifiedCount: 0, tips: [] }));
+        setTips(data.tips || []);
+        loadedSections.current.add('tips');
+      } else if (currentTab === 'media' && !loadedSections.current.has('author')) {
+        const data = await api.getAuthor().catch(() => null);
+        if (data) setAuthor(data);
+        loadedSections.current.add('author');
+      } else if (currentTab === 'settings' && !loadedSections.current.has('settings')) {
+        const [authorData, mpesaData] = await Promise.all([
+          api.getAuthor().catch(() => null),
+          api.getMpesaConfig().catch(() => null)
+        ]);
+        if (authorData) setAuthor(authorData);
+        if (mpesaData) setMpesaConfig(mpesaData);
+        loadedSections.current.add('author');
+        loadedSections.current.add('settings');
+      }
+    };
+
+    void loadSectionData();
+  }, [currentTab, isAuthenticated]);
+
+  const openCategoryManager = async () => {
+    setIsCategoryModalOpen(true);
+    setMobileNavOpen(false);
+    if (loadedSections.current.has('categories')) return;
+    const data = await api.getCategories().catch(() => []);
+    setCategories(data || []);
+    loadedSections.current.add('categories');
+  };
 
   // Handlers
   const handleLoginSuccess = (token: string, user?: any) => {
@@ -567,7 +632,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
           {/* Custom Categories Manager */}
           <button
             id="nav-tab-categories"
-            onClick={() => { setIsCategoryModalOpen(true); setMobileNavOpen(false); }}
+            onClick={() => { void openCategoryManager(); }}
             className="w-full px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-2.5">
@@ -896,3 +961,4 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
     </div>
   );
 };
+
