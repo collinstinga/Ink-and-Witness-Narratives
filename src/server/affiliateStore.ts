@@ -55,6 +55,7 @@ let cachedAuditLogs: AffiliateAuditLogEntry[] = [];
 let cachedSessions: Map<string, { affiliateId: string; createdAt: number; expiresAt: number }> = new Map();
 
 function writeJsonFileSync(filePath: string, data: any) {
+  if (process.env.VERCEL) return;
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -108,7 +109,7 @@ export function verifyAffiliatePassword(password: string, hash: string): boolean
 
 export const affiliateStore = {
   async init() {
-    if (!fs.existsSync(DATA_DIR)) {
+    if (!process.env.VERCEL && !fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
 
@@ -1142,3 +1143,4 @@ export const affiliateStore = {
     writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
   }
 };
+

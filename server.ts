@@ -291,7 +291,46 @@ export async function createApp() {
     message: { error: "Polling rate limit exceeded. Please wait a moment." }
   });
 
-  // Static serving for uploaded branding and piece images
+  // Prevent every page view from re-running the same Firestore-heavy public
+  // reads. Authenticated and token-bearing requests are never shared-cached.
+  const cacheablePublicPaths = new Set([
+    '/api/health', '/api/author', '/api/articles', '/api/categories',
+    '/api/topics', '/api/homepage'
+  ]);
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const hasCredentials = Boolean(
+      req.headers.authorization || req.headers.cookie ||
+      req.headers['x-session-token'] || req.headers['x-access-token']
+    );
+    if (req.method === 'GET' && cacheablePublicPaths.has(req.path) && !hasCredentials) {
+      res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+    }
+    next();
+  });
+
+  const servePersistentAsset = async (req: Request, res: Response) => {
+    try {
+      const rawId = req.params.assetId || req.params.filename;
+      const assetId = rawId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const asset = await store.getUploadedAsset(assetId);
+      if (!asset?.dataUrl) return res.status(404).json({ error: 'Image not found.' });
+
+      const match = asset.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) return res.status(500).json({ error: 'Stored image is invalid.' });
+      const image = Buffer.from(match[2], 'base64');
+      res.setHeader('Content-Type', asset.mimeType || match[1] || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.send(image);
+    } catch (err) {
+      console.error('[Assets] Failed to serve persistent image:', err);
+      return res.status(503).json({ error: 'Image storage is temporarily unavailable.' });
+    }
+  };
+
+  app.get('/api/assets/:assetId', servePersistentAsset);
+  // Backward-compatible path for image URLs saved before cloud serving.
+  app.get('/uploads/:filename', servePersistentAsset);
+  // Local-development fallback for files not yet migrated into Firestore.
   app.use('/uploads', express.static(path.join(process.cwd(), 'data', 'uploads')));
 
   // ==========================================
@@ -1966,7 +2005,7 @@ export async function createApp() {
       }
 
       const filePrefix = prefix || (target ? target.replace(/[^a-zA-Z0-9_-]/g, '_') : 'img');
-      const saved = store.saveUploadedImage(dataUrl, filePrefix);
+      const saved = await store.saveUploadedImage(dataUrl, filePrefix);
 
       let updatedRecord: any = null;
 
@@ -3160,3 +3199,4 @@ if (!process.env.VERCEL) {
     process.exit(1);
   });
 }
+

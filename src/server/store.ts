@@ -367,10 +367,13 @@ export const store = {
     // Check if the store has already been initialized previously
     const alreadyInitialized = fs.existsSync(INITIALIZED_FILE) || fs.existsSync(ARTICLES_FILE);
 
-    // 0. Load Users from persistent Firestore / JSON file
+    // 0. Load Users from persistent Firestore / JSON file. Never provision an
+    // admin after a failed cloud read: an outage must not look like an empty DB.
     cachedUsers.clear();
+    let usersLoaded = false;
     try {
       const fsUsers = await getAllFirestoreDocs<UserRecord>('users');
+      usersLoaded = true;
       if (fsUsers && fsUsers.length > 0) {
         for (const user of fsUsers) {
           cachedUsers.set(user.id, user);
@@ -391,10 +394,14 @@ export const store = {
     }
 
     // Provision admin user securely from environment secrets if needed
-    try {
-      await this.initAdminUser();
-    } catch (err) {
-      console.warn('[Data Store] Error initializing admin user:', err);
+    if (usersLoaded) {
+      try {
+        await this.initAdminUser();
+      } catch (err) {
+        console.warn('[Data Store] Error initializing admin user:', err);
+      }
+    } else {
+      console.warn('[Auth Security] Skipping admin provisioning because the users collection could not be read.');
     }
 
     // 0b. Load Auth Sessions from persistent Firestore / JSON file
@@ -576,8 +583,9 @@ export const store = {
       cachedAuthor = { ...JAKE_PROFILE };
     }
 
-    // 4b. Load & Restore Permanent Uploaded Assets from Firestore to Local Disk
-    try {
+    // 4b. Restore assets only on writable, long-lived local development hosts.
+    // Vercel serves them directly from Firestore via /api/assets/:assetId.
+    if (!process.env.VERCEL) try {
       const fsAssets = await getAllFirestoreDocs<any>('uploaded_assets');
       if (fsAssets && fsAssets.length > 0) {
         ensureDataDir();
@@ -1848,7 +1856,11 @@ export const store = {
   },
 
   // IMAGE UPLOADS & BRANDING PERSISTENCE
-  saveUploadedImage(base64DataUrl: string, prefix: string = 'img'): { success: boolean; url: string; filename: string } {
+  async getUploadedAsset(assetId: string): Promise<any | null> {
+    return getFirestoreDoc<any>('uploaded_assets', assetId);
+  },
+
+  async saveUploadedImage(base64DataUrl: string, prefix: string = 'img'): Promise<{ success: boolean; url: string; filename: string }> {
     ensureDataDir();
 
     // Match data URI scheme: data:image/png;base64,.....
@@ -1870,25 +1882,21 @@ export const store = {
 
     const buffer = Buffer.from(base64Data, 'base64');
     
-    // Check max file size: 15MB
-    if (buffer.length > 15 * 1024 * 1024) {
-      throw new Error('Image file is too large. Maximum size is 15MB.');
+    // Firestore documents have a 1 MiB hard limit. Keep headroom for metadata.
+    if (buffer.length > 700 * 1024) {
+      throw new Error('Image is too large for persistent storage. Please compress it below 700 KB and try again.');
     }
 
     const randomStr = crypto.randomBytes(6).toString('hex');
     const filename = `${prefix}-${Date.now()}-${randomStr}.${ext}`;
-    const filePath = path.join(UPLOADS_DIR, filename);
-
-    fs.writeFileSync(filePath, buffer);
-    const publicUrl = `/uploads/${filename}`;
-
     // Store in Firestore uploaded_assets collection for permanent cloud persistence
     const assetId = filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const publicUrl = `/api/assets/${assetId}`;
     const assetRecord = {
       id: assetId,
       filename,
       url: publicUrl,
-      dataUrl: base64Data.length < 950000 ? `data:${mimeType};base64,${base64Data}` : undefined,
+      dataUrl: `data:${mimeType};base64,${base64Data}`,
       mimeType,
       size: buffer.length,
       prefix,
@@ -1896,9 +1904,12 @@ export const store = {
       savedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-    setFirestoreDoc('uploaded_assets', assetId, assetRecord).catch(err => {
-      console.warn('[Store] Could not write asset doc to Firestore:', err);
-    });
+    await setFirestoreDoc('uploaded_assets', assetId, assetRecord);
+
+    if (!process.env.VERCEL) {
+      ensureDataDir();
+      fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
+    }
 
     return {
       success: true,
@@ -1921,10 +1932,10 @@ export const store = {
 
     // If a base64 dataUrl is provided or imageUrl is base64, save physical file and Firestore doc
     if (params.dataUrl && params.dataUrl.startsWith('data:image')) {
-      const uploaded = this.saveUploadedImage(params.dataUrl, params.target.replace(/[^a-zA-Z0-9]/g, '_'));
+      const uploaded = await this.saveUploadedImage(params.dataUrl, params.target.replace(/[^a-zA-Z0-9]/g, '_'));
       finalUrl = uploaded.url;
     } else if (params.imageUrl && params.imageUrl.startsWith('data:image')) {
-      const uploaded = this.saveUploadedImage(params.imageUrl, params.target.replace(/[^a-zA-Z0-9]/g, '_'));
+      const uploaded = await this.saveUploadedImage(params.imageUrl, params.target.replace(/[^a-zA-Z0-9]/g, '_'));
       finalUrl = uploaded.url;
     }
 
@@ -4120,3 +4131,4 @@ export const store = {
   // AFFILIATE SUBSYSTEM
   affiliates: affiliateStore
 };
+

@@ -76,6 +76,7 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
     await setDoc(docRef, sanitizeForFirestore(data), { merge: true });
   } catch (err) {
     console.error(`[Firestore] Error writing ${collectionName}/${docId}:`, err);
+    throw err;
   }
 }
 
@@ -90,7 +91,7 @@ export async function getFirestoreDoc<T = any>(collectionName: string, docId: st
     return null;
   } catch (err) {
     console.error(`[Firestore] Error reading ${collectionName}/${docId}:`, err);
-    return null;
+    throw err;
   }
 }
 
@@ -101,6 +102,7 @@ export async function deleteFirestoreDoc(collectionName: string, docId: string):
     await deleteDoc(docRef);
   } catch (err) {
     console.error(`[Firestore] Error deleting ${collectionName}/${docId}:`, err);
+    throw err;
   }
 }
 
@@ -112,7 +114,7 @@ export async function getAllFirestoreDocs<T = any>(collectionName: string): Prom
     return snap.docs.map(d => d.data() as T);
   } catch (err) {
     console.error(`[Firestore] Error fetching all docs from ${collectionName}:`, err);
-    return [];
+    throw err;
   }
 }
 
@@ -135,3 +137,4 @@ export function sanitizeForFirestore(obj: any): any {
   }
   return obj;
 }
+
