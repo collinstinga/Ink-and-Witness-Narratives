@@ -31,12 +31,7 @@ export const WriterLogin: React.FC<WriterLoginProps> = ({ onSuccess, onCancel })
           setError('Access restricted to administrators. Client accounts cannot access the Writer Studio.');
           return;
         }
-        const sessionToken = (res as any).token || (res as any).sessionId || res.user.sessionId;
-        if (!sessionToken) {
-          setError('Secure session was not created. Please sign in again.');
-          return;
-        }
-        onSuccess(sessionToken);
+        onSuccess('cookie-session');
       } else {
         setError(res.error || 'Invalid credentials. Access denied.');
       }

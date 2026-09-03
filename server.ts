@@ -39,6 +39,7 @@ function ensureStoreInitialized(): Promise<void> {
 }
 
 const SESSION_COOKIE_NAME = 'iw_session';
+const AFFILIATE_SESSION_COOKIE_NAME = 'iw_affiliate_session';
 const isProduction = process.env.NODE_ENV === 'production';
 
 // Cookie helpers
@@ -54,6 +55,25 @@ function setSessionCookie(res: Response, sessionId: string, maxAgeMs: number = 7
 
 function clearSessionCookie(res: Response) {
   res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/'
+  });
+}
+
+function setAffiliateSessionCookie(res: Response, sessionId: string, maxAgeMs: number = 7 * 24 * 60 * 60 * 1000) {
+  res.cookie(AFFILIATE_SESSION_COOKIE_NAME, sessionId, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: maxAgeMs,
+    path: '/'
+  });
+}
+
+function clearAffiliateSessionCookie(res: Response) {
+  res.clearCookie(AFFILIATE_SESSION_COOKIE_NAME, {
     httpOnly: true,
     secure: isProduction,
     sameSite: 'lax',
@@ -141,8 +161,9 @@ function requireAffiliateAuth(req: Request, res: Response, next: NextFunction) {
   res.setHeader('Content-Type', 'application/json');
   const authHeader = req.headers.authorization;
   const affTokenHeader = req.headers['x-affiliate-token'] as string;
+  const cookieToken = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
   
-  let token = affTokenHeader;
+  let token = cookieToken || affTokenHeader;
   if (!token && authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7);
   }
@@ -1109,15 +1130,12 @@ export async function createApp() {
 
       return res.json({
         success: true,
-        token: sessionId,
-        sessionId: sessionId,
         message: `Welcome back, ${user.name || user.email}!`,
         user: {
           id: user.id,
           email: user.email,
           name: user.name,
-          role: user.role,
-          sessionId: sessionId
+          role: user.role
         }
       });
     } catch (err: any) {
@@ -2442,11 +2460,11 @@ ${currentDraft || prompt}
       }, 'Self-Registered');
 
       const token = store.affiliates.createAffiliateSession(newAffiliate.id);
+      setAffiliateSessionCookie(res, token);
       const dashboard = store.affiliates.getAffiliateDashboard(newAffiliate.id);
 
       res.json({
         success: true,
-        token,
         affiliate: dashboard?.affiliate,
         message: "Affiliate account created successfully! Welcome to the Ink & Witness affiliate team."
       });
@@ -2510,11 +2528,11 @@ ${currentDraft || prompt}
       aff = store.affiliates.updateAffiliate(aff.id, { lastLoginAt: new Date().toISOString() }, 'System');
 
       const token = store.affiliates.createAffiliateSession(aff.id);
+      setAffiliateSessionCookie(res, token);
       const dashboard = store.affiliates.getAffiliateDashboard(aff.id);
 
       res.json({
         success: true,
-        token,
         affiliate: dashboard?.affiliate,
         message: `Welcome back, ${aff.name}!`
       });
@@ -2526,10 +2544,13 @@ ${currentDraft || prompt}
 
   // Affiliate: Logout
   app.post("/api/affiliate/logout", (req: Request, res: Response) => {
-    const token = (req.headers['x-affiliate-token'] || req.headers.authorization?.replace('Bearer ', '')) as string;
+    const token = ((req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] ||
+      req.headers['x-affiliate-token'] ||
+      req.headers.authorization?.replace('Bearer ', '')) as string;
     if (token) {
       store.affiliates.invalidateAffiliateSession(token);
     }
+    clearAffiliateSessionCookie(res);
     res.json({ success: true, message: "Logged out successfully." });
   });
 

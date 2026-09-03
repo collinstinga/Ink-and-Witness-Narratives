@@ -25,8 +25,10 @@ import { getActiveReferral } from './affiliateReferral.js';
 
 // Local storage key for purchased tokens
 const TOKENS_STORAGE_KEY = 'ink_witness_tokens';
-const ADMIN_SESSION_KEY = 'ink_writer_session_token';
-const AFFILIATE_SESSION_KEY = 'ink_affiliate_session_token';
+const ADMIN_SESSION_MARKER_KEY = 'ink_writer_session_active';
+const AFFILIATE_SESSION_MARKER_KEY = 'ink_affiliate_session_active';
+const LEGACY_ADMIN_SESSION_KEYS = ['ink_writer_session_token', 'ink_admin_token'];
+const LEGACY_AFFILIATE_SESSION_KEY = 'ink_affiliate_session_token';
 const READER_ID_KEY = 'ink_reader_anon_id';
 
 export function getAnonymousReaderId(): string {
@@ -86,60 +88,59 @@ export function clearStoredTokens() {
 
 export function getWriterToken(): string | null {
   try {
-    return localStorage.getItem(ADMIN_SESSION_KEY) || null;
+    LEGACY_ADMIN_SESSION_KEYS.forEach(key => localStorage.removeItem(key));
+    return localStorage.getItem(ADMIN_SESSION_MARKER_KEY) === '1' ? 'cookie-session' : null;
   } catch {
     return null;
   }
 }
 
-export function setWriterToken(token: string) {
+export function setWriterToken(_token: string) {
   try {
-    localStorage.setItem(ADMIN_SESSION_KEY, token);
+    LEGACY_ADMIN_SESSION_KEYS.forEach(key => localStorage.removeItem(key));
+    localStorage.setItem(ADMIN_SESSION_MARKER_KEY, '1');
   } catch (err) {
-    console.error("Failed to save writer token", err);
+    console.error("Failed to save writer session state", err);
   }
 }
 
 export function clearWriterToken() {
   try {
-    localStorage.removeItem(ADMIN_SESSION_KEY);
-    localStorage.removeItem('ink_admin_token');
+    localStorage.removeItem(ADMIN_SESSION_MARKER_KEY);
+    LEGACY_ADMIN_SESSION_KEYS.forEach(key => localStorage.removeItem(key));
   } catch (err) {
-    console.error("Failed to clear writer token", err);
+    console.error("Failed to clear writer session state", err);
   }
 }
 
 export function getAdminHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
-  const activeToken = getWriterToken();
-  const headers: Record<string, string> = { ...customHeaders };
-  if (activeToken) {
-    headers['x-admin-token'] = activeToken;
-    headers['Authorization'] = `Bearer ${activeToken}`;
-  }
-  return headers;
+  return { ...customHeaders };
 }
 
 export function getAffiliateToken(): string | null {
   try {
-    return localStorage.getItem(AFFILIATE_SESSION_KEY) || null;
+    localStorage.removeItem(LEGACY_AFFILIATE_SESSION_KEY);
+    return localStorage.getItem(AFFILIATE_SESSION_MARKER_KEY) === '1' ? 'cookie-session' : null;
   } catch {
     return null;
   }
 }
 
-export function setAffiliateToken(token: string) {
+export function setAffiliateToken(_token: string) {
   try {
-    localStorage.setItem(AFFILIATE_SESSION_KEY, token);
+    localStorage.removeItem(LEGACY_AFFILIATE_SESSION_KEY);
+    localStorage.setItem(AFFILIATE_SESSION_MARKER_KEY, '1');
   } catch (err) {
-    console.error("Failed to save affiliate token", err);
+    console.error("Failed to save affiliate session state", err);
   }
 }
 
 export function clearAffiliateToken() {
   try {
-    localStorage.removeItem(AFFILIATE_SESSION_KEY);
+    localStorage.removeItem(AFFILIATE_SESSION_MARKER_KEY);
+    localStorage.removeItem(LEGACY_AFFILIATE_SESSION_KEY);
   } catch (err) {
-    console.error("Failed to clear affiliate token", err);
+    console.error("Failed to clear affiliate session state", err);
   }
 }
 
@@ -749,7 +750,7 @@ export const api = {
   },
 
   // Unified Authentication APIs (Clients & Admins)
-  async authLogin(email: string, password: string): Promise<{ success: boolean; user?: any; message?: string; error?: string; token?: string; sessionId?: string }> {
+  async authLogin(email: string, password: string): Promise<{ success: boolean; user?: any; message?: string; error?: string }> {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -760,9 +761,8 @@ export const api = {
     if (!res.ok) {
       throw new Error(data.error || 'Authentication failed.');
     }
-    const token = data.token || data.sessionId || data.user?.sessionId || (data.user?.role === 'admin' ? (data.user.id || 'admin_session') : null);
-    if (token) {
-      setWriterToken(token);
+    if (data.success && data.user?.role === 'admin') {
+      setWriterToken('cookie-session');
     }
     return data;
   },
@@ -783,18 +783,18 @@ export const api = {
 
   async authGetMe(): Promise<{ authenticated: boolean; user: any | null }> {
     try {
-      const activeToken = getWriterToken();
-      const headers: Record<string, string> = {};
-      if (activeToken) {
-        headers['x-admin-token'] = activeToken;
-        headers['Authorization'] = `Bearer ${activeToken}`;
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      if (!res.ok) {
+        clearWriterToken();
+        return { authenticated: false, user: null };
       }
-      const res = await fetch('/api/auth/me', { 
-        headers,
-        credentials: 'include' 
-      });
-      if (!res.ok) return { authenticated: false, user: null };
-      return res.json();
+      const data = await res.json();
+      if (data.authenticated && data.user?.role === 'admin') {
+        setWriterToken('cookie-session');
+      } else {
+        clearWriterToken();
+      }
+      return data;
     } catch {
       return { authenticated: false, user: null };
     }
@@ -802,15 +802,8 @@ export const api = {
 
   async authLogout(): Promise<{ success: boolean }> {
     try {
-      const activeToken = getWriterToken();
-      const headers: Record<string, string> = {};
-      if (activeToken) {
-        headers['x-admin-token'] = activeToken;
-        headers['Authorization'] = `Bearer ${activeToken}`;
-      }
-      const res = await fetch('/api/auth/logout', { 
+      const res = await fetch('/api/auth/logout', {
         method: 'POST',
-        headers,
         credentials: 'include'
       });
       clearWriterToken();
@@ -1710,8 +1703,8 @@ export const api = {
     preferredCode?: string;
     acceptedTerms: boolean;
     termsVersion?: string;
-  }): Promise<{ success: boolean; token: string; affiliate: AffiliateAccount; message: string }> {
-    const result = await safeFetchJson<{ success: boolean; token: string; affiliate: AffiliateAccount; message: string }>(
+  }): Promise<{ success: boolean; affiliate: AffiliateAccount; message: string }> {
+    const result = await safeFetchJson<{ success: boolean; affiliate: AffiliateAccount; message: string }>(
       '/api/affiliate/register',
       {
         method: 'POST',
@@ -1720,8 +1713,8 @@ export const api = {
       },
       'Failed to register affiliate account. Please check your details and try again.'
     );
-    if (result.token) {
-      setAffiliateToken(result.token);
+    if (result.success) {
+      setAffiliateToken('cookie-session');
     }
     return result;
   },
@@ -1743,8 +1736,8 @@ export const api = {
     );
   },
 
-  async affiliateLogin(data: { emailOrCode: string; password: string }): Promise<{ success: boolean; token: string; affiliate: AffiliateAccount }> {
-    const result = await safeFetchJson<{ success: boolean; token: string; affiliate: AffiliateAccount }>(
+  async affiliateLogin(data: { emailOrCode: string; password: string }): Promise<{ success: boolean; affiliate: AffiliateAccount }> {
+    const result = await safeFetchJson<{ success: boolean; affiliate: AffiliateAccount }>(
       '/api/affiliate/login',
       {
         method: 'POST',
@@ -1753,8 +1746,8 @@ export const api = {
       },
       'Invalid affiliate credentials. Please check your email or affiliate code.'
     );
-    if (result.token) {
-      setAffiliateToken(result.token);
+    if (result.success) {
+      setAffiliateToken('cookie-session');
     }
     return result;
   },
