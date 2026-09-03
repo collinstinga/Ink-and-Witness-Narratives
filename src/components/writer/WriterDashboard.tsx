@@ -132,9 +132,9 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
         const me = await api.authGetMe();
         if (me.authenticated && me.user && me.user.role === 'admin') {
           setIsAuthenticated(true);
-          const activeTok = token || me.user.sessionId || me.user.id || 'admin_session';
+          const activeTok = token || me.user.sessionId || null;
           setAuthToken(activeTok);
-          if (!token) setWriterToken(activeTok);
+          if (!token && me.user.sessionId) setWriterToken(me.user.sessionId);
           if (onLoginSuccess && me.user) onLoginSuccess(me.user);
           return;
         }
