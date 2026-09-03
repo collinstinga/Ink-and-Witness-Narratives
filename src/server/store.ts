@@ -363,6 +363,48 @@ function generateSeedEvents(): InteractionEvent[] {
 export const store = {
   async init() {
     ensureDataDir();
+    const startupStartedAt = Date.now();
+
+    // Begin independent Firestore reads together. Each result remains wrapped so
+    // the existing per-section error handling and local fallbacks stay intact.
+    type StartupRead<T> =
+      | { ok: true; value: T }
+      | { ok: false; error: unknown };
+    const captureStartupRead = <T>(promise: Promise<T>): Promise<StartupRead<T>> =>
+      promise.then(
+        value => ({ ok: true, value }),
+        error => ({ ok: false, error })
+      );
+    const useStartupRead = async <T>(pending: Promise<StartupRead<T>>): Promise<T> => {
+      const result = await pending;
+      if (!result.ok) throw result.error;
+      return result.value;
+    };
+
+    const startupReads = {
+      users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
+      sessions: captureStartupRead(getAllFirestoreDocs<AuthSession>('sessions')),
+      articles: captureStartupRead(getAllFirestoreDocs<Article>('articles')),
+      transactions: captureStartupRead(getAllFirestoreDocs<PaymentTransaction>('transactions')),
+      licenses: captureStartupRead(getAllFirestoreDocs<any>('reader_licenses')),
+      manualAccess: captureStartupRead(getAllFirestoreDocs<ManualAccessGrant>('manual_access')),
+      author: captureStartupRead((async () =>
+        (await getFirestoreDoc<AuthorProfile>('site_configs', 'author')) ||
+        (await getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'))
+      )()),
+      settings: captureStartupRead((async () =>
+        (await getFirestoreDoc<MpesaConfig>('site_configs', 'settings')) ||
+        (await getFirestoreDoc<MpesaConfig>('site_configs', 'mpesa_settings'))
+      )()),
+      homepage: captureStartupRead((async () =>
+        (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage')) ||
+        (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage_config'))
+      )()),
+      categories: captureStartupRead(getAllFirestoreDocs<Category>('categories')),
+      topics: captureStartupRead(getAllFirestoreDocs<Topic>('topics')),
+      likes: captureStartupRead(getAllFirestoreDocs<PieceLike>('likes')),
+      comments: captureStartupRead(getAllFirestoreDocs<PieceComment>('comments'))
+    };
 
     // Check if the store has already been initialized previously
     const alreadyInitialized = fs.existsSync(INITIALIZED_FILE) || fs.existsSync(ARTICLES_FILE);
@@ -372,7 +414,7 @@ export const store = {
     cachedUsers.clear();
     let usersLoaded = false;
     try {
-      const fsUsers = await getAllFirestoreDocs<UserRecord>('users');
+      const fsUsers = await useStartupRead(startupReads.users);
       usersLoaded = true;
       if (fsUsers && fsUsers.length > 0) {
         for (const user of fsUsers) {
@@ -407,7 +449,7 @@ export const store = {
     // 0b. Load Auth Sessions from persistent Firestore / JSON file
     cachedAuthSessions.clear();
     try {
-      const fsSessions = await getAllFirestoreDocs<AuthSession>('sessions');
+      const fsSessions = await useStartupRead(startupReads.sessions);
       const now = Date.now();
       if (fsSessions && fsSessions.length > 0) {
         for (const sess of fsSessions) {
@@ -435,7 +477,7 @@ export const store = {
 
     // 1. Load Articles from persistent Firestore / JSON file
     try {
-      const fsArticles = await getAllFirestoreDocs<Article>('articles');
+      const fsArticles = await useStartupRead(startupReads.articles);
       if (fsArticles && fsArticles.length > 0) {
         cachedArticles = fsArticles;
         writeJsonFileSync(ARTICLES_FILE, cachedArticles);
@@ -465,7 +507,7 @@ export const store = {
     // 2. Load Transactions from persistent Firestore / JSON file
     cachedTransactions.clear();
     try {
-      const fsTransactions = await getAllFirestoreDocs<PaymentTransaction>('transactions');
+      const fsTransactions = await useStartupRead(startupReads.transactions);
       if (fsTransactions && fsTransactions.length > 0) {
         for (const tx of fsTransactions) {
           if (!(tx as any).isSeed && !tx.id?.startsWith('tx_seed_')) {
@@ -491,7 +533,7 @@ export const store = {
 
     // 3. Load or Seed Reader Tokens / Licenses
     try {
-      const fsLicenses = await getAllFirestoreDocs<any>('reader_licenses');
+      const fsLicenses = await useStartupRead(startupReads.licenses);
       if (fsLicenses && fsLicenses.length > 0) {
         cachedTokens.clear();
         for (const lic of fsLicenses) {
@@ -535,7 +577,7 @@ export const store = {
 
     // 3c. Load Manual Access Grants from Firestore / JSON
     try {
-      const fsGrants = await getAllFirestoreDocs<ManualAccessGrant>('manual_access');
+      const fsGrants = await useStartupRead(startupReads.manualAccess);
       if (fsGrants && fsGrants.length > 0) {
         cachedManualAccess.clear();
         for (const grant of fsGrants) {
@@ -563,8 +605,7 @@ export const store = {
 
     // 4. Load Author Profile from Firestore / JSON
     try {
-      const fsAuthor = (await getFirestoreDoc<AuthorProfile>('site_configs', 'author')) || 
-                       (await getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'));
+      const fsAuthor = await useStartupRead(startupReads.author);
       if (fsAuthor) {
         cachedAuthor = { ...JAKE_PROFILE, ...fsAuthor };
         writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
@@ -613,8 +654,7 @@ export const store = {
 
     // 5. Load Settings from Firestore / JSON
     try {
-      const fsSettings = (await getFirestoreDoc<MpesaConfig>('site_configs', 'settings')) ||
-                         (await getFirestoreDoc<MpesaConfig>('site_configs', 'mpesa_settings'));
+      const fsSettings = await useStartupRead(startupReads.settings);
       if (fsSettings) {
         cachedMpesaSettings = { ...cachedMpesaSettings, ...fsSettings };
         writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
@@ -649,8 +689,7 @@ export const store = {
 
     // 7. Load Homepage Config from Firestore / JSON
     try {
-      const fsHomepage = (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage')) ||
-                         (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage_config'));
+      const fsHomepage = await useStartupRead(startupReads.homepage);
       if (fsHomepage) {
         cachedHomepageConfig = { ...cachedHomepageConfig, ...fsHomepage };
         writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
@@ -671,7 +710,7 @@ export const store = {
 
     // 8. Load Categories from Firestore / JSON
     try {
-      const fsCategories = await getAllFirestoreDocs<Category>('categories');
+      const fsCategories = await useStartupRead(startupReads.categories);
       if (fsCategories && fsCategories.length > 0) {
         cachedCategories = fsCategories;
         writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
@@ -689,7 +728,7 @@ export const store = {
 
     // 8b. Load Topics from Firestore / JSON
     try {
-      const fsTopics = await getAllFirestoreDocs<Topic>('topics');
+      const fsTopics = await useStartupRead(startupReads.topics);
       if (fsTopics && fsTopics.length > 0) {
         cachedTopics = fsTopics;
         writeJsonFileSync(TOPICS_FILE, cachedTopics);
@@ -727,7 +766,7 @@ export const store = {
 
     // 10. Load Likes from Firestore / JSON
     try {
-      const fsLikes = await getAllFirestoreDocs<PieceLike>('likes');
+      const fsLikes = await useStartupRead(startupReads.likes);
       if (fsLikes && fsLikes.length > 0) {
         cachedLikes = fsLikes;
         writeJsonFileSync(LIKES_FILE, cachedLikes);
@@ -745,7 +784,7 @@ export const store = {
 
     // 11. Load Comments from Firestore / JSON
     try {
-      const fsComments = await getAllFirestoreDocs<PieceComment>('comments');
+      const fsComments = await useStartupRead(startupReads.comments);
       if (fsComments && fsComments.length > 0) {
         cachedComments = fsComments;
         writeJsonFileSync(COMMENTS_FILE, cachedComments);
@@ -795,7 +834,7 @@ export const store = {
       console.warn('[Data Store] Error initializing Affiliate store:', e);
     }
 
-    console.log(`[Data Store] Persistent Store Ready: ${cachedArticles.length} pieces (${cachedArticles.filter(a => a.status === 'published').length} published, ${cachedArticles.filter(a => a.status === 'draft').length} drafts), ${cachedCategories.length} custom categories, ${cachedTransactions.size} transactions, ${cachedLikes.length} likes, ${cachedComments.length} comments.`);
+    console.log(`[Data Store] Persistent Store Ready in ${Date.now() - startupStartedAt}ms: ${cachedArticles.length} pieces (${cachedArticles.filter(a => a.status === 'published').length} published, ${cachedArticles.filter(a => a.status === 'draft').length} drafts), ${cachedCategories.length} custom categories, ${cachedTransactions.size} transactions, ${cachedLikes.length} likes, ${cachedComments.length} comments.`);
 
     // 13. Create an automated baseline snapshot if articles exist
     if (cachedArticles.length > 0) {
