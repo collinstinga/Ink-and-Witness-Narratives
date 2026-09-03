@@ -43,8 +43,8 @@ export function getDb(): Firestore {
 
   if (!config) {
     config = {
-      projectId: process.env.FIREBASE_PROJECT_ID || 'divine-experience-pq6d2',
-      firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || 'ai-studio-inkwitness-dec98f98-7fd5-48e7-b78f-2afc3b37afef'
+      projectId: process.env.FIREBASE_PROJECT_ID || 'ink-and-witness-narratives',
+      firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || undefined
     };
   }
 
