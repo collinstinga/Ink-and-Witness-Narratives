@@ -154,28 +154,6 @@ async function loadSessionUser(req: Request, res: Response, next: NextFunction) 
       }
     }
 
-    // Check bearer/x-admin-token only for a valid server-created session
-    const authHeader = req.headers.authorization;
-    const adminTokenHeader = req.headers['x-admin-token'] as string;
-    let token = adminTokenHeader;
-    if (!token && authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    }
-    if (token) {
-      const session = await store.getAuthSession(token);
-      if (session && session.expiresAt > Date.now()) {
-        (req as any).user = {
-          id: session.userId,
-          email: session.email,
-          role: session.role,
-          name: session.name,
-          sessionId: session.sessionId
-        };
-        return next();
-      }
-
-    }
-
     (req as any).user = null;
     next();
   } catch (err) {
@@ -211,14 +189,7 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
 // Authentication middleware for Affiliate Portal (Strictly isolated from Writer Portal)
 function requireAffiliateAuth(req: Request, res: Response, next: NextFunction) {
   res.setHeader('Content-Type', 'application/json');
-  const authHeader = req.headers.authorization;
-  const affTokenHeader = req.headers['x-affiliate-token'] as string;
-  const cookieToken = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
-  
-  let token = cookieToken || affTokenHeader;
-  if (!token && authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.substring(7);
-  }
+  const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
 
   if (!token) {
     return res.status(401).json({
@@ -2597,9 +2568,7 @@ ${currentDraft || prompt}
 
   // Affiliate: Logout
   app.post("/api/affiliate/logout", (req: Request, res: Response) => {
-    const token = ((req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] ||
-      req.headers['x-affiliate-token'] ||
-      req.headers.authorization?.replace('Bearer ', '')) as string;
+    const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
     if (token) {
       store.affiliates.invalidateAffiliateSession(token);
     }
