@@ -82,7 +82,7 @@ async function loadSessionUser(req: Request, res: Response, next: NextFunction) 
       }
     }
 
-    // Check header bearer/x-admin-token as fallback for API clients
+    // Check bearer/x-admin-token only for a valid server-created session
     const authHeader = req.headers.authorization;
     const adminTokenHeader = req.headers['x-admin-token'] as string;
     let token = adminTokenHeader;
@@ -101,29 +101,7 @@ async function loadSessionUser(req: Request, res: Response, next: NextFunction) 
         };
         return next();
       }
-      
-      const userRec = store.getUserById(token);
-      if (userRec && userRec.role === 'admin') {
-        (req as any).user = {
-          id: userRec.id,
-          email: userRec.email,
-          role: 'admin',
-          name: userRec.name,
-          sessionId: token
-        };
-        return next();
-      }
 
-      if (store.verifySession(token)) {
-        (req as any).user = {
-          id: 'admin',
-          email: process.env.INITIAL_ADMIN_EMAIL || 'admin@inkwitness.com',
-          role: 'admin',
-          name: 'Administrator',
-          sessionId: token
-        };
-        return next();
-      }
     }
 
     (req as any).user = null;
@@ -371,8 +349,7 @@ export async function createApp() {
   // Public Topics Catalogue (Dynamically managed by writer Jake)
   app.get("/api/topics", (req: Request, res: Response) => {
     try {
-      const adminToken = (req.headers['x-admin-token'] || req.headers.authorization?.replace('Bearer ', '')) as string;
-      const isAdmin = store.verifySession(adminToken);
+      const isAdmin = (req as any).user?.role === 'admin';
       const includeHidden = req.query.includeHidden === 'true' && isAdmin;
       // Only include topics with published pieces for public readers; admin gets all
       const topics = store.getTopics(includeHidden, !isAdmin);
@@ -391,8 +368,7 @@ export async function createApp() {
         return res.status(404).json({ error: "Topic not found" });
       }
 
-      const adminToken = (req.headers['x-admin-token'] || req.headers.authorization?.replace('Bearer ', '')) as string;
-      const isAdmin = store.verifySession(adminToken);
+      const isAdmin = (req as any).user?.role === 'admin';
       const allArticles = store.getArticles(isAdmin);
       
       const pieceIds = topic.pieceIds || [];
@@ -415,8 +391,7 @@ export async function createApp() {
 
   // Public Articles List (DRAFTS ARE STRICTLY EXCLUDED)
   app.get("/api/articles", (req: Request, res: Response) => {
-    const adminToken = (req.headers['x-admin-token'] || req.headers.authorization?.replace('Bearer ', '')) as string;
-    const isAdmin = store.verifySession(adminToken);
+    const isAdmin = (req as any).user?.role === 'admin';
 
     // If admin requested via public endpoint, can include drafts, but standard readers only get published
     const list = store.getArticles(isAdmin);
@@ -458,8 +433,7 @@ export async function createApp() {
   // Public Get Single Article (with server-side paywall & draft protection)
   app.get("/api/articles/:id", (req: Request, res: Response) => {
     const { id } = req.params;
-    const adminToken = (req.headers['x-admin-token'] || req.headers.authorization?.replace('Bearer ', '')) as string;
-    const isAdmin = store.verifySession(adminToken);
+    const isAdmin = (req as any).user?.role === 'admin';
 
     const article = store.getArticleById(id, isAdmin);
     if (!article) {
