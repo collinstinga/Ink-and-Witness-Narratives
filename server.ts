@@ -1066,8 +1066,7 @@ export async function createApp() {
         return res.status(400).json({ error: "Order ID and Bank Transaction Reference are required." });
       }
 
-      await store.ensureTransactionsHydrated();
-      const tx = store.getTransaction(checkoutRequestId);
+      const tx = await store.loadTransaction(checkoutRequestId);
       if (!tx) {
         return res.status(404).json({ error: "Order not found." });
       }
@@ -1100,7 +1099,7 @@ export async function createApp() {
       return res.status(404).json({ error: "Transaction not found." });
     }
 
-    const tx = store.getTransaction(checkoutRequestId);
+    const tx = await store.loadTransaction(checkoutRequestId);
     const isPaid = result.status === "PAID" || result.status === "SUCCESS" || tx?.status === "CONFIRMED" || tx?.status === "SUCCESS";
 
     res.json({
@@ -1123,7 +1122,7 @@ export async function createApp() {
       return res.status(404).json({ error: "Transaction not found." });
     }
 
-    const tx = store.getTransaction(id);
+    const tx = await store.loadTransaction(id);
     const isPaid = result.status === "PAID" || result.status === "SUCCESS" || tx?.status === "CONFIRMED" || tx?.status === "SUCCESS";
 
     res.json({
@@ -2412,7 +2411,7 @@ export async function createApp() {
 
       res.json({
         success: true,
-        message: `Test STK prompt of KES ${testAmount} sent to +${formatted}! Check your phone.`,
+        message: `Safaricom accepted the KES ${testAmount} test request. Await handset delivery confirmation before treating the connection as ready.`,
         checkoutRequestId: stkResult.checkoutRequestId,
         merchantRequestId: stkResult.merchantRequestId
       });

@@ -12,19 +12,62 @@ const dbMocks = vi.hoisted(() => {
     createdAt: '2026-01-01T00:00:00.000Z'
   };
 
+  const directTransaction = {
+    id: 'tx_direct',
+    checkoutRequestId: 'checkout_direct',
+    articleId: 'article_direct',
+    articleTitle: 'Direct lookup purchase',
+    phoneNumber: '254700000001',
+    amount: 400,
+    type: 'PURCHASE',
+    status: 'PENDING',
+    createdAt: '2026-01-03T00:00:00.000Z'
+  };
+
+  const recentTransaction = {
+    id: 'tx_recent',
+    checkoutRequestId: 'checkout_recent',
+    articleId: 'article_recent',
+    articleTitle: 'Recent purchase',
+    phoneNumber: '254700000002',
+    amount: 500,
+    type: 'PURCHASE',
+    status: 'PENDING',
+    createdAt: new Date().toISOString()
+  };
+
+  const recentQueryGet = vi.fn(async () => ({
+    docs: [{ data: () => recentTransaction }]
+  }));
+
   return {
     remoteTransaction,
+    directTransaction,
+    recentTransaction,
+    recentQueryGet,
     getAllFirestoreDocs: vi.fn(async (collectionName: string) =>
       collectionName === 'transactions' ? [remoteTransaction] : []
     ),
-    getFirestoreDoc: vi.fn(async () => null),
+    getFirestoreDoc: vi.fn(async (collectionName: string, docId: string) =>
+      collectionName === 'transactions' && docId === directTransaction.checkoutRequestId
+        ? directTransaction
+        : null
+    ),
     setFirestoreDoc: vi.fn(async () => undefined),
     deleteFirestoreDoc: vi.fn(async () => undefined)
   };
 });
 
 vi.mock('./db.js', () => ({
-  getDb: vi.fn(() => ({})),
+  getDb: vi.fn(() => ({
+    collection: vi.fn(() => ({
+      where: vi.fn(() => ({
+        orderBy: vi.fn(() => ({
+          limit: vi.fn(() => ({ get: dbMocks.recentQueryGet }))
+        }))
+      }))
+    }))
+  })),
   getAllFirestoreDocs: dbMocks.getAllFirestoreDocs,
   getFirestoreDoc: dbMocks.getFirestoreDoc,
   setFirestoreDoc: dbMocks.setFirestoreDoc,
@@ -60,6 +103,28 @@ describe('lazy transaction hydration', () => {
 
     expect(startupTransactionReads).toHaveLength(0);
     expect(() => store.getTransactions()).toThrow(/must be hydrated/i);
+  });
+
+  it('loads a checkout directly without scanning the transaction ledger', async () => {
+    const transaction = await store.loadTransaction('checkout_direct');
+
+    expect(transaction).toMatchObject(dbMocks.directTransaction);
+    expect(dbMocks.getFirestoreDoc).toHaveBeenCalledWith('transactions', 'checkout_direct');
+    expect(dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
+  });
+
+  it('checks only recent transaction documents for duplicate STK requests', async () => {
+    const transaction = await store.findRecentPendingTransaction(
+      dbMocks.recentTransaction.articleId,
+      dbMocks.recentTransaction.phoneNumber,
+      45000
+    );
+
+    expect(transaction).toMatchObject(dbMocks.recentTransaction);
+    expect(dbMocks.recentQueryGet).toHaveBeenCalledTimes(1);
+    expect(dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
   });
 
   it('uses one Firestore scan and preserves writes made before hydration', async () => {

@@ -186,6 +186,29 @@ function transactionCacheKey(tx: PaymentTransaction): string | undefined {
   return tx.checkoutRequestId || tx.id;
 }
 
+function findCachedTransaction(identifier: string): PaymentTransaction | undefined {
+  if (cachedTransactions.has(identifier)) return cachedTransactions.get(identifier);
+  for (const tx of cachedTransactions.values()) {
+    if (
+      tx.id === identifier ||
+      tx.checkoutRequestId === identifier ||
+      tx.merchantRequestId === identifier ||
+      tx.mpesaReceiptNumber === identifier ||
+      tx.receiptNumber === identifier ||
+      tx.bankReference === identifier
+    ) {
+      return tx;
+    }
+  }
+  return undefined;
+}
+
+function cacheTransaction(tx: PaymentTransaction): PaymentTransaction {
+  const key = transactionCacheKey(tx);
+  if (key && isPersistentTransaction(tx)) cachedTransactions.set(key, tx);
+  return tx;
+}
+
 function assertTransactionsHydrated(): void {
   if (!transactionsHydrated) {
     throw new Error('Transaction data must be hydrated before it is read.');
@@ -1153,20 +1176,49 @@ export const store = {
 
   getTransaction(checkoutRequestId: string): PaymentTransaction | undefined {
     assertTransactionsHydrated();
-    // Check by checkoutRequestId or id or receipt
-    if (cachedTransactions.has(checkoutRequestId)) {
-      return cachedTransactions.get(checkoutRequestId);
-    }
-    for (const tx of cachedTransactions.values()) {
-      if (
-        tx.id === checkoutRequestId || 
-        tx.checkoutRequestId === checkoutRequestId || 
-        tx.merchantRequestId === checkoutRequestId ||
-        (tx.mpesaReceiptNumber && tx.mpesaReceiptNumber === checkoutRequestId) || 
-        (tx.bankReference && tx.bankReference === checkoutRequestId)
-      ) {
-        return tx;
+    return findCachedTransaction(checkoutRequestId);
+  },
+
+  async loadTransaction(checkoutRequestId: string): Promise<PaymentTransaction | undefined> {
+    const cached = findCachedTransaction(checkoutRequestId);
+    if (cached) return cached;
+
+    // New and historical production transactions are stored under their
+    // CheckoutRequestID, so payment polling and callbacks need one document
+    // read instead of hydrating the entire ledger on every cold instance.
+    const transaction = await getFirestoreDoc<PaymentTransaction>('transactions', checkoutRequestId);
+    if (!transaction || !isPersistentTransaction(transaction)) return undefined;
+    return cacheTransaction(transaction);
+  },
+
+  async findRecentPendingTransaction(articleId: string, phoneNumber: string, maxAgeMs = 45000): Promise<PaymentTransaction | undefined> {
+    const cutoff = Date.now() - Math.max(1000, maxAgeMs);
+    const isMatch = (tx: PaymentTransaction) =>
+      tx.status === 'PENDING' &&
+      tx.articleId === articleId &&
+      tx.phoneNumber === phoneNumber &&
+      Boolean(tx.createdAt) &&
+      new Date(tx.createdAt).getTime() >= cutoff;
+
+    const cached = Array.from(cachedTransactions.values()).find(isMatch);
+    if (cached) return cached;
+
+    try {
+      const snapshot = await getDb()
+        .collection('transactions')
+        .where('createdAt', '>=', new Date(cutoff).toISOString())
+        .orderBy('createdAt', 'desc')
+        .limit(50)
+        .get();
+      for (const document of snapshot.docs) {
+        const tx = document.data() as PaymentTransaction;
+        cacheTransaction(tx);
+        if (isMatch(tx)) return tx;
       }
+    } catch (error) {
+      // Duplicate protection is best effort; a lookup outage must not turn a
+      // valid payment initiation into an application error.
+      console.warn('[Data Store] Recent-payment duplicate lookup unavailable:', error);
     }
     return undefined;
   },
@@ -1182,7 +1234,7 @@ export const store = {
   },
 
   async confirmTransaction(identifier: string, receiptNumber?: string): Promise<{ success: boolean; transaction?: PaymentTransaction; downloadToken?: string; error?: string }> {
-    const tx = this.getTransaction(identifier);
+    const tx = await this.loadTransaction(identifier);
     if (!tx) {
       return { success: false, error: "Transaction not found." };
     }

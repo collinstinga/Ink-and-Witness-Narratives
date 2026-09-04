@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import crypto from 'crypto';
 import { store } from './store.js';
 import { PaymentTransaction } from '../types.js';
@@ -10,7 +8,6 @@ import { PaymentTransaction } from '../types.js';
  */
 
 const DARAJA_PRODUCTION_URL = 'https://api.safaricom.co.ke';
-const TOKEN_FILE_PATH = path.join(process.cwd(), 'data', 'daraja_token.json');
 const VALID_TRANSACTION_TYPES = new Set(['CustomerPayBillOnline', 'CustomerBuyGoodsOnline']);
 
 export function createDarajaTimestamp(date = new Date()): string {
@@ -88,28 +85,11 @@ export function maskPhone(phone: string): string {
   return '2547******';
 }
 
-// Load Cached Token from Disk on Startup
-try {
-  if (fs.existsSync(TOKEN_FILE_PATH)) {
-    const diskTokenData = JSON.parse(fs.readFileSync(TOKEN_FILE_PATH, 'utf-8'));
-    if (diskTokenData && typeof diskTokenData === 'object') {
-      Object.assign(tokenCache, diskTokenData);
-    }
-  }
-} catch (err) {
-  console.warn('[Daraja OAuth] Could not load disk token cache:', err);
-}
-
-function persistTokenCache() {
-  try {
-    const dataDir = path.join(process.cwd(), 'data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    fs.writeFileSync(TOKEN_FILE_PATH, JSON.stringify(tokenCache, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('[Daraja OAuth] Could not persist token cache:', err);
-  }
+export function isDarajaMerchantConfigurationError(message: unknown): boolean {
+  const normalized = String(message || '').toLowerCase();
+  return normalized.includes('merchant does not exist') ||
+    normalized.includes('invalid shortcode') ||
+    normalized.includes('invalid business');
 }
 
 /**
@@ -127,7 +107,13 @@ export async function getDarajaAccessToken(customKey?: string, customSecret?: st
     return { token: null, error: err };
   }
 
-  const cacheKey = `${consumerKey.substring(0, 8)}_${consumerSecret.substring(0, 8)}`;
+  // Keep provider tokens in process memory only. Vercel's filesystem is
+  // ephemeral/read-only at runtime, and credential fragments must never become
+  // filenames or persisted cache keys.
+  const cacheKey = crypto
+    .createHash('sha256')
+    .update(`${consumerKey}\u0000${consumerSecret}`)
+    .digest('hex');
   const now = Date.now();
 
   // Return valid cached token if fresh (with 120s buffer)
@@ -165,7 +151,6 @@ export async function getDarajaAccessToken(customKey?: string, customSecret?: st
               token: data.access_token,
               expiresAt: now + expiresInSec * 1000
             };
-            persistTokenCache();
             console.log(`[M-PESA OAUTH SUCCESS] Token acquired, expires in ${expiresInSec}s.`);
             return data.access_token;
           }
@@ -272,14 +257,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   // Idempotency & Duplicate Protection:
   // If an active STK Push is already pending for the same (articleId, phoneNumber) in the last 45 seconds, return active request
   if (articleId && articleId !== 'test_stk') {
-    await store.ensureTransactionsHydrated();
-    const activeTransactions = store.getTransactions({ status: 'PENDING' });
-    const duplicate = activeTransactions.find(tx => 
-      tx.articleId === articleId && 
-      tx.phoneNumber === formattedPhone && 
-      tx.createdAt && 
-      (Date.now() - new Date(tx.createdAt).getTime() < 45000)
-    );
+    const duplicate = await store.findRecentPendingTransaction(articleId, formattedPhone, 45000);
 
     if (duplicate && duplicate.checkoutRequestId) {
       console.log(`[M-PESA DUPLICATE PROTECTION] Reusing active pending transaction: ${duplicate.checkoutRequestId}`);
@@ -287,7 +265,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
         success: true,
         checkoutRequestId: duplicate.checkoutRequestId,
         merchantRequestId: duplicate.merchantRequestId,
-        customerMessage: "STK Push sent. Check your phone and enter your M-Pesa PIN.",
+        customerMessage: "Safaricom is already processing this M-Pesa request.",
+        message: "Safaricom is already processing this M-Pesa request.",
         amount: duplicate.amount,
         phoneNumber: duplicate.phoneNumber,
         articleTitle: duplicate.articleTitle
@@ -480,8 +459,8 @@ async function handleSuccessfulStkResponse(
     success: true,
     checkoutRequestId,
     merchantRequestId,
-    customerMessage: stkData.CustomerMessage || 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
-    message: stkData.CustomerMessage || 'STK Push request accepted by Safaricom. Check your phone and enter your M-Pesa PIN.',
+    customerMessage: stkData.CustomerMessage || 'M-Pesa request accepted by Safaricom for processing.',
+    message: 'M-Pesa request accepted by Safaricom. Waiting for handset delivery confirmation.',
     amount,
     phoneNumber: formattedPhone,
     articleTitle: transaction.articleTitle
@@ -495,8 +474,6 @@ async function handleSuccessfulStkResponse(
 export async function handleDarajaCallback(callbackBody: any): Promise<{ success: boolean; message: string }> {
   try {
     const stkCallback = callbackBody?.Body?.stkCallback;
-    console.log('[M-PESA CALLBACK RECEIVED] Full Payload:', JSON.stringify(stkCallback || callbackBody));
-
     if (!stkCallback) {
       console.warn('[M-PESA CALLBACK WARNING] Empty or malformed callback payload received.');
       return { success: false, message: 'Invalid payload structure' };
@@ -506,9 +483,9 @@ export async function handleDarajaCallback(callbackBody: any): Promise<{ success
     const merchantRequestId = stkCallback.MerchantRequestID || '';
     const resultCode = Number(stkCallback.ResultCode);
     const resultDesc = stkCallback.ResultDesc || '';
+    console.log(`[M-PESA CALLBACK RECEIVED] CheckoutRequestID: ${checkoutRequestId || 'missing'}, ResultCode: ${Number.isFinite(resultCode) ? resultCode : 'invalid'}`);
 
-    await store.ensureTransactionsHydrated();
-    const tx = store.getTransaction(checkoutRequestId);
+    const tx = await store.loadTransaction(checkoutRequestId);
     if (!tx) {
       console.warn(`[M-PESA CALLBACK UNKNOWN] No matching transaction found for CheckoutRequestID: ${checkoutRequestId}`);
       return { success: true, message: 'Transaction not found in database' };
@@ -589,8 +566,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
   amount?: number;
   isUnlocked?: boolean;
 }> {
-  await store.ensureTransactionsHydrated();
-  let tx = store.getTransaction(checkoutRequestId);
+  let tx = await store.loadTransaction(checkoutRequestId);
   if (!tx) {
     return {
       status: 'FAILED',
@@ -756,11 +732,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         tx.completedAt = new Date().toISOString();
         await store.saveTransaction(tx);
         resolvedResult = { status: 'TIMEOUT', resultCode: 1037, resultDesc: tx.resultDesc };
-      } else if (
-        qResultDesc.toLowerCase().includes('merchant does not exist') ||
-        qResultDesc.toLowerCase().includes('invalid shortcode') ||
-        qResultDesc.toLowerCase().includes('invalid business')
-      ) {
+      } else if (isDarajaMerchantConfigurationError(qResultDesc)) {
         tx.status = 'FAILED';
         tx.resultCode = qResultCode;
         tx.resultDesc = 'Safaricom rejected the configured merchant number. Verify the transaction type, store/shortcode and till mapping.';
@@ -793,7 +765,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         } else {
           resolvedResult = {
             status: 'PENDING',
-            resultDesc: 'Prompt delivered to your phone handset. Please enter your M-Pesa PIN.'
+            resultDesc: 'Safaricom is processing the request. Check your handset for the M-Pesa prompt.'
           };
         }
       } else if (qResultCode === 1) {
@@ -828,7 +800,21 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
     } else {
       const errCode = String(queryData?.errorCode || '');
       const errMsg = String(queryData?.errorMessage || queryData?.ResponseDescription || '');
-      if (errCode === '500.001.1001' || errMsg.toLowerCase().includes('processing') || errMsg.toLowerCase().includes('in progress') || errMsg.toLowerCase().includes('exist')) {
+      const normalizedError = errMsg.toLowerCase();
+      const merchantConfigurationError = isDarajaMerchantConfigurationError(normalizedError);
+      if (merchantConfigurationError) {
+        tx.status = 'FAILED';
+        tx.resultCode = Number(queryData?.errorCode) || -1;
+        tx.resultDesc = 'Safaricom rejected the configured merchant identity. Confirm that M-Pesa Express is active and that the live app, passkey, Store/Shortcode and Till belong to the same merchant account.';
+        tx.completedAt = new Date().toISOString();
+        await store.saveTransaction(tx);
+        resolvedResult = { status: 'FAILED', resultCode: tx.resultCode, resultDesc: tx.resultDesc };
+      } else if (
+        errCode === '500.001.1001' ||
+        normalizedError.includes('processing') ||
+        normalizedError.includes('in progress') ||
+        normalizedError.includes('transaction does not exist')
+      ) {
         resolvedResult = { status: 'PENDING', resultDesc: 'Transaction is being processed on Safaricom network…' };
       } else {
         resolvedResult = { status: 'PENDING', resultDesc: errMsg || 'Awaiting customer PIN entry on phone…' };

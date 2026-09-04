@@ -7,6 +7,7 @@ vi.mock('./store.js', () => ({
 import {
   createDarajaTimestamp,
   formatKenyanPhone,
+  isDarajaMerchantConfigurationError,
   isValidKenyanMpesaPhone,
   resolveDarajaCallbackUrl
 } from './mpesa.js';
@@ -34,5 +35,11 @@ describe('M-Pesa request helpers', () => {
 
   it('rejects insecure callback URLs', () => {
     expect(() => resolveDarajaCallbackUrl('http://example.com/callback')).toThrow(/HTTPS/);
+  });
+
+  it('distinguishes terminal merchant configuration errors from temporary transaction lookup delays', () => {
+    expect(isDarajaMerchantConfigurationError('Merchant does not exist')).toBe(true);
+    expect(isDarajaMerchantConfigurationError('Invalid BusinessShortCode')).toBe(true);
+    expect(isDarajaMerchantConfigurationError('The transaction does not exist yet')).toBe(false);
   });
 });
