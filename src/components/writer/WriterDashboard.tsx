@@ -126,6 +126,13 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
   // Verify auth session on mount
   useEffect(() => {
+    if (currentUser?.role === 'admin') {
+      setIsAuthenticated(true);
+      setAuthToken(getWriterToken());
+      setCheckingAuth(false);
+      return;
+    }
+
     const verify = async () => {
       const token = getWriterToken();
       try {
@@ -148,28 +155,19 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
           }
         }
 
-        if (currentUser?.role === 'admin') {
-          setIsAuthenticated(true);
-          return;
-        }
-
         clearWriterToken();
         setIsAuthenticated(false);
         setAuthToken(null);
       } catch {
-        if (currentUser?.role === 'admin') {
-          setIsAuthenticated(true);
-        } else {
-          setIsAuthenticated(false);
-          setAuthToken(null);
-        }
+        setIsAuthenticated(false);
+        setAuthToken(null);
       } finally {
         setCheckingAuth(false);
       }
     };
 
     verify();
-  }, [currentUser]);
+  }, [currentUser?.role]);
 
   // Fetch the minimum needed to render the overview. Large, section-specific
   // datasets are loaded only when the writer opens the corresponding section.

@@ -11,6 +11,43 @@ import { PaymentTransaction } from '../types.js';
 
 const DARAJA_PRODUCTION_URL = 'https://api.safaricom.co.ke';
 const TOKEN_FILE_PATH = path.join(process.cwd(), 'data', 'daraja_token.json');
+const VALID_TRANSACTION_TYPES = new Set(['CustomerPayBillOnline', 'CustomerBuyGoodsOnline']);
+
+export function createDarajaTimestamp(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}${values.month}${values.day}${values.hour}${values.minute}${values.second}`;
+}
+
+export function resolveDarajaCallbackUrl(value: string): string {
+  const raw = (value || '').trim();
+  if (!raw) {
+    throw new Error('MPESA_CALLBACK_URL or APP_URL must be configured for live M-Pesa payments.');
+  }
+
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const callback = new URL(candidate);
+  if (callback.protocol !== 'https:') {
+    throw new Error('The M-Pesa callback URL must use HTTPS.');
+  }
+  if (callback.username || callback.password) {
+    throw new Error('The M-Pesa callback URL must not contain credentials.');
+  }
+  if (!callback.pathname || callback.pathname === '/') {
+    callback.pathname = '/api/mpesa/callback';
+  }
+  callback.hash = '';
+  return callback.toString();
+}
 
 // In-Memory Token & Query Caches
 interface TokenCache {
@@ -23,20 +60,24 @@ const queryCooldownMap = new Map<string, { lastQueryTime: number; lastResult: an
 
 // Phone Number Normalization
 export function formatKenyanPhone(phone: string): string {
-  const cleaned = (phone || '').replace(/[\s\-\+\(\)]/g, '');
+  const cleaned = (phone || '').replace(/\D/g, '');
   if (cleaned.startsWith('2540')) {
     return '254' + cleaned.substring(4);
   }
   if (cleaned.startsWith('0')) {
     return '254' + cleaned.substring(1);
   }
-  if (cleaned.startsWith('7') || cleaned.startsWith('1')) {
+  if ((cleaned.startsWith('7') || cleaned.startsWith('1')) && cleaned.length === 9) {
     return '254' + cleaned;
   }
   if (cleaned.startsWith('254') && cleaned.length >= 12) {
     return cleaned;
   }
-  return cleaned.length >= 9 ? '254' + cleaned : '254715601209';
+  return cleaned.length === 9 ? '254' + cleaned : cleaned;
+}
+
+export function isValidKenyanMpesaPhone(phone: string): boolean {
+  return /^254(?:7\d{8}|1\d{8})$/.test(formatKenyanPhone(phone));
 }
 
 export function maskPhone(phone: string): string {
@@ -219,11 +260,19 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   const cleanAmount = Math.max(1, Math.round(Number(amount) || 1));
   const masked = maskPhone(formattedPhone);
 
+  if (!isValidKenyanMpesaPhone(formattedPhone)) {
+    return {
+      success: false,
+      error: 'Enter a valid Safaricom number in the format 07XXXXXXXX, 01XXXXXXXX, or 254XXXXXXXXX.'
+    };
+  }
+
   console.log(`[M-PESA PAYMENT START] Phone: ${masked}, Amount: KES ${cleanAmount}, Piece ID: ${articleId || 'N/A'}`);
 
   // Idempotency & Duplicate Protection:
   // If an active STK Push is already pending for the same (articleId, phoneNumber) in the last 45 seconds, return active request
   if (articleId && articleId !== 'test_stk') {
+    await store.ensureTransactionsHydrated();
     const activeTransactions = store.getTransactions({ status: 'PENDING' });
     const duplicate = activeTransactions.find(tx => 
       tx.articleId === articleId && 
@@ -249,13 +298,30 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   // Load Credentials
   const mpesaSettings = store.getMpesaSettings();
   const passkey = (process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || mpesaSettings.passkey || '').trim();
-  const shortcode = (process.env.MPESA_SHORTCODE || process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || mpesaSettings.shortcode || '4502043').trim();
-  const storeNumber = (process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || '1145520').trim();
-  const tillNumber = (process.env.MPESA_TILL_NUMBER || mpesaSettings.tillNumber || '1618656').trim();
+  const shortcode = (process.env.MPESA_SHORTCODE || mpesaSettings.shortcode || '').trim();
+  const storeNumber = (process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || '').trim();
+  const tillNumber = (process.env.MPESA_TILL_NUMBER || mpesaSettings.tillNumber || '').trim();
   const transactionType = (process.env.MPESA_TRANSACTION_TYPE || mpesaSettings.transactionType || 'CustomerBuyGoodsOnline').trim();
 
   if (!passkey) {
     const err = 'M-Pesa production configuration missing: MPESA_PASSKEY. Please configure in settings.';
+    console.error(`[M-PESA CONFIG ERROR] ${err}`);
+    return { success: false, error: err };
+  }
+
+  if (!VALID_TRANSACTION_TYPES.has(transactionType)) {
+    const err = 'M-Pesa transaction type must be CustomerPayBillOnline or CustomerBuyGoodsOnline.';
+    console.error(`[M-PESA CONFIG ERROR] ${err}`);
+    return { success: false, error: err };
+  }
+
+  const isBuyGoods = transactionType === 'CustomerBuyGoodsOnline';
+  const businessShortCode = isBuyGoods ? (storeNumber || shortcode) : shortcode;
+  const partyB = isBuyGoods ? (tillNumber || shortcode) : shortcode;
+  if (!/^\d{5,10}$/.test(businessShortCode) || !/^\d{5,10}$/.test(partyB)) {
+    const err = isBuyGoods
+      ? 'M-Pesa Buy Goods requires valid numeric store/shortcode and till numbers.'
+      : 'M-Pesa PayBill requires a valid numeric business shortcode.';
     console.error(`[M-PESA CONFIG ERROR] ${err}`);
     return { success: false, error: err };
   }
@@ -271,40 +337,24 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   }
 
   // Build Timestamp: YYYYMMDDHHmmss
-  const now = new Date();
-  const timestamp = now.getFullYear().toString() +
-    String(now.getMonth() + 1).padStart(2, '0') +
-    String(now.getDate()).padStart(2, '0') +
-    String(now.getHours()).padStart(2, '0') +
-    String(now.getMinutes()).padStart(2, '0') +
-    String(now.getSeconds()).padStart(2, '0');
-
-  // BusinessShortCode & PartyB configuration
-  // For Buy Goods (Till): BusinessShortCode is Store Number (1145520), PartyB is Till Number (1618656)
-  const businessShortCode = transactionType === 'CustomerBuyGoodsOnline' && storeNumber ? storeNumber : shortcode;
-  const partyB = tillNumber || shortcode;
+  const timestamp = createDarajaTimestamp();
 
   // Password = Base64(BusinessShortCode + Passkey + Timestamp)
   const rawPassword = `${businessShortCode}${passkey}${timestamp}`;
   const password = Buffer.from(rawPassword).toString('base64');
 
   // Resolve Public HTTPS Callback URL
-  let callbackUrl = (process.env.MPESA_CALLBACK_URL || '').trim();
-  if (!callbackUrl) {
-    let base = (process.env.APP_URL || originUrl || mpesaSettings.callbackUrl || '').trim().replace(/\/$/, '');
-    if (base && !base.startsWith('http')) {
-      base = 'https://' + base;
-    }
-    if (base.endsWith('/api/mpesa/callback')) {
-      callbackUrl = base;
-    } else if (base) {
-      callbackUrl = `${base}/api/mpesa/callback`;
-    } else {
-      callbackUrl = 'https://ais-dev-eqgbjd4cka2sn5iwmtewdp-3778884322.europe-west2.run.app/api/mpesa/callback';
-    }
+  let callbackUrl: string;
+  try {
+    callbackUrl = resolveDarajaCallbackUrl(
+      process.env.MPESA_CALLBACK_URL || process.env.APP_URL || originUrl || mpesaSettings.callbackUrl || ''
+    );
+  } catch (error: any) {
+    console.error(`[M-PESA CONFIG ERROR] ${error.message}`);
+    return { success: false, error: error.message };
   }
 
-  const accountReference = (articleTitle || 'INKWITNESS')
+  const accountReference = (process.env.MPESA_ACCOUNT_REF || params.accountReference || articleTitle || 'INKWITNESS')
     .replace(/[^a-zA-Z0-9]/g, '')
     .substring(0, 12) || 'INKWITNESS';
 
@@ -387,14 +437,14 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   }
 }
 
-function handleSuccessfulStkResponse(
+async function handleSuccessfulStkResponse(
   stkData: any,
   params: InitiateStkPushParams,
   formattedPhone: string,
   amount: number,
   shortcodeUsed: string,
   maskedPhone: string
-): StkPushResult {
+): Promise<StkPushResult> {
   const checkoutRequestId = stkData.CheckoutRequestID;
   const merchantRequestId = stkData.MerchantRequestID || `MR_${Date.now()}`;
 
@@ -423,7 +473,7 @@ function handleSuccessfulStkResponse(
     userEmail: params.userEmail,
   };
 
-  store.saveTransaction(transaction);
+  await store.saveTransaction(transaction);
   console.log(`[M-PESA TRANSACTION CREATED] Stored in database -> ID: ${transaction.id}, CheckoutRequestID: ${checkoutRequestId}, Status: PENDING`);
 
   return {
@@ -431,6 +481,7 @@ function handleSuccessfulStkResponse(
     checkoutRequestId,
     merchantRequestId,
     customerMessage: stkData.CustomerMessage || 'STK Push sent. Check your phone and enter your M-Pesa PIN.',
+    message: stkData.CustomerMessage || 'STK Push request accepted by Safaricom. Check your phone and enter your M-Pesa PIN.',
     amount,
     phoneNumber: formattedPhone,
     articleTitle: transaction.articleTitle
@@ -456,6 +507,7 @@ export async function handleDarajaCallback(callbackBody: any): Promise<{ success
     const resultCode = Number(stkCallback.ResultCode);
     const resultDesc = stkCallback.ResultDesc || '';
 
+    await store.ensureTransactionsHydrated();
     const tx = store.getTransaction(checkoutRequestId);
     if (!tx) {
       console.warn(`[M-PESA CALLBACK UNKNOWN] No matching transaction found for CheckoutRequestID: ${checkoutRequestId}`);
@@ -490,25 +542,25 @@ export async function handleDarajaCallback(callbackBody: any): Promise<{ success
       tx.confirmedAt = new Date().toISOString();
 
       // Issue Reader License Download Token
-      const confirmationResult = store.confirmTransaction(checkoutRequestId, receipt);
+      const confirmationResult = await store.confirmTransaction(checkoutRequestId, receipt);
       console.log(`[M-PESA CALLBACK SUCCESS] Confirmed! Piece: ${tx.articleId}, Receipt: ${receipt}, Token: ${confirmationResult.downloadToken ? 'ISSUED' : 'EXISTING'}`);
     } else if (resultCode === 1032) {
       tx.status = 'CANCELLED';
       tx.resultDesc = 'The transaction was cancelled on the mobile handset.';
       tx.completedAt = new Date().toISOString();
-      store.saveTransaction(tx);
+      await store.saveTransaction(tx);
       console.log(`[M-PESA CALLBACK CANCELLED] User cancelled on phone: ${checkoutRequestId}`);
     } else if (resultCode === 1037) {
       tx.status = 'TIMEOUT';
       tx.resultDesc = 'Payment prompt timed out without PIN entry.';
       tx.completedAt = new Date().toISOString();
-      store.saveTransaction(tx);
+      await store.saveTransaction(tx);
       console.log(`[M-PESA CALLBACK TIMEOUT] Prompt timed out on phone: ${checkoutRequestId}`);
     } else {
       tx.status = 'FAILED';
       tx.resultDesc = resultDesc || `Payment rejected by Safaricom (Code ${resultCode}).`;
       tx.completedAt = new Date().toISOString();
-      store.saveTransaction(tx);
+      await store.saveTransaction(tx);
       console.log(`[M-PESA CALLBACK FAILED] Code: ${resultCode}, Desc: ${resultDesc}`);
     }
 
@@ -537,6 +589,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
   amount?: number;
   isUnlocked?: boolean;
 }> {
+  await store.ensureTransactionsHydrated();
   let tx = store.getTransaction(checkoutRequestId);
   if (!tx) {
     return {
@@ -592,13 +645,13 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
   if (txAgeMs < 10000) {
     return {
       status: 'PENDING',
-      resultDesc: 'Prompt delivered to your phone. Please enter your M-Pesa PIN.'
+      resultDesc: 'Safaricom accepted the request. Waiting for the phone prompt.'
     };
   }
 
   const cachedQuery = queryCooldownMap.get(checkoutRequestId);
   if (cachedQuery && nowMs - cachedQuery.lastQueryTime < 8000) {
-    return cachedQuery.lastResult || { status: 'PENDING', resultDesc: 'Prompt delivered to your phone. Awaiting M-Pesa PIN…' };
+    return cachedQuery.lastResult || { status: 'PENDING', resultDesc: 'Waiting for the Safaricom phone prompt…' };
   }
 
   // Respect global Daraja rate limit to prevent SpikeArrestViolation across concurrent sessions
@@ -616,15 +669,22 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
 
     const mpesaSettings = store.getMpesaSettings();
     const passkey = (process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || mpesaSettings.passkey || '').trim();
-    const shortcode = (tx.shortcodeUsed || process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || process.env.MPESA_SHORTCODE || '1145520').trim();
+    const transactionType = (process.env.MPESA_TRANSACTION_TYPE || mpesaSettings.transactionType || 'CustomerBuyGoodsOnline').trim();
+    const configuredShortcode = (process.env.MPESA_SHORTCODE || mpesaSettings.shortcode || '').trim();
+    const configuredStoreNumber = (process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || '').trim();
+    const shortcode = (
+      tx.shortcodeUsed ||
+      (transactionType === 'CustomerBuyGoodsOnline' ? configuredStoreNumber : configuredShortcode)
+    ).trim();
 
-    const now = new Date();
-    const timestamp = now.getFullYear().toString() +
-      String(now.getMonth() + 1).padStart(2, '0') +
-      String(now.getDate()).padStart(2, '0') +
-      String(now.getHours()).padStart(2, '0') +
-      String(now.getMinutes()).padStart(2, '0') +
-      String(now.getSeconds()).padStart(2, '0');
+    if (!passkey || !/^\d{5,10}$/.test(shortcode)) {
+      return {
+        status: 'FAILED',
+        resultDesc: 'The M-Pesa status-query credentials are incomplete. Verify the passkey and business shortcode.'
+      };
+    }
+
+    const timestamp = createDarajaTimestamp();
 
     const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
 
@@ -651,14 +711,14 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
     const isSpikeArrest = queryRes.status === 429 || JSON.stringify(queryData).includes('SpikeArrestViolation') || JSON.stringify(queryData).includes('ratelimit');
     if (isSpikeArrest) {
       console.log(`[M-PESA QUERY PACING] Safaricom SpikeArrest rate limit active. Pacing queries and maintaining PENDING status.`);
-      const pendingPacedResult = { status: 'PENDING' as const, resultDesc: 'Prompt delivered to your phone. Awaiting M-Pesa PIN…' };
+      const pendingPacedResult = { status: 'PENDING' as const, resultDesc: 'Waiting for the Safaricom phone prompt…' };
       queryCooldownMap.set(checkoutRequestId, { lastQueryTime: nowMs + 4000, lastResult: pendingPacedResult });
       return pendingPacedResult;
     }
 
     console.log(`[M-PESA QUERY RESPONSE] Status: ${queryRes.status}, Body:`, JSON.stringify(queryData));
 
-    let resolvedResult: any = { status: 'PENDING', resultDesc: 'Prompt delivered to your phone. Awaiting M-Pesa PIN…' };
+    let resolvedResult: any = { status: 'PENDING', resultDesc: 'Waiting for the Safaricom phone prompt…' };
 
     if (queryData?.ResponseCode === '0') {
       const qResultCode = Number(queryData.ResultCode);
@@ -672,7 +732,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         tx.resultDesc = qResultDesc || 'Payment confirmed via query.';
         tx.mpesaReceiptNumber = receipt;
         tx.completedAt = new Date().toISOString();
-        const conf = store.confirmTransaction(checkoutRequestId, receipt);
+        const conf = await store.confirmTransaction(checkoutRequestId, receipt);
         resolvedResult = {
           status: 'SUCCESS',
           resultCode: 0,
@@ -687,34 +747,48 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         tx.resultCode = 1032;
         tx.resultDesc = 'Payment was cancelled on phone handset.';
         tx.completedAt = new Date().toISOString();
-        store.saveTransaction(tx);
+        await store.saveTransaction(tx);
         resolvedResult = { status: 'CANCELLED', resultCode: 1032, resultDesc: tx.resultDesc };
       } else if (qResultCode === 1037) {
         tx.status = 'TIMEOUT';
         tx.resultCode = 1037;
         tx.resultDesc = 'Payment prompt timed out on phone.';
         tx.completedAt = new Date().toISOString();
-        store.saveTransaction(tx);
+        await store.saveTransaction(tx);
         resolvedResult = { status: 'TIMEOUT', resultCode: 1037, resultDesc: tx.resultDesc };
       } else if (
-        qResultCode === 4999 ||
-        qResultCode === 2029 ||
-        qResultCode === 9999 ||
         qResultDesc.toLowerCase().includes('merchant does not exist') ||
+        qResultDesc.toLowerCase().includes('invalid shortcode') ||
+        qResultDesc.toLowerCase().includes('invalid business')
+      ) {
+        tx.status = 'FAILED';
+        tx.resultCode = qResultCode;
+        tx.resultDesc = 'Safaricom rejected the configured merchant number. Verify the transaction type, store/shortcode and till mapping.';
+        tx.completedAt = new Date().toISOString();
+        await store.saveTransaction(tx);
+        resolvedResult = { status: 'FAILED', resultCode: qResultCode, resultDesc: tx.resultDesc };
+      } else if (
         qResultDesc.toLowerCase().includes('duplicated msisdn') ||
         qResultDesc.toLowerCase().includes('existing ussd') ||
-        qResultDesc.toLowerCase().includes('session') ||
+        qResultDesc.toLowerCase().includes('active session')
+      ) {
+        tx.status = 'FAILED';
+        tx.resultCode = qResultCode;
+        tx.resultDesc = 'Another M-Pesa prompt or USSD session is active on this phone. Close it, wait briefly, then retry.';
+        tx.completedAt = new Date().toISOString();
+        await store.saveTransaction(tx);
+        resolvedResult = { status: 'FAILED', resultCode: qResultCode, resultDesc: tx.resultDesc };
+      } else if (
         qResultDesc.toLowerCase().includes('in progress') ||
         qResultDesc.toLowerCase().includes('processing')
       ) {
-        // Safaricom Daraja STK Query returns 4999 ("Merchant does not exist" / "Duplicated MSISDN") as an in-flight status while prompt is routing/active on handset
-        console.log(`[M-PESA QUERY IN-FLIGHT] Safaricom code ${qResultCode} ("${qResultDesc}") for ${checkoutRequestId}. Maintaining PENDING state while user enters PIN.`);
+        console.log(`[M-PESA QUERY IN-FLIGHT] Safaricom code ${qResultCode} ("${qResultDesc}") for ${checkoutRequestId}.`);
         if (txAgeMs > 120000) {
           tx.status = 'TIMEOUT';
           tx.resultCode = 1037;
           tx.resultDesc = 'Payment prompt timed out on phone.';
           tx.completedAt = new Date().toISOString();
-          store.saveTransaction(tx);
+          await store.saveTransaction(tx);
           resolvedResult = { status: 'TIMEOUT', resultCode: 1037, resultDesc: tx.resultDesc };
         } else {
           resolvedResult = {
@@ -728,7 +802,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         tx.resultCode = 1;
         tx.resultDesc = 'Insufficient funds in your M-Pesa account.';
         tx.completedAt = new Date().toISOString();
-        store.saveTransaction(tx);
+        await store.saveTransaction(tx);
         resolvedResult = { status: 'FAILED', resultCode: 1, resultDesc: tx.resultDesc };
       } else if (qResultCode === 2001) {
         // Wrong PIN
@@ -736,7 +810,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         tx.resultCode = 2001;
         tx.resultDesc = 'Incorrect M-Pesa PIN entered on your phone.';
         tx.completedAt = new Date().toISOString();
-        store.saveTransaction(tx);
+        await store.saveTransaction(tx);
         resolvedResult = { status: 'FAILED', resultCode: 2001, resultDesc: tx.resultDesc };
       } else {
         // Only fail for actual terminal non-zero codes after grace period
@@ -745,7 +819,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
           tx.resultCode = qResultCode;
           tx.resultDesc = qResultDesc || 'Payment failed.';
           tx.completedAt = new Date().toISOString();
-          store.saveTransaction(tx);
+          await store.saveTransaction(tx);
           resolvedResult = { status: 'FAILED', resultCode: qResultCode, resultDesc: tx.resultDesc };
         } else {
           resolvedResult = { status: 'PENDING', resultDesc: 'Waiting for PIN on phone…' };
@@ -792,6 +866,8 @@ export async function verifyManualReceipt(
     };
   }
 
+  await store.ensureTransactionsHydrated();
+
   // Look for confirmed transaction with this receipt
   const allTransactions = store.getTransactions();
   const matchedTx = allTransactions.find(tx => 
@@ -804,7 +880,7 @@ export async function verifyManualReceipt(
     // If matched and confirmed, ensure download token exists for this piece
     let token = matchedTx.downloadToken;
     if (!token) {
-      const conf = store.confirmTransaction(matchedTx.checkoutRequestId || matchedTx.id, cleanReceipt);
+      const conf = await store.confirmTransaction(matchedTx.checkoutRequestId || matchedTx.id, cleanReceipt);
       token = conf.downloadToken;
     }
     return {

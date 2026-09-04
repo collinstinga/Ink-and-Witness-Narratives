@@ -77,6 +77,8 @@ let cachedArticles: Article[] = [];
 let cachedCategories: Category[] = [];
 let cachedTopics: Topic[] = [];
 let cachedTransactions: Map<string, PaymentTransaction> = new Map();
+let transactionsHydrated = false;
+let transactionsHydrationPromise: Promise<void> | null = null;
 let cachedTokens: Map<string, { articleId: string; phone: string; expiresAt: number; receipt?: string; createdAt?: string; userId?: string; email?: string; accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM' }> = new Map();
 let cachedManualAccess: Map<string, ManualAccessGrant> = new Map();
 let cachedRevisions: Map<string, ArticleRevision[]> = new Map();
@@ -173,6 +175,69 @@ function writeJsonFileSync(filePath: string, data: any) {
     fs.renameSync(tempPath, filePath);
   } catch (err) {
     console.error(`[Data Store] Failed writing to ${filePath}:`, err);
+  }
+}
+
+function isPersistentTransaction(tx: PaymentTransaction): boolean {
+  return Boolean(tx) && !(tx as any).isSeed && !tx.id?.startsWith('tx_seed_');
+}
+
+function transactionCacheKey(tx: PaymentTransaction): string | undefined {
+  return tx.checkoutRequestId || tx.id;
+}
+
+function assertTransactionsHydrated(): void {
+  if (!transactionsHydrated) {
+    throw new Error('Transaction data must be hydrated before it is read.');
+  }
+}
+
+async function hydrateTransactionsOnce(): Promise<void> {
+  if (transactionsHydrated) return;
+  if (transactionsHydrationPromise) return transactionsHydrationPromise;
+
+  transactionsHydrationPromise = (async () => {
+    const firestoreTransactions = await getAllFirestoreDocs<PaymentTransaction>('transactions');
+    const mergedTransactions = new Map<string, PaymentTransaction>();
+
+    // Cloud is authoritative, but an empty cloud collection can still fall back
+    // to the local development cache exactly as startup did before this loader.
+    for (const tx of firestoreTransactions || []) {
+      const key = transactionCacheKey(tx);
+      if (key && isPersistentTransaction(tx)) mergedTransactions.set(key, tx);
+    }
+
+    if (mergedTransactions.size === 0 && fs.existsSync(TRANSACTIONS_FILE)) {
+      const raw = fs.readFileSync(TRANSACTIONS_FILE, 'utf-8');
+      const diskTransactions: PaymentTransaction[] = JSON.parse(raw);
+      if (Array.isArray(diskTransactions)) {
+        for (const tx of diskTransactions) {
+          const key = transactionCacheKey(tx);
+          if (!key || !isPersistentTransaction(tx)) continue;
+          mergedTransactions.set(key, tx);
+          setFirestoreDoc('transactions', key, tx).catch(() => {});
+        }
+      }
+    }
+
+    // A bank order or other write may arrive before the first hydration. Overlay
+    // the live local cache last so that in-flight writes are never replaced by an
+    // older Firestore copy.
+    for (const [key, tx] of cachedTransactions) {
+      if (isPersistentTransaction(tx)) mergedTransactions.set(key, tx);
+    }
+
+    cachedTransactions = mergedTransactions;
+    writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    transactionsHydrated = true;
+    console.log(`[Data Store] Transaction ledger hydrated on demand (${cachedTransactions.size} transactions).`);
+  })();
+
+  try {
+    await transactionsHydrationPromise;
+  } finally {
+    // A failed read remains retryable; success is tracked separately above.
+    transactionsHydrationPromise = null;
   }
 }
 
@@ -385,7 +450,6 @@ export const store = {
       users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
       sessions: captureStartupRead(getAllFirestoreDocs<AuthSession>('sessions')),
       articles: captureStartupRead(getAllFirestoreDocs<Article>('articles')),
-      transactions: captureStartupRead(getAllFirestoreDocs<PaymentTransaction>('transactions')),
       licenses: captureStartupRead(getAllFirestoreDocs<any>('reader_licenses')),
       manualAccess: captureStartupRead(getAllFirestoreDocs<ManualAccessGrant>('manual_access')),
       author: captureStartupRead((async () =>
@@ -504,31 +568,19 @@ export const store = {
       }
     }
 
-    // 2. Load Transactions from persistent Firestore / JSON file
-    cachedTransactions.clear();
-    try {
-      const fsTransactions = await useStartupRead(startupReads.transactions);
-      if (fsTransactions && fsTransactions.length > 0) {
-        for (const tx of fsTransactions) {
-          if (!(tx as any).isSeed && !tx.id?.startsWith('tx_seed_')) {
-            cachedTransactions.set(tx.checkoutRequestId || tx.id, tx);
-          }
-        }
-        writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
-      } else if (fs.existsSync(TRANSACTIONS_FILE)) {
-        const raw = fs.readFileSync(TRANSACTIONS_FILE, 'utf-8');
-        const parsed: PaymentTransaction[] = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          for (const tx of parsed) {
-            if (!(tx as any).isSeed && !tx.id?.startsWith('tx_seed_')) {
-              cachedTransactions.set(tx.checkoutRequestId || tx.id, tx);
-              setFirestoreDoc('transactions', tx.checkoutRequestId || tx.id, tx).catch(() => {});
-            }
-          }
-        }
+    // 2. Defer the large transaction scan on serverless cold starts. Local
+    // development keeps the prior eager behavior; production can temporarily
+    // restore it with EAGER_TRANSACTION_BOOTSTRAP=true if rollback is needed.
+    const eagerTransactionBootstrap = !process.env.VERCEL ||
+      process.env.EAGER_TRANSACTION_BOOTSTRAP?.trim().toLowerCase() === 'true';
+    if (eagerTransactionBootstrap) {
+      try {
+        await hydrateTransactionsOnce();
+      } catch (err) {
+        console.warn('[Data Store] Error loading transactions from Firestore:', err);
       }
-    } catch (err) {
-      console.warn('[Data Store] Error loading transactions from Firestore:', err);
+    } else {
+      console.log('[Data Store] Transaction ledger hydration deferred until a transaction-dependent request.');
     }
 
     // 3. Load or Seed Reader Tokens / Licenses
@@ -828,13 +880,12 @@ export const store = {
     // 12. Initialize Affiliate & Referral Store
     try {
       await affiliateStore.init();
-      // Reconcile previously confirmed affiliate-tagged transactions on startup
-      affiliateStore.reconcileTransactions(Array.from(cachedTransactions.values()));
     } catch (e) {
       console.warn('[Data Store] Error initializing Affiliate store:', e);
     }
 
-    console.log(`[Data Store] Persistent Store Ready in ${Date.now() - startupStartedAt}ms: ${cachedArticles.length} pieces (${cachedArticles.filter(a => a.status === 'published').length} published, ${cachedArticles.filter(a => a.status === 'draft').length} drafts), ${cachedCategories.length} custom categories, ${cachedTransactions.size} transactions, ${cachedLikes.length} likes, ${cachedComments.length} comments.`);
+    const transactionStatus = transactionsHydrated ? cachedTransactions.size : 'deferred';
+    console.log(`[Data Store] Persistent Store Ready in ${Date.now() - startupStartedAt}ms: ${cachedArticles.length} pieces (${cachedArticles.filter(a => a.status === 'published').length} published, ${cachedArticles.filter(a => a.status === 'draft').length} drafts), ${cachedCategories.length} custom categories, ${transactionStatus} transactions, ${cachedLikes.length} likes, ${cachedComments.length} comments.`);
 
     // 13. Create an automated baseline snapshot if articles exist
     if (cachedArticles.length > 0) {
@@ -1086,7 +1137,12 @@ export const store = {
   },
 
   // TRANSACTIONS
+  async ensureTransactionsHydrated(): Promise<void> {
+    await hydrateTransactionsOnce();
+  },
+
   getTransactions(filter?: { type?: string; status?: string; includeSeeds?: boolean }): PaymentTransaction[] {
+    assertTransactionsHydrated();
     const list = Array.from(cachedTransactions.values()).reverse();
     return list.filter(tx => {
       if (filter?.type && tx.type !== filter.type) return false;
@@ -1096,6 +1152,7 @@ export const store = {
   },
 
   getTransaction(checkoutRequestId: string): PaymentTransaction | undefined {
+    assertTransactionsHydrated();
     // Check by checkoutRequestId or id or receipt
     if (cachedTransactions.has(checkoutRequestId)) {
       return cachedTransactions.get(checkoutRequestId);
@@ -1114,17 +1171,17 @@ export const store = {
     return undefined;
   },
 
-  saveTransaction(tx: PaymentTransaction): PaymentTransaction {
+  async saveTransaction(tx: PaymentTransaction): Promise<PaymentTransaction> {
     cachedTransactions.set(tx.checkoutRequestId, tx);
     writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
     const docId = tx.checkoutRequestId || tx.id;
     if (docId) {
-      setFirestoreDoc('transactions', docId, tx).catch(() => {});
+      await setFirestoreDoc('transactions', docId, tx);
     }
     return tx;
   },
 
-  confirmTransaction(identifier: string, receiptNumber?: string): { success: boolean; transaction?: PaymentTransaction; downloadToken?: string; error?: string } {
+  async confirmTransaction(identifier: string, receiptNumber?: string): Promise<{ success: boolean; transaction?: PaymentTransaction; downloadToken?: string; error?: string }> {
     const tx = this.getTransaction(identifier);
     if (!tx) {
       return { success: false, error: "Transaction not found." };
@@ -1165,7 +1222,7 @@ export const store = {
         tx.downloadToken = downloadToken;
       }
 
-      this.savePurchasedToken(downloadToken, {
+      await this.savePurchasedToken(downloadToken, {
         articleId: tx.articleId,
         phone: tx.phoneNumber || '254700000000',
         expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
@@ -1183,7 +1240,7 @@ export const store = {
       }
     }
 
-    this.saveTransaction(tx);
+    await this.saveTransaction(tx);
 
     // If transaction has an associated affiliate, record the commission once
     if (tx.affiliateCode) {
@@ -1202,7 +1259,7 @@ export const store = {
     return cachedTokens.get(token);
   },
 
-  savePurchasedToken(token: string, data: { articleId: string; phone: string; expiresAt: number; receipt?: string; createdAt?: string; userId?: string; email?: string; accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM' }) {
+  async savePurchasedToken(token: string, data: { articleId: string; phone: string; expiresAt: number; receipt?: string; createdAt?: string; userId?: string; email?: string; accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM' }) {
     const record = {
       ...data,
       token,
@@ -1215,7 +1272,8 @@ export const store = {
       obj[k] = v;
     }
     writeJsonFileSync(TOKENS_FILE, obj);
-    setFirestoreDoc('reader_licenses', token, record).catch(() => {});
+    await setFirestoreDoc('reader_licenses', token, record);
+    return record;
   },
 
   getUserPurchases(userIdOrEmail: string, phone?: string): { articleId: string; token: string; receipt?: string; createdAt: string; expiresAt: number; articleTitle: string }[] {
@@ -1380,13 +1438,13 @@ export const store = {
     const createdAt = new Date().toISOString();
     const cleanPhone = this.normalizePhone(phone) || (phone || '254700000000').trim();
 
-    this.savePurchasedToken(token, {
+    void this.savePurchasedToken(token, {
       articleId,
       phone: cleanPhone,
       expiresAt,
       receipt: receipt || `MANUAL-${Date.now().toString().slice(-6)}`,
       createdAt
-    });
+    }).catch(err => console.warn('[Data Store] Error persisting granted reader license:', err));
 
     const article = cachedArticles.find(a => a.id === articleId || a.slug === articleId);
     const resolvedArticleId = article ? article.id : articleId;
@@ -1780,7 +1838,7 @@ export const store = {
       setFirestoreDoc('manual_access', matchedGrant.id, matchedGrant).catch(() => {});
 
       // Save permanent reader license in token cache & Firestore
-      this.savePurchasedToken(activeToken, {
+      void this.savePurchasedToken(activeToken, {
         articleId: resolvedArticleId,
         phone: normalizedPhone,
         expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
@@ -1789,7 +1847,7 @@ export const store = {
         userId: currentUser?.id,
         email: currentUser?.email,
         accessSource: 'MANUAL_GRANT'
-      });
+      }).catch(err => console.warn('[Data Store] Error persisting manual access token:', err));
 
       console.log(`[ManualAccess] Single-use activated ${matchedGrant.id} for phone ${normalizedPhone} on piece "${resolvedArticleTitle}".`);
 
@@ -1840,14 +1898,14 @@ export const store = {
                                tx.articleId === 'all';
         if (txMatchesPiece && this.phonesMatch(normalizedPhone, tx.phoneNumber)) {
           const purchaseToken = `ink_mpesa_${tx.mpesaReceiptNumber || tx.checkoutRequestId || tx.id}`;
-          this.savePurchasedToken(purchaseToken, {
+          void this.savePurchasedToken(purchaseToken, {
             articleId: resolvedArticleId,
             phone: normalizedPhone,
             expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
             receipt: tx.mpesaReceiptNumber || 'MPESA-PAID',
             createdAt: tx.completedAt || tx.createdAt,
             accessSource: 'MPESA_PURCHASE'
-          });
+          }).catch(err => console.warn('[Data Store] Error persisting restored purchase token:', err));
 
           return {
             success: true,

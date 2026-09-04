@@ -682,6 +682,7 @@ export async function createApp() {
       }
 
       const cleanCode = transactionCode.trim().toUpperCase();
+      await store.ensureTransactionsHydrated();
       
       // Look up genuine transactions in database (confirmed or matching pending)
       let existingTx = store.getTransactions().find(t => 
@@ -698,7 +699,7 @@ export async function createApp() {
 
       // If matching pending transaction, confirm it with the receipt
       if (existingTx && existingTx.status === 'PENDING') {
-        store.confirmTransaction(existingTx.checkoutRequestId, cleanCode);
+        await store.confirmTransaction(existingTx.checkoutRequestId, cleanCode);
         existingTx = store.getTransaction(existingTx.checkoutRequestId) || existingTx;
       }
 
@@ -835,7 +836,7 @@ export async function createApp() {
   });
 
   // Manual Access / Self-Unlock verification for Readers with One-Time Activation & Account Binding
-  app.post("/api/manual-access/verify", publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, (req: Request, res: Response) => {
+  app.post("/api/manual-access/verify", publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, async (req: Request, res: Response) => {
     try {
       const { articleId, phone } = req.body;
       const currentUser = (req as any).user || null;
@@ -847,6 +848,7 @@ export async function createApp() {
         });
       }
 
+      await store.ensureTransactionsHydrated();
       const result = store.verifyManualAccess(articleId, phone, currentUser);
 
       if (result.success && result.verified) {
@@ -1064,6 +1066,7 @@ export async function createApp() {
         return res.status(400).json({ error: "Order ID and Bank Transaction Reference are required." });
       }
 
+      await store.ensureTransactionsHydrated();
       const tx = store.getTransaction(checkoutRequestId);
       if (!tx) {
         return res.status(404).json({ error: "Order not found." });
@@ -1482,9 +1485,15 @@ export async function createApp() {
   });
 
   // Writer: Overview & Real-Time Stats
-  app.get("/api/admin/stats", requireAdminAuth, (_req: Request, res: Response) => {
-    const stats = store.getDashboardStats();
-    res.json(stats);
+  app.get("/api/admin/stats", requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      await store.ensureTransactionsHydrated();
+      const stats = store.getDashboardStats();
+      res.json(stats);
+    } catch (err: any) {
+      console.error("Dashboard stats error:", err);
+      res.status(500).json({ error: err.message || "Failed to load dashboard statistics." });
+    }
   });
 
   // Writer: Get All Pieces (Drafts and Published with Full Content)
@@ -1828,8 +1837,9 @@ export async function createApp() {
     }
   });
 
-  app.get("/api/admin/topics-analytics", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/topics-analytics", requireAdminAuth, async (req: Request, res: Response) => {
     try {
+      await store.ensureTransactionsHydrated();
       const period = req.query.period as any;
       const startDate = req.query.startDate as string;
       const endDate = req.query.endDate as string;
@@ -1842,8 +1852,9 @@ export async function createApp() {
   });
 
   // Writer: Comprehensive Analytics
-  app.get("/api/admin/analytics", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/analytics", requireAdminAuth, async (req: Request, res: Response) => {
     try {
+      await store.ensureTransactionsHydrated();
       const period = req.query.period as any;
       const startDate = req.query.startDate as string;
       const endDate = req.query.endDate as string;
@@ -2026,8 +2037,9 @@ export async function createApp() {
   });
 
   // Writer: Transactions CSV Export
-  app.get("/api/admin/transactions/export", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/transactions/export", requireAdminAuth, async (req: Request, res: Response) => {
     try {
+      await store.ensureTransactionsHydrated();
       const type = req.query.type as string;
       const status = req.query.status as string;
       const txList = store.getTransactions({ type, status });
@@ -2057,20 +2069,26 @@ export async function createApp() {
   });
 
   // Writer: Transactions Ledger (Pay-to-Read & Tips)
-  app.get("/api/admin/transactions", requireAdminAuth, (req: Request, res: Response) => {
-    const type = req.query.type as string;
-    const status = req.query.status as string;
-    const txList = store.getTransactions({ type, status });
+  app.get("/api/admin/transactions", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      await store.ensureTransactionsHydrated();
+      const type = req.query.type as string;
+      const status = req.query.status as string;
+      const txList = store.getTransactions({ type, status });
 
-    const totalRevenue = txList
-      .filter(t => t.status === 'SUCCESS' || t.status === 'CONFIRMED')
-      .reduce((sum, t) => sum + (t.amount || 0), 0);
+      const totalRevenue = txList
+        .filter(t => t.status === 'SUCCESS' || t.status === 'CONFIRMED')
+        .reduce((sum, t) => sum + (t.amount || 0), 0);
 
-    res.json({
-      totalRevenueKes: totalRevenue,
-      count: txList.length,
-      transactions: txList,
-    });
+      res.json({
+        totalRevenueKes: totalRevenue,
+        count: txList.length,
+        transactions: txList,
+      });
+    } catch (err: any) {
+      console.error("Transactions ledger error:", err);
+      res.status(500).json({ error: err.message || "Failed to load transactions." });
+    }
   });
 
   // Writer: Manually Confirm a Payment (M-Pesa or Bank)
@@ -2078,7 +2096,8 @@ export async function createApp() {
     try {
       const { id } = req.params;
       const { receiptNumber } = req.body;
-      const result = store.confirmTransaction(id, receiptNumber);
+      await store.ensureTransactionsHydrated();
+      const result = await store.confirmTransaction(id, receiptNumber);
 
       if (!result.success) {
         return res.status(404).json({ error: result.error || "Failed to confirm payment." });
@@ -2100,6 +2119,7 @@ export async function createApp() {
   app.post("/api/admin/payments/:id/reject", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
+      await store.ensureTransactionsHydrated();
       const tx = store.getTransaction(id);
       if (!tx) {
         return res.status(404).json({ error: "Transaction not found." });
@@ -2115,17 +2135,23 @@ export async function createApp() {
   });
 
   // Writer: Tips Ledger
-  app.get("/api/admin/tips", requireAdminAuth, (_req: Request, res: Response) => {
-    const tipsList = store.getTransactions({ type: 'TIP' });
-    const verifiedTips = tipsList.filter(t => t.status === 'SUCCESS');
-    const totalTipsKes = verifiedTips.reduce((sum, t) => sum + (t.amount || 0), 0);
+  app.get("/api/admin/tips", requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      await store.ensureTransactionsHydrated();
+      const tipsList = store.getTransactions({ type: 'TIP' });
+      const verifiedTips = tipsList.filter(t => t.status === 'SUCCESS');
+      const totalTipsKes = verifiedTips.reduce((sum, t) => sum + (t.amount || 0), 0);
 
-    res.json({
-      totalTipsKes,
-      count: tipsList.length,
-      verifiedCount: verifiedTips.length,
-      tips: tipsList,
-    });
+      res.json({
+        totalTipsKes,
+        count: tipsList.length,
+        verifiedCount: verifiedTips.length,
+        tips: tipsList,
+      });
+    } catch (err: any) {
+      console.error("Tips ledger error:", err);
+      res.status(500).json({ error: err.message || "Failed to load tips." });
+    }
   });
 
   // Writer: Update Author Profile
@@ -2321,8 +2347,12 @@ export async function createApp() {
       const mpesaSettings = store.getMpesaSettings();
       const { consumerKey, consumerSecret } = req.body || {};
       
-      const keyToUse = (consumerKey && !consumerKey.includes('••••')) ? consumerKey.trim() : (mpesaSettings.consumerKey || process.env.MPESA_TILL_CONSUMER_KEY || process.env.MPESA_CONSUMER_KEY);
-      const secretToUse = (consumerSecret && !consumerSecret.includes('••••')) ? consumerSecret.trim() : (mpesaSettings.consumerSecret || process.env.MPESA_TILL_SECRET_KEY || process.env.MPESA_CONSUMER_SECRET);
+      const keyToUse = (consumerKey && !consumerKey.includes('••••'))
+        ? consumerKey.trim()
+        : (process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || mpesaSettings.consumerKey);
+      const secretToUse = (consumerSecret && !consumerSecret.includes('••••'))
+        ? consumerSecret.trim()
+        : (process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || mpesaSettings.consumerSecret);
 
       if (!keyToUse || !secretToUse) {
         return res.status(400).json({
@@ -2331,12 +2361,12 @@ export async function createApp() {
         });
       }
 
-      const token = await getDarajaAccessToken(keyToUse, secretToUse);
+      const { token, error } = await getDarajaAccessToken(keyToUse, secretToUse);
 
       if (!token) {
         return res.status(400).json({
           success: false,
-          error: "Daraja OAuth request failed. Check your Consumer Key and Consumer Secret."
+          error: error || "Daraja OAuth request failed. Check your Consumer Key and Consumer Secret."
         });
       }
 
@@ -2478,11 +2508,17 @@ ${currentDraft || prompt}
   });
 
   // Writer: Export / Backup All Data JSON
-  app.get("/api/admin/export", requireAdminAuth, (_req: Request, res: Response) => {
-    const backup = store.getFullBackupArchive();
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename=ink-and-witness-backup-${new Date().toISOString().split('T')[0]}.json`);
-    res.json(backup);
+  app.get("/api/admin/export", requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      await store.ensureTransactionsHydrated();
+      const backup = store.getFullBackupArchive();
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Disposition', `attachment; filename=ink-and-witness-backup-${new Date().toISOString().split('T')[0]}.json`);
+      res.json(backup);
+    } catch (err: any) {
+      console.error("Full data export error:", err);
+      res.status(500).json({ error: err.message || "Failed to export application data." });
+    }
   });
 
   // Writer: List All Point-in-Time Snapshots
@@ -2496,8 +2532,9 @@ ${currentDraft || prompt}
   });
 
   // Writer: Create Manual Snapshot
-  app.post("/api/admin/backups/snapshot", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/backups/snapshot", requireAdminAuth, async (req: Request, res: Response) => {
     try {
+      await store.ensureTransactionsHydrated();
       const reason = (req.body?.reason as string) || 'manual_admin';
       const result = store.createSnapshotBackup(reason);
       res.json({ success: true, ...result });
@@ -2509,6 +2546,7 @@ ${currentDraft || prompt}
   // Writer: Save Permanently to Cloud Firestore, Atomic Cache & Take Protected Baseline Snapshot
   app.post("/api/admin/save-permanently", requireAdminAuth, async (req: Request, res: Response) => {
     try {
+      await store.ensureTransactionsHydrated();
       const reason = (req.body?.reason as string) || 'author_portal_save_permanently';
       const result = await store.savePermanently(reason);
       res.json(result);
@@ -2521,6 +2559,7 @@ ${currentDraft || prompt}
   // Writer: Restore State from Snapshot or Archive
   app.post("/api/admin/backups/restore", requireAdminAuth, async (req: Request, res: Response) => {
     try {
+      await store.ensureTransactionsHydrated();
       const { archive, filename } = req.body;
       let targetArchive = archive;
 
