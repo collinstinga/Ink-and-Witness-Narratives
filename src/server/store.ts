@@ -2219,10 +2219,14 @@ export const store = {
       timestamp: new Date().toISOString(),
       metadata: data.metadata
     };
+    const retentionCutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    cachedEvents = cachedEvents
+      .filter(existing => {
+        const timestamp = new Date(existing.timestamp).getTime();
+        return Number.isFinite(timestamp) && timestamp >= retentionCutoff;
+      })
+      .slice(-49_999);
     cachedEvents.push(event);
-    if (cachedEvents.length > 100000) {
-      cachedEvents = cachedEvents.slice(-50000);
-    }
     writeJsonFileSync(EVENTS_FILE, cachedEvents);
     return event;
   },
@@ -3835,6 +3839,10 @@ export const store = {
   },
 
   toggleLike(articleId: string, readerHash: string): { liked: boolean; likesCount: number } {
+    const art = cachedArticles.find(a => a.id === articleId);
+    if (!art) {
+      throw new Error("Piece not found.");
+    }
     const existingIndex = cachedLikes.findIndex(l => l.articleId === articleId && l.readerHash === readerHash);
     let liked = false;
     if (existingIndex >= 0) {
@@ -3870,7 +3878,6 @@ export const store = {
 
     // Sync article cache
     const currentLikesCount = cachedLikes.filter(l => l.articleId === articleId).length;
-    const art = cachedArticles.find(a => a.id === articleId);
     if (art) {
       art.likesCount = currentLikesCount;
       writeJsonFileSync(ARTICLES_FILE, cachedArticles);
@@ -3902,6 +3909,12 @@ export const store = {
     }
 
     const art = cachedArticles.find(a => a.id === articleId);
+    if (!art) {
+      throw new Error("Piece not found.");
+    }
+    if (cachedComments.length >= 10_000) {
+      throw new Error("Comment storage is temporarily at capacity.");
+    }
     const comment: PieceComment = {
       id: `comm_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       articleId,
@@ -3960,6 +3973,7 @@ export const store = {
   reportComment(commentId: string, reason?: string): PieceComment | null {
     const comment = cachedComments.find(c => c.id === commentId);
     if (!comment) return null;
+    if (comment.isReported) return comment;
 
     comment.isReported = true;
     comment.reportedReason = reason || 'Flagged by reader for review';

@@ -483,7 +483,25 @@ export const affiliateStore = {
       return { valid: false };
     }
 
-    const now = new Date().toISOString();
+    const nowMs = Date.now();
+    const retentionCutoff = nowMs - 90 * 24 * 60 * 60 * 1000;
+    cachedClicks = cachedClicks.filter(click => {
+      const timestamp = new Date(click.timestamp).getTime();
+      return Number.isFinite(timestamp) && timestamp >= retentionCutoff;
+    });
+
+    const duplicate = cachedClicks.some(click =>
+      click.affiliateCode === affiliate.affiliateCode &&
+      click.articleId === articleId &&
+      click.campaignCode === campaignCode &&
+      click.ipHash === ipHash &&
+      nowMs - new Date(click.timestamp).getTime() < 30 * 60 * 1000
+    );
+    if (duplicate) {
+      return { valid: true, affiliate };
+    }
+
+    const now = new Date(nowMs).toISOString();
     const clickEvent: AffiliateClickEvent = {
       id: `clk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       affiliateCode: affiliate.affiliateCode,
@@ -502,7 +520,8 @@ export const affiliateStore = {
       cachedClicks = cachedClicks.slice(-5000);
     }
     writeJsonFileSync(CLICKS_FILE, cachedClicks);
-    setFirestoreDoc('affiliate_clicks', clickEvent.id, clickEvent).catch(() => {});
+    // Raw click documents are intentionally not persisted to Firestore. Only
+    // bounded aggregate counters are stored, protecting the Spark write quota.
 
     affiliate.totalClicks = (affiliate.totalClicks || 0) + 1;
     // Estimate unique visitor if new IP hash
@@ -524,7 +543,7 @@ export const affiliateStore = {
       }
     }
 
-    console.log(`[Referral Click] Affiliate: ${affiliate.affiliateCode} (${affiliate.name}), Article: ${articleId || 'all'}, Campaign: ${campaignCode || 'none'}, IP Hash: ${ipHash}`);
+    console.log(`[Referral Click] Affiliate: ${affiliate.affiliateCode}, Article: ${articleId || 'all'}, Campaign: ${campaignCode || 'none'}`);
 
     return { valid: true, affiliate };
   },

@@ -13,6 +13,7 @@ import { Article, PaymentTransaction, User } from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import { hashAffiliatePassword, verifyAffiliatePassword } from "./src/server/affiliateStore.js";
 import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/server/auth.js";
+import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import {
   initiateStkPush,
   handleDarajaCallback,
@@ -41,6 +42,37 @@ function ensureStoreInitialized(): Promise<void> {
 const SESSION_COOKIE_NAME = 'iw_session';
 const AFFILIATE_SESSION_COOKIE_NAME = 'iw_affiliate_session';
 const isProduction = process.env.NODE_ENV === 'production';
+const recentPublicWriteKeys = new Map<string, number>();
+
+function isDuplicatePublicWrite(bucket: string, values: unknown[], windowMs: number): boolean {
+  const now = Date.now();
+  if (recentPublicWriteKeys.size > 10_000) {
+    for (const [key, expiresAt] of recentPublicWriteKeys) {
+      if (expiresAt <= now) recentPublicWriteKeys.delete(key);
+    }
+  }
+
+  const digest = crypto.createHash('sha256')
+    .update(JSON.stringify([bucket, ...values]))
+    .digest('hex');
+  const existingExpiry = recentPublicWriteKeys.get(digest) || 0;
+  if (existingExpiry > now) return true;
+
+  recentPublicWriteKeys.set(digest, now + windowMs);
+  return false;
+}
+
+function getRequestNetworkKey(req: Request): string {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function isSafePublicIdentifier(value: unknown, maxLength = 128): value is string {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
+}
 
 // Cookie helpers
 function setSessionCookie(res: Response, sessionId: string, maxAgeMs: number = 7 * 24 * 60 * 60 * 1000) {
@@ -255,8 +287,27 @@ export async function createApp() {
 
   app.use(cookieParser());
   app.use(requireSameOriginForCookieAuth);
-  app.use(express.json({ limit: '20mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+
+  // Only authenticated image endpoints retain the larger payload allowance.
+  // All other routes are capped well below the previous global 20 MB limit.
+  const largeAdminBodyRoutes = [
+    '/api/admin/save-permanent-image',
+    '/api/admin/upload-image'
+  ];
+  app.use(largeAdminBodyRoutes, express.json({ limit: '20mb' }));
+  app.use(largeAdminBodyRoutes, express.urlencoded({ extended: true, limit: '20mb' }));
+  app.use('/api/mpesa/callback', express.json({ limit: '64kb' }));
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    if (err?.type === 'entity.too.large') {
+      return res.status(413).json({ success: false, error: 'Request body is too large.' });
+    }
+    if (err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({ success: false, error: 'Request body is not valid JSON.' });
+    }
+    return next(err);
+  });
   app.use(loadSessionUser);
 
   // Rate limiters for security
@@ -312,6 +363,71 @@ export async function createApp() {
     legacyHeaders: false,
     validate: { xForwardedForHeader: false, default: false },
     message: { error: "Polling rate limit exceeded. Please wait a moment." }
+  });
+
+  // Process-local limits are retained as defense in depth. A staged Vercel
+  // Firewall rule will add the shared boundary after its traffic is reviewed.
+  const publicWriteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Too many requests. Please wait before trying again." }
+  });
+
+  const analyticsWriteLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Analytics request limit reached." }
+  });
+
+  const engagementWriteLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 40,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Engagement request limit reached. Please try again later." }
+  });
+
+  const commentWriteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Comment limit reached. Please try again later." }
+  });
+
+  const commentReportLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Report limit reached. Please try again later." }
+  });
+
+  const referralClickLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Referral tracking limit reached." }
+  });
+
+  const purchaseRecoveryLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Purchase recovery limit reached. Please wait before trying again." }
   });
 
   // Prevent every page view from re-running the same Firestore-heavy public
@@ -557,7 +673,7 @@ export async function createApp() {
   });
 
   // Restore Monograph Access via Genuine Confirmed Safaricom Receipt
-  app.post("/api/mpesa/restore-purchase", async (req: Request, res: Response) => {
+  app.post("/api/mpesa/restore-purchase", publicWriteLimiter, purchaseRecoveryLimiter, publicWriteValidators.restorePurchase, async (req: Request, res: Response) => {
     try {
       const { transactionCode, phoneNumber } = req.body;
 
@@ -628,11 +744,18 @@ export async function createApp() {
   });
 
   // Affiliate / Referral Redirect Tracking Route
-  app.get("/r/:code", (req: Request, res: Response) => {
+  app.get("/r/:code", publicWriteLimiter, referralClickLimiter, (req: Request, res: Response) => {
     try {
       const code = (req.params.code || "").trim();
-      const articleId = (req.query.article || req.query.articleId || req.query.id || req.query.monograph || "") as string;
-      const campaignCode = (req.query.c || req.query.campaign || "") as string;
+      const rawArticleId = (req.query.article || req.query.articleId || req.query.id || req.query.monograph || "") as string;
+      const rawCampaignCode = (req.query.c || req.query.campaign || "") as string;
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(code)) {
+        return res.redirect(302, "/");
+      }
+      const articleId = rawArticleId && isSafePublicIdentifier(rawArticleId) ? rawArticleId : "";
+      const campaignCode = rawCampaignCode && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(rawCampaignCode)
+        ? rawCampaignCode
+        : "";
 
       // Extract client details for click tracking
       const ip = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "").split(",")[0].trim();
@@ -712,7 +835,7 @@ export async function createApp() {
   });
 
   // Manual Access / Self-Unlock verification for Readers with One-Time Activation & Account Binding
-  app.post("/api/manual-access/verify", verifyAccessLimiter, (req: Request, res: Response) => {
+  app.post("/api/manual-access/verify", publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, (req: Request, res: Response) => {
     try {
       const { articleId, phone } = req.body;
       const currentUser = (req as any).user || null;
@@ -756,7 +879,7 @@ export async function createApp() {
   // ==========================================
 
   // Initiate M-Pesa STK Push
-  app.post("/api/mpesa/stkpush", stkPushLimiter, async (req: Request, res: Response) => {
+  app.post("/api/mpesa/stkpush", publicWriteLimiter, stkPushLimiter, publicWriteValidators.stkPush, async (req: Request, res: Response) => {
     try {
       const { 
         articleId, 
@@ -856,7 +979,7 @@ export async function createApp() {
   });
 
   // Bank Payment Order Creation (Direct Bank / RTGS / EFT / Paybill Bank Transfer)
-  app.post("/api/payments/bank-order", bankOrderLimiter, async (req: Request, res: Response) => {
+  app.post("/api/payments/bank-order", publicWriteLimiter, bankOrderLimiter, publicWriteValidators.bankOrder, async (req: Request, res: Response) => {
     try {
       const { 
         articleId, 
@@ -934,7 +1057,7 @@ export async function createApp() {
   });
 
   // Bank Payment Submit Customer Bank Transaction Reference
-  app.post("/api/payments/bank-submit-ref", async (req: Request, res: Response) => {
+  app.post("/api/payments/bank-submit-ref", publicWriteLimiter, bankOrderLimiter, publicWriteValidators.bankReference, async (req: Request, res: Response) => {
     try {
       const { checkoutRequestId, customerRef, senderPhone } = req.body;
       if (!checkoutRequestId || !customerRef) {
@@ -1018,9 +1141,16 @@ export async function createApp() {
   });
 
   // Public Interaction Analytics Tracking
-  app.post("/api/analytics/track", (req: Request, res: Response) => {
+  app.post("/api/analytics/track", publicWriteLimiter, analyticsWriteLimiter, publicWriteValidators.analytics, (req: Request, res: Response) => {
     try {
       const { eventType, articleId, category, readerHash, metadata } = req.body;
+      if (isDuplicatePublicWrite(
+        'analytics',
+        [getRequestNetworkKey(req), eventType, articleId || '', readerHash],
+        30 * 1000
+      )) {
+        return res.json({ success: true, deduplicated: true });
+      }
       const event = store.recordInteractionEvent({
         eventType,
         articleId,
@@ -1052,10 +1182,13 @@ export async function createApp() {
   });
 
   // Toggle Like for a piece
-  app.post("/api/articles/:id/like", (req: Request, res: Response) => {
+  app.post("/api/articles/:id/like", publicWriteLimiter, engagementWriteLimiter, publicWriteValidators.like, (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { readerHash } = req.body;
+      if (!isSafePublicIdentifier(id)) {
+        return res.status(400).json({ error: "Invalid piece identifier." });
+      }
       if (!readerHash) {
         return res.status(400).json({ error: "readerHash is required to like a piece." });
       }
@@ -1078,12 +1211,23 @@ export async function createApp() {
   });
 
   // Post Comment on a piece
-  app.post("/api/articles/:id/comments", (req: Request, res: Response) => {
+  app.post("/api/articles/:id/comments", publicWriteLimiter, commentWriteLimiter, publicWriteValidators.comment, (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { content, readerName, readerEmail, readerHash } = req.body;
+      if (!isSafePublicIdentifier(id)) {
+        return res.status(400).json({ error: "Invalid piece identifier." });
+      }
       if (!content || !content.trim()) {
         return res.status(400).json({ error: "Comment text cannot be empty." });
+      }
+      const recentDuplicate = store.getComments(id, true).find(comment =>
+        comment.readerHash === readerHash &&
+        comment.content === content.trim() &&
+        Date.now() - new Date(comment.createdAt).getTime() < 5 * 60 * 1000
+      );
+      if (recentDuplicate) {
+        return res.json({ success: true, deduplicated: true, comment: recentDuplicate });
       }
       const comment = store.addComment(id, content, readerName, readerEmail, readerHash);
       res.status(201).json({ success: true, comment });
@@ -1093,10 +1237,13 @@ export async function createApp() {
   });
 
   // Report a comment
-  app.post("/api/comments/:commentId/report", (req: Request, res: Response) => {
+  app.post("/api/comments/:commentId/report", publicWriteLimiter, commentReportLimiter, publicWriteValidators.commentReport, (req: Request, res: Response) => {
     try {
       const { commentId } = req.params;
       const { reason } = req.body;
+      if (!isSafePublicIdentifier(commentId, 160)) {
+        return res.status(400).json({ error: "Invalid comment identifier." });
+      }
       const updated = store.reportComment(commentId, reason);
       if (!updated) {
         return res.status(404).json({ error: "Comment not found." });
@@ -1108,10 +1255,16 @@ export async function createApp() {
   });
 
   // Delete own comment
-  app.delete("/api/comments/:commentId", (req: Request, res: Response) => {
+  app.delete("/api/comments/:commentId", publicWriteLimiter, engagementWriteLimiter, publicWriteValidators.commentDelete, (req: Request, res: Response) => {
     try {
       const { commentId } = req.params;
+      if (!isSafePublicIdentifier(commentId, 160)) {
+        return res.status(400).json({ error: "Invalid comment identifier." });
+      }
       const readerHash = req.body?.readerHash || (req.query?.readerHash as string);
+      if (!readerHash || !/^[A-Za-z0-9:_-]{1,128}$/.test(readerHash)) {
+        return res.status(400).json({ error: "A valid reader identifier is required." });
+      }
       const deleted = store.deleteComment(commentId, readerHash);
       if (!deleted) {
         return res.status(404).json({ error: "Comment not found." });
@@ -1127,7 +1280,7 @@ export async function createApp() {
   // ==========================================
 
   // Public unified login for both clients and administrators
-  app.post("/api/auth/login", loginLimiter, async (req: Request, res: Response) => {
+  app.post("/api/auth/login", loginLimiter, publicWriteValidators.authLogin, async (req: Request, res: Response) => {
     try {
       const { email, password } = req.body;
       if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
@@ -1169,7 +1322,7 @@ export async function createApp() {
   });
 
   // Public registration for readers/clients
-  app.post("/api/auth/register", registerLimiter, async (req: Request, res: Response) => {
+  app.post("/api/auth/register", registerLimiter, publicWriteValidators.authRegister, async (req: Request, res: Response) => {
     try {
       const { email, password, name } = req.body;
       if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
@@ -1290,7 +1443,7 @@ export async function createApp() {
   });
 
   // Reader Account: Link a purchased token or receipt to active user account
-  app.post("/api/user/link-purchase", (req: Request, res: Response) => {
+  app.post("/api/user/link-purchase", purchaseRecoveryLimiter, publicWriteValidators.linkPurchase, (req: Request, res: Response) => {
     const user = (req as any).user;
     if (!user) {
       return res.status(401).json({ success: false, error: "Please sign in to link purchases to your account." });
@@ -2395,17 +2548,17 @@ ${currentDraft || prompt}
   // ==========================================
 
   // Public: Register Referral Click (Attribution)
-  app.post("/api/affiliate/click", (req: Request, res: Response) => {
+  app.post("/api/affiliate/click", publicWriteLimiter, referralClickLimiter, publicWriteValidators.affiliateClick, (req: Request, res: Response) => {
     try {
       const { ref, articleId, campaign } = req.body;
       if (!ref) {
         return res.status(400).json({ error: "Referral code is required" });
       }
 
-      const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
-      const ipHash = crypto.createHash('md5').update(ip).digest('hex').substring(0, 12);
-      const userAgent = req.headers['user-agent'] as string;
-      const referrer = req.headers.referer as string;
+      const ip = getRequestNetworkKey(req);
+      const userAgent = String(req.headers['user-agent'] || '').substring(0, 150);
+      const referrer = String(req.headers.referer || '').substring(0, 200);
+      const ipHash = crypto.createHash('sha256').update(ip + userAgent).digest('hex').substring(0, 16);
 
       const result = store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer);
       res.json({
@@ -2446,7 +2599,7 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/validate/:code", handleValidateRef);
 
   // Public / Promoters: Affiliate Registration
-  app.post("/api/affiliate/register", registerLimiter, (req: Request, res: Response) => {
+  app.post("/api/affiliate/register", registerLimiter, publicWriteValidators.affiliateRegister, (req: Request, res: Response) => {
     try {
       const settings = store.affiliates.getSettings();
       if (!settings.allowSelfRegistration) {
@@ -2524,7 +2677,7 @@ ${currentDraft || prompt}
   });
 
   // Affiliate: Login
-  app.post("/api/affiliate/login", loginLimiter, (req: Request, res: Response) => {
+  app.post("/api/affiliate/login", loginLimiter, publicWriteValidators.affiliateLogin, (req: Request, res: Response) => {
     try {
       const { login, emailOrCode, email, code, password } = req.body;
       const rawLogin = login || emailOrCode || email || code;
