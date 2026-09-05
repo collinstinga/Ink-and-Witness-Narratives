@@ -178,7 +178,7 @@ const optionalPhone: FieldRule = { kind: 'string', maxLength: 32, pattern: SAFE_
 export const publicWriteValidators = {
   restorePurchase: validateJsonBody({
     transactionCode: { kind: 'string', required: true, maxLength: 64, pattern: SAFE_CODE, normalize: 'upper' },
-    phoneNumber: optionalPhone
+    phoneNumber: { ...optionalPhone, required: true }
   }, { maxBytes: 2_048 }),
 
   manualAccess: validateJsonBody({

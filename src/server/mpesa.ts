@@ -1,6 +1,12 @@
 import crypto from 'crypto';
 import { store } from './store.js';
 import { MpesaConfig, PaymentTransaction } from '../types.js';
+import {
+  attachCallbackCapability,
+  generatePaymentCapability,
+  hashPaymentCapability,
+  verifyPaymentCapability
+} from './paymentSecurity.js';
 
 /**
  * Safaricom Daraja Production M-Pesa Service
@@ -287,6 +293,7 @@ export interface StkPushResult {
   amount?: number;
   phoneNumber?: string;
   articleTitle?: string;
+  paymentCapability?: string;
   error?: string;
 }
 
@@ -331,16 +338,10 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     const duplicate = await store.findRecentPendingTransaction(articleId, formattedPhone, 45000);
 
     if (duplicate && duplicate.checkoutRequestId) {
-      console.log(`[M-PESA DUPLICATE PROTECTION] Reusing active pending transaction: ${duplicate.checkoutRequestId}`);
+      console.log('[M-PESA DUPLICATE PROTECTION] An active pending transaction already exists.');
       return {
-        success: true,
-        checkoutRequestId: duplicate.checkoutRequestId,
-        merchantRequestId: duplicate.merchantRequestId,
-        customerMessage: "Safaricom is already processing this M-Pesa request.",
-        message: "Safaricom is already processing this M-Pesa request.",
-        amount: duplicate.amount,
-        phoneNumber: duplicate.phoneNumber,
-        articleTitle: duplicate.articleTitle
+        success: false,
+        error: 'Safaricom is already processing an M-Pesa request for this phone and piece. Continue in the original payment window or wait briefly before retrying.'
       };
     }
   }
@@ -384,9 +385,13 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
 
   // Resolve Public HTTPS Callback URL
   let callbackUrl: string;
+  const callbackCapability = generatePaymentCapability();
   try {
-    callbackUrl = resolveDarajaCallbackUrl(
-      process.env.MPESA_CALLBACK_URL || process.env.APP_URL || originUrl || mpesaSettings.callbackUrl || ''
+    callbackUrl = attachCallbackCapability(
+      resolveDarajaCallbackUrl(
+        process.env.MPESA_CALLBACK_URL || process.env.APP_URL || originUrl || mpesaSettings.callbackUrl || ''
+      ),
+      callbackCapability
     );
   } catch (error: any) {
     console.error(`[M-PESA CONFIG ERROR] ${error.message}`);
@@ -427,7 +432,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
 
     const stkData = await stkRes.json().catch(() => ({}));
     console.log(`[Daraja HTTP STATUS] ${stkRes.status}`);
-    console.log(`[Daraja RESPONSE] ${JSON.stringify(stkData)}`);
+    console.log(`[Daraja RESPONSE] HTTP ${stkRes.status}, ResponseCode: ${String(stkData?.ResponseCode || 'none')}, ErrorCode: ${String(stkData?.errorCode || 'none')}`);
 
     // Handle SpikeArrest or rate limiting
     if (stkRes.status === 429 || JSON.stringify(stkData).includes('SpikeArrestViolation')) {
@@ -446,15 +451,31 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
         });
         const retryData = await retryRes.json().catch(() => ({}));
         console.log(`[Daraja RETRY HTTP STATUS] ${retryRes.status}`);
-        console.log(`[Daraja RETRY RESPONSE] ${JSON.stringify(retryData)}`);
+        console.log(`[Daraja RETRY RESPONSE] HTTP ${retryRes.status}, ResponseCode: ${String(retryData?.ResponseCode || 'none')}, ErrorCode: ${String(retryData?.errorCode || 'none')}`);
         if (retryData?.ResponseCode === '0' && retryData?.CheckoutRequestID) {
-          return handleSuccessfulStkResponse(retryData, params, formattedPhone, cleanAmount, businessShortCode, masked);
+          return handleSuccessfulStkResponse(
+            retryData,
+            params,
+            formattedPhone,
+            cleanAmount,
+            businessShortCode,
+            masked,
+            callbackCapability
+          );
         }
       }
     }
 
     if (stkData?.ResponseCode === '0' && stkData?.CheckoutRequestID) {
-      return handleSuccessfulStkResponse(stkData, params, formattedPhone, cleanAmount, businessShortCode, masked);
+      return handleSuccessfulStkResponse(
+        stkData,
+        params,
+        formattedPhone,
+        cleanAmount,
+        businessShortCode,
+        masked,
+        callbackCapability
+      );
     } else {
       const errorMsg = stkData?.errorMessage || stkData?.ResponseDescription || (stkData?.fault?.faultstring ? `Safaricom Notice: ${stkData.fault.faultstring}` : `Safaricom rejected STK Push (HTTP ${stkRes.status})`);
       console.error(`[M-PESA STK REJECTED] ${errorMsg}`);
@@ -482,12 +503,17 @@ async function handleSuccessfulStkResponse(
   formattedPhone: string,
   amount: number,
   shortcodeUsed: string,
-  maskedPhone: string
+  maskedPhone: string,
+  callbackCapability: string
 ): Promise<StkPushResult> {
   const checkoutRequestId = stkData.CheckoutRequestID;
-  const merchantRequestId = stkData.MerchantRequestID || `MR_${Date.now()}`;
+  const merchantRequestId = stkData.MerchantRequestID;
+  if (typeof merchantRequestId !== 'string' || !merchantRequestId.trim()) {
+    return { success: false, error: 'Safaricom accepted the request without a valid merchant correlation ID.' };
+  }
+  const paymentCapability = generatePaymentCapability();
 
-  console.log(`[STK PUSH SUCCESSFUL] CheckoutRequestID: ${checkoutRequestId}, MerchantRequestID: ${merchantRequestId}, CustomerPhone: ${maskedPhone}, Amount: KES ${amount}`);
+  console.log(`[STK PUSH SUCCESSFUL] Provider correlation IDs received. CustomerPhone: ${maskedPhone}, Amount: KES ${amount}`);
 
   const transaction: PaymentTransaction = {
     id: `tx_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
@@ -508,12 +534,14 @@ async function handleSuccessfulStkResponse(
     affiliateCode: params.affiliateCode || undefined,
     campaignCode: params.campaignCode || undefined,
     shortcodeUsed,
+    paymentCapabilityHash: hashPaymentCapability(paymentCapability),
+    callbackCapabilityHash: hashPaymentCapability(callbackCapability),
     userId: params.userId,
     userEmail: params.userEmail,
   };
 
   await store.saveTransaction(transaction);
-  console.log(`[M-PESA TRANSACTION CREATED] Stored in database -> ID: ${transaction.id}, CheckoutRequestID: ${checkoutRequestId}, Status: PENDING`);
+  console.log('[M-PESA TRANSACTION CREATED] Pending transaction stored with hashed payment and callback capabilities.');
 
   return {
     success: true,
@@ -523,88 +551,213 @@ async function handleSuccessfulStkResponse(
     message: 'M-Pesa request accepted by Safaricom. Waiting for handset delivery confirmation.',
     amount,
     phoneNumber: formattedPhone,
-    articleTitle: transaction.articleTitle
+    articleTitle: transaction.articleTitle,
+    paymentCapability
+  };
+}
+
+type DarajaCallbackMetadata = {
+  amount: number;
+  receiptNumber: string;
+  transactionDate: string;
+  phoneNumber: string;
+};
+
+export type ParsedDarajaCallback = {
+  checkoutRequestId: string;
+  merchantRequestId: string;
+  resultCode: number;
+  resultDesc: string;
+  metadata?: DarajaCallbackMetadata;
+};
+
+export type DarajaCallbackResult = {
+  success: boolean;
+  outcome: 'committed' | 'duplicate' | 'rejected' | 'retryable_error';
+  message: string;
+};
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readCallbackIdentifier(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length >= 3 && normalized.length <= 160 &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(normalized)
+    ? normalized
+    : null;
+}
+
+export function parseDarajaCallback(callbackBody: unknown): ParsedDarajaCallback | null {
+  if (!isPlainRecord(callbackBody) || !isPlainRecord(callbackBody.Body)) return null;
+  const stkCallback = callbackBody.Body.stkCallback;
+  if (!isPlainRecord(stkCallback)) return null;
+
+  const checkoutRequestId = readCallbackIdentifier(stkCallback.CheckoutRequestID);
+  const merchantRequestId = readCallbackIdentifier(stkCallback.MerchantRequestID);
+  const resultCode = stkCallback.ResultCode;
+  const resultDesc = typeof stkCallback.ResultDesc === 'string' ? stkCallback.ResultDesc.trim() : '';
+  if (
+    !checkoutRequestId ||
+    !merchantRequestId ||
+    typeof resultCode !== 'number' ||
+    !Number.isFinite(resultCode) ||
+    !Number.isInteger(resultCode) ||
+    !resultDesc ||
+    resultDesc.length > 512
+  ) {
+    return null;
+  }
+
+  if (resultCode !== 0) {
+    return { checkoutRequestId, merchantRequestId, resultCode, resultDesc };
+  }
+
+  if (!isPlainRecord(stkCallback.CallbackMetadata) || !Array.isArray(stkCallback.CallbackMetadata.Item)) {
+    return null;
+  }
+  const items = stkCallback.CallbackMetadata.Item;
+  if (items.length < 4 || items.length > 20) return null;
+
+  const metadata = new Map<string, unknown>();
+  for (const item of items) {
+    if (!isPlainRecord(item) || typeof item.Name !== 'string' || item.Name.length > 64) return null;
+    if (metadata.has(item.Name)) return null;
+    if (item.Value !== undefined && !['string', 'number', 'boolean'].includes(typeof item.Value)) return null;
+    metadata.set(item.Name, item.Value);
+  }
+
+  const rawAmount = metadata.get('Amount');
+  const rawReceipt = metadata.get('MpesaReceiptNumber');
+  const rawDate = metadata.get('TransactionDate');
+  const rawPhone = metadata.get('PhoneNumber');
+  if (
+    typeof rawAmount !== 'number' ||
+    !Number.isFinite(rawAmount) ||
+    rawAmount <= 0 ||
+    rawAmount > 1_000_000 ||
+    (typeof rawReceipt !== 'string' && typeof rawReceipt !== 'number') ||
+    (typeof rawDate !== 'string' && typeof rawDate !== 'number') ||
+    (typeof rawPhone !== 'string' && typeof rawPhone !== 'number')
+  ) {
+    return null;
+  }
+
+  const receiptNumber = String(rawReceipt).trim().toUpperCase();
+  const transactionDate = String(rawDate).trim();
+  const phoneNumber = formatKenyanPhone(String(rawPhone));
+  if (
+    !/^[A-Z0-9]{8,32}$/.test(receiptNumber) ||
+    !/^\d{8,20}$/.test(transactionDate) ||
+    !isValidKenyanMpesaPhone(phoneNumber)
+  ) {
+    return null;
+  }
+
+  return {
+    checkoutRequestId,
+    merchantRequestId,
+    resultCode,
+    resultDesc,
+    metadata: { amount: rawAmount, receiptNumber, transactionDate, phoneNumber }
   };
 }
 
 /**
  * 3. Safaricom Webhook Callback Processor
- * Authoritative Source of Truth for M-Pesa Payments
+ * Authenticated by a per-request callback URL capability, then correlated and
+ * committed atomically. Standard Daraja callbacks do not contain a signature.
  */
-export async function handleDarajaCallback(callbackBody: any): Promise<{ success: boolean; message: string }> {
+export async function handleDarajaCallback(
+  callbackBody: unknown,
+  callbackCapability: unknown
+): Promise<DarajaCallbackResult> {
+  const parsed = parseDarajaCallback(callbackBody);
+  if (!parsed) {
+    console.warn('[M-PESA CALLBACK REJECTED] Malformed callback payload.');
+    return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
+  }
+  if (typeof callbackCapability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(callbackCapability)) {
+    console.warn('[M-PESA CALLBACK REJECTED] Missing callback authentication.');
+    return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
+  }
+
   try {
-    const stkCallback = callbackBody?.Body?.stkCallback;
-    if (!stkCallback) {
-      console.warn('[M-PESA CALLBACK WARNING] Empty or malformed callback payload received.');
-      return { success: false, message: 'Invalid payload structure' };
+    const tx = await store.loadTransaction(parsed.checkoutRequestId);
+    if (
+      !tx ||
+      tx.paymentMethod !== 'mpesa' ||
+      (tx.type !== 'PURCHASE' && tx.type !== 'TIP') ||
+      !tx.merchantRequestId ||
+      tx.merchantRequestId !== parsed.merchantRequestId ||
+      !tx.callbackCapabilityHash ||
+      !verifyPaymentCapability(callbackCapability, tx.callbackCapabilityHash)
+    ) {
+      console.warn('[M-PESA CALLBACK REJECTED] Authentication or transaction correlation failed.');
+      return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
     }
 
-    const checkoutRequestId = stkCallback.CheckoutRequestID;
-    const merchantRequestId = stkCallback.MerchantRequestID || '';
-    const resultCode = Number(stkCallback.ResultCode);
-    const resultDesc = stkCallback.ResultDesc || '';
-    console.log(`[M-PESA CALLBACK RECEIVED] CheckoutRequestID: ${checkoutRequestId || 'missing'}, ResultCode: ${Number.isFinite(resultCode) ? resultCode : 'invalid'}`);
+    if (parsed.resultCode === 0) {
+      const metadata = parsed.metadata;
+      if (
+        !metadata ||
+        metadata.amount !== tx.amount ||
+        metadata.phoneNumber !== tx.phoneNumber
+      ) {
+        console.warn('[M-PESA CALLBACK REJECTED] Paid amount or phone did not match the initiated transaction.');
+        return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
+      }
 
-    const tx = await store.loadTransaction(checkoutRequestId);
-    if (!tx) {
-      console.warn(`[M-PESA CALLBACK UNKNOWN] No matching transaction found for CheckoutRequestID: ${checkoutRequestId}`);
-      return { success: true, message: 'Transaction not found in database' };
+      const settlement = await store.settleMpesaTransaction(parsed.checkoutRequestId, {
+        merchantRequestId: parsed.merchantRequestId,
+        receiptNumber: metadata.receiptNumber,
+        amount: metadata.amount,
+        phoneNumber: metadata.phoneNumber,
+        resultDesc: parsed.resultDesc,
+        transactionTimestamp: metadata.transactionDate,
+        expectedCallbackCapabilityHash: tx.callbackCapabilityHash
+      });
+      if (settlement.outcome === 'rejected') {
+        console.warn('[M-PESA CALLBACK REJECTED] Atomic settlement validation failed.');
+        return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
+      }
+
+      console.log(`[M-PESA CALLBACK ${settlement.outcome === 'committed' ? 'COMMITTED' : 'DUPLICATE'}] Valid provider success callback handled.`);
+      return {
+        success: true,
+        outcome: settlement.outcome,
+        message: settlement.outcome === 'committed' ? 'Callback processed.' : 'Callback already processed.'
+      };
     }
 
-    tx.merchantRequestId = tx.merchantRequestId || merchantRequestId;
-    tx.resultCode = resultCode;
-    tx.resultDesc = resultDesc;
-    tx.updatedAt = new Date().toISOString();
-
-    if (resultCode === 0) {
-      // Payment Successful
-      const metadata = stkCallback.CallbackMetadata?.Item || [];
-      const receiptItem = metadata.find((i: any) => i.Name === 'MpesaReceiptNumber');
-      const amountItem = metadata.find((i: any) => i.Name === 'Amount');
-      const phoneItem = metadata.find((i: any) => i.Name === 'PhoneNumber');
-      const dateItem = metadata.find((i: any) => i.Name === 'TransactionDate');
-
-      const receipt = receiptItem?.Value ? String(receiptItem.Value).trim() : `REC_${Date.now()}`;
-      const paidAmount = amountItem?.Value ? Number(amountItem.Value) : tx.amount;
-      const paidPhone = phoneItem?.Value ? String(phoneItem.Value) : tx.phoneNumber;
-      const transDate = dateItem?.Value ? String(dateItem.Value) : new Date().toISOString();
-
-      tx.mpesaReceiptNumber = receipt;
-      tx.receiptNumber = receipt;
-      tx.amount = paidAmount;
-      if (paidPhone) tx.phoneNumber = formatKenyanPhone(paidPhone);
-      tx.transactionTimestamp = transDate;
-      tx.status = 'SUCCESS';
-      tx.completedAt = new Date().toISOString();
-      tx.confirmedAt = new Date().toISOString();
-
-      // Issue Reader License Download Token
-      const confirmationResult = await store.confirmTransaction(checkoutRequestId, receipt);
-      console.log(`[M-PESA CALLBACK SUCCESS] Confirmed! Piece: ${tx.articleId}, Receipt: ${receipt}, Token: ${confirmationResult.downloadToken ? 'ISSUED' : 'EXISTING'}`);
-    } else if (resultCode === 1032) {
-      tx.status = 'CANCELLED';
-      tx.resultDesc = 'The transaction was cancelled on the mobile handset.';
-      tx.completedAt = new Date().toISOString();
-      await store.saveTransaction(tx);
-      console.log(`[M-PESA CALLBACK CANCELLED] User cancelled on phone: ${checkoutRequestId}`);
-    } else if (resultCode === 1037) {
-      tx.status = 'TIMEOUT';
-      tx.resultDesc = 'Payment prompt timed out without PIN entry.';
-      tx.completedAt = new Date().toISOString();
-      await store.saveTransaction(tx);
-      console.log(`[M-PESA CALLBACK TIMEOUT] Prompt timed out on phone: ${checkoutRequestId}`);
-    } else {
-      tx.status = 'FAILED';
-      tx.resultDesc = resultDesc || `Payment rejected by Safaricom (Code ${resultCode}).`;
-      tx.completedAt = new Date().toISOString();
-      await store.saveTransaction(tx);
-      console.log(`[M-PESA CALLBACK FAILED] Code: ${resultCode}, Desc: ${resultDesc}`);
+    const terminalStatus = parsed.resultCode === 1032
+      ? 'CANCELLED' as const
+      : parsed.resultCode === 1037
+        ? 'TIMEOUT' as const
+        : 'FAILED' as const;
+    const failure = await store.recordMpesaTerminalFailure(parsed.checkoutRequestId, {
+      merchantRequestId: parsed.merchantRequestId,
+      callbackCapabilityHash: tx.callbackCapabilityHash,
+      resultCode: parsed.resultCode,
+      resultDesc: parsed.resultDesc,
+      status: terminalStatus
+    });
+    if (failure.outcome === 'rejected') {
+      console.warn('[M-PESA CALLBACK REJECTED] Conflicting terminal callback.');
+      return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
     }
 
-    return { success: true, message: 'Callback processed successfully' };
-  } catch (err: any) {
-    console.error('[M-PESA CALLBACK EXCEPTION]:', err);
-    return { success: false, message: err.message || 'Callback exception' };
+    console.log(`[M-PESA CALLBACK ${failure.outcome === 'committed' ? 'COMMITTED' : 'DUPLICATE'}] Valid provider terminal callback handled.`);
+    return {
+      success: true,
+      outcome: failure.outcome,
+      message: failure.outcome === 'committed' ? 'Callback processed.' : 'Callback already processed.'
+    };
+  } catch (error) {
+    console.error('[M-PESA CALLBACK RETRYABLE ERROR] Persistence failed:', error);
+    return { success: false, outcome: 'retryable_error', message: 'Callback could not be persisted.' };
   }
 }
 
@@ -672,6 +825,44 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
       resultDesc: tx.resultDesc || 'Payment failed on phone.'
     };
   }
+
+  if (tx.paymentMethod === 'bank') {
+    return {
+      status: 'PENDING',
+      resultDesc: tx.bankReference
+        ? 'Bank reference submitted and awaiting reconciliation.'
+        : 'Bank order created and awaiting transfer details.'
+    };
+  }
+
+  const recordQueryTerminalResult = async (
+    status: 'FAILED' | 'CANCELLED' | 'TIMEOUT',
+    resultCode: number,
+    resultDesc: string
+  ) => {
+    if (!tx.merchantRequestId || !tx.callbackCapabilityHash) {
+      return {
+        status: 'PENDING' as const,
+        resultDesc: 'Payment status requires manual reconciliation.'
+      };
+    }
+
+    const result = await store.recordMpesaTerminalFailure(checkoutRequestId, {
+      merchantRequestId: tx.merchantRequestId,
+      callbackCapabilityHash: tx.callbackCapabilityHash,
+      resultCode,
+      resultDesc,
+      status
+    });
+    if (result.outcome === 'rejected') {
+      return {
+        status: 'PENDING' as const,
+        resultDesc: 'Payment status requires manual reconciliation.'
+      };
+    }
+    if (result.transaction) tx = result.transaction;
+    return { status, resultCode, resultDesc };
+  };
 
   // If still PENDING: Perform on-demand Daraja STK Push Query with cooldown
   const nowMs = Date.now();
@@ -753,7 +944,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
       return pendingPacedResult;
     }
 
-    console.log(`[M-PESA QUERY RESPONSE] Status: ${queryRes.status}, Body:`, JSON.stringify(queryData));
+    console.log(`[M-PESA QUERY RESPONSE] HTTP ${queryRes.status}, ResponseCode: ${String(queryData?.ResponseCode || 'none')}, ResultCode: ${String(queryData?.ResultCode ?? 'none')}`);
 
     let resolvedResult: any = { status: 'PENDING', resultDesc: 'Waiting for the Safaricom phone prompt…' };
 
@@ -762,67 +953,91 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
       const qResultDesc = queryData.ResultDesc || '';
 
       if (qResultCode === 0) {
-        // Query confirms success!
-        const receipt = queryData.MpesaReceiptNumber || `REC_${Date.now()}`;
-        tx.status = 'SUCCESS';
-        tx.resultCode = 0;
-        tx.resultDesc = qResultDesc || 'Payment confirmed via query.';
-        tx.mpesaReceiptNumber = receipt;
-        tx.completedAt = new Date().toISOString();
-        const conf = await store.confirmTransaction(checkoutRequestId, receipt);
-        resolvedResult = {
-          status: 'SUCCESS',
-          resultCode: 0,
-          resultDesc: 'Payment confirmed.',
-          mpesaReceiptNumber: receipt,
-          downloadToken: conf.downloadToken,
-          articleId: tx.articleId,
-          isUnlocked: true
-        };
+        const returnedCheckoutId = queryData.CheckoutRequestID;
+        const returnedMerchantId = queryData.MerchantRequestID;
+        const receipt = typeof queryData.MpesaReceiptNumber === 'string'
+          ? queryData.MpesaReceiptNumber.trim().toUpperCase()
+          : '';
+        const correlationMismatch =
+          (returnedCheckoutId && returnedCheckoutId !== checkoutRequestId) ||
+          (returnedMerchantId && returnedMerchantId !== tx.merchantRequestId);
+
+        if (correlationMismatch || !tx.merchantRequestId) {
+          console.warn('[M-PESA QUERY REJECTED] Provider correlation fields did not match the initiated transaction.');
+          resolvedResult = {
+            status: 'PENDING',
+            resultDesc: 'Payment confirmation requires manual reconciliation.'
+          };
+        } else if (!/^[A-Z0-9]{8,32}$/.test(receipt)) {
+          // The authenticated query can report success without returning the
+          // receipt needed for unique settlement. Wait for the callback rather
+          // than manufacturing payment evidence.
+          resolvedResult = {
+            status: 'PENDING',
+            resultDesc: 'Safaricom reports completion; awaiting the final receipt callback.'
+          };
+        } else {
+          const settlement = await store.settleMpesaTransaction(checkoutRequestId, {
+            merchantRequestId: tx.merchantRequestId,
+            receiptNumber: receipt,
+            amount: tx.amount,
+            phoneNumber: tx.phoneNumber || '',
+            resultDesc: qResultDesc || 'Payment confirmed via authenticated provider query.'
+          });
+          resolvedResult = settlement.outcome === 'rejected'
+            ? {
+                status: 'PENDING',
+                resultDesc: 'Payment confirmation requires manual reconciliation.'
+              }
+            : {
+                status: 'SUCCESS',
+                resultCode: 0,
+                resultDesc: 'Payment confirmed.',
+                mpesaReceiptNumber: receipt,
+                downloadToken: settlement.downloadToken,
+                articleId: tx.articleId,
+                isUnlocked: true
+              };
+        }
       } else if (qResultCode === 1032) {
-        tx.status = 'CANCELLED';
-        tx.resultCode = 1032;
-        tx.resultDesc = 'Payment was cancelled on phone handset.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'CANCELLED', resultCode: 1032, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'CANCELLED',
+          1032,
+          'Payment was cancelled on phone handset.'
+        );
       } else if (qResultCode === 1037) {
-        tx.status = 'TIMEOUT';
-        tx.resultCode = 1037;
-        tx.resultDesc = 'Payment prompt timed out on phone.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'TIMEOUT', resultCode: 1037, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'TIMEOUT',
+          1037,
+          'Payment prompt timed out on phone.'
+        );
       } else if (isDarajaMerchantConfigurationError(qResultDesc)) {
-        tx.status = 'FAILED';
-        tx.resultCode = qResultCode;
-        tx.resultDesc = 'Safaricom rejected the configured merchant number. Verify the transaction type, store/shortcode and till mapping.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'FAILED', resultCode: qResultCode, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'FAILED',
+          qResultCode,
+          'Safaricom rejected the configured merchant number. Verify the transaction type, store/shortcode and till mapping.'
+        );
       } else if (
         qResultDesc.toLowerCase().includes('duplicated msisdn') ||
         qResultDesc.toLowerCase().includes('existing ussd') ||
         qResultDesc.toLowerCase().includes('active session')
       ) {
-        tx.status = 'FAILED';
-        tx.resultCode = qResultCode;
-        tx.resultDesc = 'Another M-Pesa prompt or USSD session is active on this phone. Close it, wait briefly, then retry.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'FAILED', resultCode: qResultCode, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'FAILED',
+          qResultCode,
+          'Another M-Pesa prompt or USSD session is active on this phone. Close it, wait briefly, then retry.'
+        );
       } else if (
         qResultDesc.toLowerCase().includes('in progress') ||
         qResultDesc.toLowerCase().includes('processing')
       ) {
-        console.log(`[M-PESA QUERY IN-FLIGHT] Safaricom code ${qResultCode} ("${qResultDesc}") for ${checkoutRequestId}.`);
+        console.log(`[M-PESA QUERY IN-FLIGHT] Safaricom returned in-progress code ${qResultCode}.`);
         if (txAgeMs > 120000) {
-          tx.status = 'TIMEOUT';
-          tx.resultCode = 1037;
-          tx.resultDesc = 'Payment prompt timed out on phone.';
-          tx.completedAt = new Date().toISOString();
-          await store.saveTransaction(tx);
-          resolvedResult = { status: 'TIMEOUT', resultCode: 1037, resultDesc: tx.resultDesc };
+          resolvedResult = await recordQueryTerminalResult(
+            'TIMEOUT',
+            1037,
+            'Payment prompt timed out on phone.'
+          );
         } else {
           resolvedResult = {
             status: 'PENDING',
@@ -831,29 +1046,26 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         }
       } else if (qResultCode === 1) {
         // Insufficient funds
-        tx.status = 'FAILED';
-        tx.resultCode = 1;
-        tx.resultDesc = 'Insufficient funds in your M-Pesa account.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'FAILED', resultCode: 1, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'FAILED',
+          1,
+          'Insufficient funds in your M-Pesa account.'
+        );
       } else if (qResultCode === 2001) {
         // Wrong PIN
-        tx.status = 'FAILED';
-        tx.resultCode = 2001;
-        tx.resultDesc = 'Incorrect M-Pesa PIN entered on your phone.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'FAILED', resultCode: 2001, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'FAILED',
+          2001,
+          'Incorrect M-Pesa PIN entered on your phone.'
+        );
       } else {
         // Only fail for actual terminal non-zero codes after grace period
         if (txAgeMs > 30000) {
-          tx.status = 'FAILED';
-          tx.resultCode = qResultCode;
-          tx.resultDesc = qResultDesc || 'Payment failed.';
-          tx.completedAt = new Date().toISOString();
-          await store.saveTransaction(tx);
-          resolvedResult = { status: 'FAILED', resultCode: qResultCode, resultDesc: tx.resultDesc };
+          resolvedResult = await recordQueryTerminalResult(
+            'FAILED',
+            qResultCode,
+            qResultDesc || 'Payment failed.'
+          );
         } else {
           resolvedResult = { status: 'PENDING', resultDesc: 'Waiting for PIN on phone…' };
         }
@@ -864,12 +1076,11 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
       const normalizedError = errMsg.toLowerCase();
       const merchantConfigurationError = isDarajaMerchantConfigurationError(normalizedError);
       if (merchantConfigurationError) {
-        tx.status = 'FAILED';
-        tx.resultCode = Number(queryData?.errorCode) || -1;
-        tx.resultDesc = 'Safaricom rejected the configured merchant identity. Confirm that M-Pesa Express is active and that the live app, passkey, Store/Shortcode and Till belong to the same merchant account.';
-        tx.completedAt = new Date().toISOString();
-        await store.saveTransaction(tx);
-        resolvedResult = { status: 'FAILED', resultCode: tx.resultCode, resultDesc: tx.resultDesc };
+        resolvedResult = await recordQueryTerminalResult(
+          'FAILED',
+          Number(queryData?.errorCode) || -1,
+          'Safaricom rejected the configured merchant identity. Confirm that M-Pesa Express is active and that the live app, passkey, Store/Shortcode and Till belong to the same merchant account.'
+        );
       } else if (
         errCode === '500.001.1001' ||
         normalizedError.includes('processing') ||
@@ -913,17 +1124,21 @@ export async function verifyManualReceipt(
     };
   }
 
-  await store.ensureTransactionsHydrated();
+  const formattedPhone = phoneNumber ? formatKenyanPhone(phoneNumber) : '';
+  if (!formattedPhone || !isValidKenyanMpesaPhone(formattedPhone)) {
+    return { success: false, error: 'The paying Safaricom phone number is required.' };
+  }
 
-  // Look for confirmed transaction with this receipt
-  const allTransactions = store.getTransactions();
-  const matchedTx = allTransactions.find(tx => 
-    (tx.mpesaReceiptNumber && tx.mpesaReceiptNumber.toUpperCase() === cleanReceipt) ||
-    (tx.receiptNumber && tx.receiptNumber.toUpperCase() === cleanReceipt) ||
-    (tx.bankReference && tx.bankReference.toUpperCase() === cleanReceipt)
-  );
+  const matchedTx = await store.findTransactionByReceipt(cleanReceipt);
 
-  if (matchedTx && (matchedTx.status === 'SUCCESS' || matchedTx.status === 'CONFIRMED' || matchedTx.status === 'PAID')) {
+  if (
+    matchedTx &&
+    matchedTx.paymentMethod === 'mpesa' &&
+    matchedTx.type === 'PURCHASE' &&
+    matchedTx.articleId === articleId &&
+    matchedTx.phoneNumber === formattedPhone &&
+    (matchedTx.status === 'SUCCESS' || matchedTx.status === 'CONFIRMED' || matchedTx.status === 'PAID')
+  ) {
     // If matched and confirmed, ensure download token exists for this piece
     let token = matchedTx.downloadToken;
     if (!token) {

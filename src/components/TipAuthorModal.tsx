@@ -76,6 +76,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [checkoutRequestId, setCheckoutRequestId] = useState<string>('');
+  const [paymentCapability, setPaymentCapability] = useState<string>('');
   const [verifiedReceipt, setVerifiedReceipt] = useState<string>('');
   const [isCheckingStatus, setIsCheckingStatus] = useState<boolean>(false);
 
@@ -125,6 +126,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
       setStep('AMOUNT_SELECT');
       setErrorMessage('');
       setCheckoutRequestId('');
+      setPaymentCapability('');
       setVerifiedReceipt('');
       
       // Default to 500 KES or $5 USD
@@ -183,12 +185,12 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
   };
 
   // Poll transaction status to verify real backend payment
-  const startStatusPolling = (reqId: string) => {
+  const startStatusPolling = (reqId: string, capability: string) => {
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
 
     pollIntervalRef.current = setInterval(async () => {
       try {
-        const tx = await api.getPaymentStatus(reqId);
+        const tx = await api.getPaymentStatus(reqId, capability);
         if (tx && (tx.status === 'SUCCESS' || tx.status === 'CONFIRMED' || tx.status === 'PAID')) {
           const receipt = (tx.mpesaReceiptNumber || tx.receiptNumber || '').trim();
           if (receipt) {
@@ -220,11 +222,11 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
 
   // Manual Status Check Trigger
   const handleManualCheckStatus = async () => {
-    if (!checkoutRequestId) return;
+    if (!checkoutRequestId || !paymentCapability) return;
     try {
       setIsCheckingStatus(true);
       setErrorMessage('');
-      const tx = await api.getPaymentStatus(checkoutRequestId);
+      const tx = await api.getPaymentStatus(checkoutRequestId, paymentCapability);
       if (tx && (tx.status === 'SUCCESS' || tx.status === 'CONFIRMED' || tx.status === 'PAID')) {
         const receipt = (tx.mpesaReceiptNumber || tx.receiptNumber || '').trim();
         if (receipt) {
@@ -287,15 +289,17 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
         }
       );
 
-      if (res && res.checkoutRequestId) {
+      if (res && res.checkoutRequestId && res.paymentCapability) {
         setCheckoutRequestId(res.checkoutRequestId);
+        setPaymentCapability(res.paymentCapability);
         setStep('AWAITING_PIN');
-        startStatusPolling(res.checkoutRequestId);
+        startStatusPolling(res.checkoutRequestId, res.paymentCapability);
       } else {
         throw new Error('Failed to dispatch M-Pesa push transaction. No CheckoutRequestID returned.');
       }
     } catch (err: any) {
       setCheckoutRequestId('');
+      setPaymentCapability('');
       setErrorMessage(err.message || 'Could not initiate M-Pesa tip. Please try again or use direct Till 1618656.');
       setStep('ERROR');
     } finally {

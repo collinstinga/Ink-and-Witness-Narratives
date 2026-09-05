@@ -521,6 +521,7 @@ export interface PaymentTransaction {
   resultDesc?: string;
   transactionTimestamp?: string;
   bankReference?: string;
+  bankOrderReference?: string;
   bankAccountRef?: string;
   confirmedAt?: string;
   createdAt: string;
@@ -531,6 +532,8 @@ export interface PaymentTransaction {
   affiliateCode?: string;
   campaignCode?: string;
   shortcodeUsed?: string;
+  paymentCapabilityHash?: string;
+  callbackCapabilityHash?: string;
   userId?: string;
   userEmail?: string;
 }

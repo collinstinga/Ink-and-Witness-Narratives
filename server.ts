@@ -22,6 +22,14 @@ import {
 import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/server/auth.js";
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import {
+  PAYMENT_CALLBACK_QUERY_PARAMETER,
+  canRecoverMpesaPurchase,
+  generatePaymentCapability,
+  hashPaymentCapability,
+  redactPaymentTransaction,
+  verifyPaymentCapability
+} from "./src/server/paymentSecurity.js";
+import {
   initiateStkPush,
   handleDarajaCallback,
   queryPaymentStatus,
@@ -79,6 +87,34 @@ function isSafePublicIdentifier(value: unknown, maxLength = 128): value is strin
     value.length > 0 &&
     value.length <= maxLength &&
     /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
+}
+
+function getPaymentCapability(req: Request): unknown {
+  return req.headers['x-payment-capability'];
+}
+
+function toPublicPaymentStatus(
+  transaction: PaymentTransaction,
+  result: Awaited<ReturnType<typeof queryPaymentStatus>>
+) {
+  const isPaid = result.status === 'PAID' || result.status === 'SUCCESS' ||
+    transaction.status === 'CONFIRMED' || transaction.status === 'SUCCESS' || transaction.status === 'PAID';
+  return {
+    checkoutRequestId: transaction.checkoutRequestId,
+    articleId: transaction.articleId,
+    articleTitle: transaction.articleTitle,
+    amount: transaction.amount,
+    currency: transaction.currency,
+    paymentMethod: transaction.paymentMethod,
+    type: transaction.type,
+    status: isPaid ? 'PAID' : result.status,
+    rawStatus: transaction.status,
+    resultCode: result.resultCode,
+    resultDesc: result.resultDesc,
+    mpesaReceiptNumber: isPaid ? (result.mpesaReceiptNumber || transaction.mpesaReceiptNumber) : undefined,
+    receiptNumber: isPaid ? transaction.receiptNumber : undefined,
+    downloadToken: isPaid ? (result.downloadToken || transaction.downloadToken) : undefined
+  };
 }
 
 // Cookie helpers
@@ -262,11 +298,6 @@ function getGeminiClient(): GoogleGenAI | null {
     }
   }
   return genAIClient;
-}
-
-// Helpers
-function generateToken(): string {
-  return "ink_" + crypto.randomBytes(16).toString('hex');
 }
 
 export async function createApp() {
@@ -684,33 +715,23 @@ export async function createApp() {
     try {
       const { transactionCode, phoneNumber } = req.body;
 
-      if (!transactionCode) {
-        return res.status(400).json({ error: "Safaricom M-Pesa receipt number is required." });
+      if (!transactionCode || !phoneNumber) {
+        return res.status(400).json({ error: "Safaricom M-Pesa receipt number and the paying phone are required." });
       }
 
       const cleanCode = transactionCode.trim().toUpperCase();
-      await store.ensureTransactionsHydrated();
-      
-      // Look up genuine transactions in database (confirmed or matching pending)
-      let existingTx = store.getTransactions().find(t => 
-        (
-          (t.mpesaReceiptNumber && t.mpesaReceiptNumber.toUpperCase() === cleanCode) ||
-          (t.checkoutRequestId && t.checkoutRequestId.toUpperCase() === cleanCode) ||
-          (t.receiptNumber && t.receiptNumber.toUpperCase() === cleanCode)
-        )
-      );
-
-      if (!existingTx) {
-        existingTx = store.getTransaction(cleanCode);
+      if (!/^[A-Z0-9]{8,32}$/.test(cleanCode)) {
+        return res.status(400).json({ error: "Enter the Safaricom receipt number exactly as shown in the payment SMS." });
       }
+      const payingPhone = formatKenyanPhone(phoneNumber);
+      const existingTx = await store.findTransactionByReceipt(cleanCode);
+      const canonicalReceipt = (existingTx?.mpesaReceiptNumber || existingTx?.receiptNumber || '').trim().toUpperCase();
 
-      // If matching pending transaction, confirm it with the receipt
-      if (existingTx && existingTx.status === 'PENDING') {
-        await store.confirmTransaction(existingTx.checkoutRequestId, cleanCode);
-        existingTx = store.getTransaction(existingTx.checkoutRequestId) || existingTx;
-      }
-
-      if (!existingTx || (existingTx.status !== "SUCCESS" && existingTx.status !== "CONFIRMED" && existingTx.status !== "PAID")) {
+      // Recovery is read-only with respect to payment state. A public caller
+      // can never turn a pending checkout ID or an arbitrary code into payment.
+      if (
+        !canRecoverMpesaPurchase(existingTx, cleanCode, payingPhone)
+      ) {
         return res.status(404).json({ 
           error: "No verified Safaricom payment found for this receipt. Please ensure your payment has completed on your phone." 
         });
@@ -721,25 +742,29 @@ export async function createApp() {
         return res.status(404).json({ error: "Article associated with this transaction was not found." });
       }
 
-      const downloadToken = existingTx.downloadToken || generateToken();
+      let downloadToken = existingTx.downloadToken;
       if (!existingTx.downloadToken) {
-        existingTx.downloadToken = downloadToken;
-        await store.saveTransaction(existingTx);
+        const confirmation = await store.confirmTransaction(existingTx.checkoutRequestId, canonicalReceipt);
+        downloadToken = confirmation.downloadToken;
+      }
+      if (!downloadToken) {
+        return res.status(409).json({ error: "This confirmed purchase requires administrator reconciliation." });
       }
 
       // Ensure access token is saved in token store
       await store.savePurchasedToken(downloadToken, {
         articleId: article.id,
-        phone: phoneNumber ? formatKenyanPhone(phoneNumber) : (existingTx.phoneNumber || "254705275647"),
+        phone: existingTx.phoneNumber,
         expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
-        receipt: cleanCode,
+        receipt: canonicalReceipt,
         createdAt: new Date().toISOString()
       });
 
+      res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
         status: "SUCCESS",
-        receipt: existingTx.mpesaReceiptNumber || cleanCode,
+        receipt: canonicalReceipt,
         downloadToken,
         articleId: article.id,
         articleTitle: article.title,
@@ -962,13 +987,14 @@ export async function createApp() {
         userEmail: (req as any).user?.email,
       });
 
-      if (!stkResult.success || !stkResult.checkoutRequestId) {
+      if (!stkResult.success || !stkResult.checkoutRequestId || !stkResult.paymentCapability) {
         return res.status(400).json({
           success: false,
           error: stkResult.error || "Failed to dispatch STK Push to Safaricom Daraja."
         });
       }
 
+      res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
         message: stkResult.message,
@@ -979,6 +1005,7 @@ export async function createApp() {
         currency: currency || "KES",
         originalAmount: originalAmount ? Number(originalAmount) : chargeAmount,
         phoneNumber: formattedPhone,
+        paymentCapability: stkResult.paymentCapability,
         live: true
       });
     } catch (err: any) {
@@ -1016,6 +1043,7 @@ export async function createApp() {
       const randomSuffix = Math.floor(100000 + Math.random() * 900000).toString();
       const bankRef = `BW-${randomSuffix}`;
       const checkoutRequestId = `bank_${Date.now()}_${randomSuffix}`;
+      const paymentCapability = generatePaymentCapability();
 
       const tx: PaymentTransaction = {
         id: `tx_bank_${Date.now()}`,
@@ -1030,9 +1058,10 @@ export async function createApp() {
         paymentMethod: "bank",
         type: "PURCHASE",
         status: "PENDING",
-        bankReference: bankRef,
+        bankOrderReference: bankRef,
         bankAccountRef: `NCBA Bank Kenya | Acc: 729104819 | Till: ${mpesaSettings.tillNumber || '1618656'}`,
         createdAt: new Date().toISOString(),
+        paymentCapabilityHash: hashPaymentCapability(paymentCapability),
         affiliateCode: affiliateCode || undefined,
         campaignCode: campaignCode || undefined,
       };
@@ -1043,10 +1072,12 @@ export async function createApp() {
         console.log(`[Attributed Checkout Initiated] Method: Bank Order, Tx ID: ${tx.id}, BankRef: ${bankRef}, Affiliate: ${affiliateCode}, Campaign: ${campaignCode || 'none'}, Amount: KES ${chargeAmount}`);
       }
 
+      res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
         checkoutRequestId,
         bankReference: bankRef,
+        paymentCapability,
         bankDetails: {
           bankName: "NCBA Bank Kenya / Absa Kenya",
           accountName: "Ink & Witness Narratives / Jake",
@@ -1074,11 +1105,21 @@ export async function createApp() {
       }
 
       const tx = await store.loadTransaction(checkoutRequestId);
-      if (!tx) {
+      if (!tx || !verifyPaymentCapability(getPaymentCapability(req), tx.paymentCapabilityHash)) {
         return res.status(404).json({ error: "Order not found." });
       }
+      if (tx.paymentMethod !== 'bank' || tx.type !== 'PURCHASE') {
+        return res.status(409).json({ error: "This order does not accept a bank reference." });
+      }
+      if (tx.status !== 'PENDING' && tx.status !== 'INITIATED') {
+        return res.status(409).json({ error: "This bank order is no longer accepting reference changes." });
+      }
 
-      tx.bankReference = customerRef.trim().toUpperCase();
+      const normalizedReference = customerRef.trim().toUpperCase();
+      if (tx.bankReference && tx.bankReference !== normalizedReference) {
+        return res.status(409).json({ error: "A bank reference has already been submitted for this order." });
+      }
+      tx.bankReference = normalizedReference;
       if (senderPhone) {
         tx.phoneNumber = maskPhone(senderPhone);
       }
@@ -1089,7 +1130,7 @@ export async function createApp() {
         success: true,
         status: tx.status,
         message: `Bank reference ${tx.bankReference} submitted. Our automated ledger and author desk will reconcile the payment.`,
-        transaction: tx
+        transaction: redactPaymentTransaction(tx)
       });
     } catch (err: any) {
       console.error("Bank ref submit error:", err);
@@ -1100,53 +1141,38 @@ export async function createApp() {
   // Query transaction status (Universal: M-Pesa or Bank)
   app.get(["/api/mpesa/query/:checkoutRequestId", "/api/mpesa/status/:checkoutRequestId"], paymentStatusLimiter, async (req: Request, res: Response) => {
     const { checkoutRequestId } = req.params;
-    const result = await queryPaymentStatus(checkoutRequestId);
-    
-    if (!result) {
+    const existing = await store.loadTransaction(checkoutRequestId);
+    if (!existing || !verifyPaymentCapability(getPaymentCapability(req), existing.paymentCapabilityHash)) {
       return res.status(404).json({ error: "Transaction not found." });
     }
-
-    const tx = await store.loadTransaction(checkoutRequestId);
-    const isPaid = result.status === "PAID" || result.status === "SUCCESS" || tx?.status === "CONFIRMED" || tx?.status === "SUCCESS";
-
-    res.json({
-      ...tx,
-      status: isPaid ? "PAID" : result.status,
-      rawStatus: tx?.status || result.status,
-      resultCode: result.resultCode,
-      resultDesc: result.resultDesc,
-      mpesaReceiptNumber: isPaid ? (result.mpesaReceiptNumber || tx?.mpesaReceiptNumber) : undefined,
-      downloadToken: isPaid ? (result.downloadToken || tx?.downloadToken) : undefined,
-    });
+    const result = await queryPaymentStatus(checkoutRequestId);
+    const tx = await store.loadTransaction(checkoutRequestId) || existing;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(toPublicPaymentStatus(tx, result));
   });
 
   // Universal payment status endpoint
   app.get("/api/payments/status/:id", paymentStatusLimiter, async (req: Request, res: Response) => {
     const { id } = req.params;
-    const result = await queryPaymentStatus(id);
-    
-    if (!result) {
+    const existing = await store.loadTransaction(id);
+    if (!existing || !verifyPaymentCapability(getPaymentCapability(req), existing.paymentCapabilityHash)) {
       return res.status(404).json({ error: "Transaction not found." });
     }
-
-    const tx = await store.loadTransaction(id);
-    const isPaid = result.status === "PAID" || result.status === "SUCCESS" || tx?.status === "CONFIRMED" || tx?.status === "SUCCESS";
-
-    res.json({
-      ...tx,
-      status: isPaid ? "PAID" : result.status,
-      rawStatus: tx?.status || result.status,
-      resultCode: result.resultCode,
-      resultDesc: result.resultDesc,
-      mpesaReceiptNumber: isPaid ? (result.mpesaReceiptNumber || tx?.mpesaReceiptNumber) : undefined,
-      downloadToken: isPaid ? (result.downloadToken || tx?.downloadToken) : undefined,
-    });
+    const result = await queryPaymentStatus(id);
+    const tx = await store.loadTransaction(id) || existing;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(toPublicPaymentStatus(tx, result));
   });
 
   // Safaricom Webhook Callback (Authoritative source of truth for payments)
   app.post("/api/mpesa/callback", async (req: Request, res: Response) => {
-    const responsePayload = await handleDarajaCallback(req.body);
-    res.json(responsePayload);
+    const callbackCapability = req.query[PAYMENT_CALLBACK_QUERY_PARAMETER];
+    const responsePayload = await handleDarajaCallback(req.body, callbackCapability);
+    if (responsePayload.outcome === 'retryable_error') {
+      return res.status(503).json({ ResultCode: 1, ResultDesc: 'Retry' });
+    }
+    // Do not reveal transaction existence or validation details at the public edge.
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
   });
 
   // Public Interaction Analytics Tracking
@@ -2089,7 +2115,7 @@ export async function createApp() {
       res.json({
         totalRevenueKes: totalRevenue,
         count: txList.length,
-        transactions: txList,
+        transactions: txList.map(redactPaymentTransaction),
       });
     } catch (err: any) {
       console.error("Transactions ledger error:", err);
@@ -2111,7 +2137,7 @@ export async function createApp() {
 
       res.json({
         success: true,
-        transaction: result.transaction,
+        transaction: result.transaction ? redactPaymentTransaction(result.transaction) : undefined,
         downloadToken: result.downloadToken,
         message: "Payment successfully confirmed and piece unlocked."
       });
@@ -2133,7 +2159,7 @@ export async function createApp() {
       tx.status = "FAILED";
       tx.completedAt = new Date().toISOString();
       await store.saveTransaction(tx);
-      res.json({ success: true, transaction: tx, message: "Payment marked as rejected/failed." });
+      res.json({ success: true, transaction: redactPaymentTransaction(tx), message: "Payment marked as rejected/failed." });
     } catch (err: any) {
       console.error("Payment rejection error:", err);
       res.status(500).json({ error: err.message || "Failed to reject payment." });
@@ -2152,7 +2178,7 @@ export async function createApp() {
         totalTipsKes,
         count: tipsList.length,
         verifiedCount: verifiedTips.length,
-        tips: tipsList,
+        tips: tipsList.map(redactPaymentTransaction),
       });
     } catch (err: any) {
       console.error("Tips ledger error:", err);

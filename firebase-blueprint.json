@@ -87,6 +87,7 @@
         "checkoutRequestId": { "type": "string" },
         "merchantRequestId": { "type": "string" },
         "mpesaReceiptNumber": { "type": "string" },
+        "receiptNumber": { "type": "string" },
         "articleId": { "type": "string" },
         "articleTitle": { "type": "string" },
         "phoneNumber": { "type": "string" },
@@ -96,16 +97,25 @@
         "exchangeRate": { "type": "number" },
         "exchangeRateTimestamp": { "type": "string" },
         "paymentMethod": { "type": "string" },
-        "type": { "type": "string", "enum": ["PURCHASE", "TIP"] },
-        "status": { "type": "string", "enum": ["PENDING", "SUCCESS", "COMPLETED", "FAILED"] },
+        "type": { "type": "string", "enum": ["PURCHASE", "TIP", "MANUAL", "TEST"] },
+        "status": { "type": "string", "enum": ["INITIATED", "STK_SENT", "PENDING", "CONFIRMED", "SUCCESS", "PAID", "FAILED", "CANCELLED", "TIMEOUT", "TIMED_OUT", "EXPIRED"] },
+        "resultCode": { "type": "number" },
+        "resultDesc": { "type": "string" },
+        "transactionTimestamp": { "type": "string" },
+        "bankReference": { "type": "string" },
+        "bankOrderReference": { "type": "string" },
         "affiliateCode": { "type": "string" },
         "campaignCode": { "type": "string" },
         "shortcodeUsed": { "type": "string" },
+        "paymentCapabilityHash": { "type": "string", "description": "Server-only SHA-256 hash of the browser payment-status capability" },
+        "callbackCapabilityHash": { "type": "string", "description": "Server-only SHA-256 hash of the per-request Daraja callback URL capability" },
         "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "confirmedAt": { "type": "string" },
         "completedAt": { "type": "string" },
-        "failureReason": { "type": "string" }
+        "downloadToken": { "type": "string" }
       },
-      "required": ["id", "status", "createdAt"]
+      "required": ["id", "checkoutRequestId", "articleId", "amount", "type", "status", "createdAt"]
     },
     "ReaderLicense": {
       "title": "ReaderLicense",

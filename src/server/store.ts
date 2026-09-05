@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { FieldValue } from 'firebase-admin/firestore';
 import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
@@ -208,6 +209,23 @@ function cacheTransaction(tx: PaymentTransaction): PaymentTransaction {
   if (key && isPersistentTransaction(tx)) cachedTransactions.set(key, tx);
   return tx;
 }
+
+function paymentReceiptLookupId(receiptNumber: string): string {
+  return crypto.createHash('sha256').update(receiptNumber.trim().toUpperCase()).digest('hex');
+}
+
+type MpesaSettlementResult = {
+  outcome: 'committed' | 'duplicate' | 'rejected';
+  transaction?: PaymentTransaction;
+  downloadToken?: string;
+  error?: string;
+};
+
+type MpesaFailureResult = {
+  outcome: 'committed' | 'duplicate' | 'rejected';
+  transaction?: PaymentTransaction;
+  error?: string;
+};
 
 function assertTransactionsHydrated(): void {
   if (!transactionsHydrated) {
@@ -1192,6 +1210,240 @@ export const store = {
     const transaction = await getFirestoreDoc<PaymentTransaction>('transactions', checkoutRequestId);
     if (!transaction || !isPersistentTransaction(transaction)) return undefined;
     return cacheTransaction(transaction);
+  },
+
+  async findTransactionByReceipt(receiptNumber: string): Promise<PaymentTransaction | undefined> {
+    const cleanReceipt = receiptNumber.trim().toUpperCase();
+    if (!cleanReceipt) return undefined;
+
+    const cached = Array.from(cachedTransactions.values()).find(transaction =>
+      transaction.mpesaReceiptNumber?.trim().toUpperCase() === cleanReceipt ||
+      transaction.receiptNumber?.trim().toUpperCase() === cleanReceipt
+    );
+    if (cached) return cached;
+
+    const receiptLookup = await getFirestoreDoc<{ checkoutRequestId?: string }>(
+      'payment_receipts',
+      paymentReceiptLookupId(cleanReceipt)
+    );
+    if (receiptLookup?.checkoutRequestId) {
+      return this.loadTransaction(receiptLookup.checkoutRequestId);
+    }
+
+    // Historical transactions predate the receipt index. Query only the two
+    // receipt fields; never hydrate or scan the entire transaction ledger.
+    for (const field of ['mpesaReceiptNumber', 'receiptNumber']) {
+      const snapshot = await getDb()
+        .collection('transactions')
+        .where(field, '==', cleanReceipt)
+        .limit(1)
+        .get();
+      const document = snapshot.docs[0];
+      if (!document) continue;
+
+      const transaction = document.data() as PaymentTransaction;
+      if (!isPersistentTransaction(transaction)) return undefined;
+      cacheTransaction(transaction);
+      return transaction;
+    }
+
+    return undefined;
+  },
+
+  async settleMpesaTransaction(
+    identifier: string,
+    settlement: {
+      merchantRequestId: string;
+      receiptNumber: string;
+      amount: number;
+      phoneNumber: string;
+      resultDesc: string;
+      transactionTimestamp?: string;
+      expectedCallbackCapabilityHash?: string;
+    }
+  ): Promise<MpesaSettlementResult> {
+    const cleanReceipt = settlement.receiptNumber.trim().toUpperCase();
+    const transactionRef = getDb().collection('transactions').doc(identifier);
+    const receiptRef = getDb().collection('payment_receipts').doc(paymentReceiptLookupId(cleanReceipt));
+
+    const result = await getDb().runTransaction(async firestoreTransaction => {
+      const [transactionSnapshot, receiptSnapshot] = await Promise.all([
+        firestoreTransaction.get(transactionRef),
+        firestoreTransaction.get(receiptRef)
+      ]);
+      if (!transactionSnapshot.exists) {
+        return { outcome: 'rejected' as const, error: 'Transaction not found.' };
+      }
+
+      const current = transactionSnapshot.data() as PaymentTransaction;
+      if (
+        current.paymentMethod !== 'mpesa' ||
+        (current.type !== 'PURCHASE' && current.type !== 'TIP') ||
+        current.merchantRequestId !== settlement.merchantRequestId ||
+        current.amount !== settlement.amount ||
+        current.phoneNumber !== settlement.phoneNumber ||
+        (settlement.expectedCallbackCapabilityHash &&
+          current.callbackCapabilityHash !== settlement.expectedCallbackCapabilityHash)
+      ) {
+        return { outcome: 'rejected' as const, error: 'Payment details did not match the initiated transaction.' };
+      }
+
+      const existingReceipt = (current.mpesaReceiptNumber || current.receiptNumber || '').trim().toUpperCase();
+      const alreadyConfirmed = current.status === 'CONFIRMED' || current.status === 'SUCCESS' || current.status === 'PAID';
+      if (alreadyConfirmed) {
+        return existingReceipt === cleanReceipt
+          ? { outcome: 'duplicate' as const, transaction: current, downloadToken: current.downloadToken }
+          : { outcome: 'rejected' as const, error: 'A conflicting terminal payment result already exists.' };
+      }
+
+      if (current.status !== 'PENDING' && current.status !== 'INITIATED' && current.status !== 'STK_SENT') {
+        return { outcome: 'rejected' as const, error: 'A conflicting terminal payment result already exists.' };
+      }
+
+      const claimedCheckoutId = receiptSnapshot.exists
+        ? String(receiptSnapshot.data()?.checkoutRequestId || '')
+        : '';
+      if (claimedCheckoutId && claimedCheckoutId !== current.checkoutRequestId) {
+        return { outcome: 'rejected' as const, error: 'The provider receipt is already linked to another transaction.' };
+      }
+
+      const now = new Date().toISOString();
+      const downloadToken = current.type === 'PURCHASE'
+        ? (current.downloadToken || `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`)
+        : undefined;
+      const settled: PaymentTransaction = {
+        ...current,
+        status: 'CONFIRMED',
+        resultCode: 0,
+        resultDesc: settlement.resultDesc,
+        mpesaReceiptNumber: cleanReceipt,
+        receiptNumber: cleanReceipt,
+        transactionTimestamp: settlement.transactionTimestamp,
+        confirmedAt: current.confirmedAt || now,
+        completedAt: current.completedAt || now,
+        updatedAt: now,
+        downloadToken
+      };
+
+      firestoreTransaction.set(transactionRef, sanitizeForFirestore(settled), { merge: true });
+      firestoreTransaction.set(receiptRef, {
+        checkoutRequestId: current.checkoutRequestId,
+        createdAt: now
+      }, { merge: true });
+
+      if (downloadToken) {
+        firestoreTransaction.set(getDb().collection('reader_licenses').doc(downloadToken), sanitizeForFirestore({
+          token: downloadToken,
+          articleId: current.articleId,
+          phone: current.phoneNumber,
+          expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
+          receipt: cleanReceipt,
+          createdAt: now,
+          userId: current.userId,
+          email: current.userEmail,
+          accessSource: 'MPESA_PURCHASE'
+        }), { merge: true });
+        firestoreTransaction.set(getDb().collection('articles').doc(current.articleId), {
+          downloadsCount: FieldValue.increment(1)
+        }, { merge: true });
+      }
+
+      return { outcome: 'committed' as const, transaction: settled, downloadToken };
+    });
+
+    if (result.transaction) {
+      cacheTransaction(result.transaction);
+      writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    }
+
+    if (result.outcome === 'committed' && result.transaction) {
+      if (result.downloadToken) {
+        cachedTokens.set(result.downloadToken, {
+          articleId: result.transaction.articleId,
+          phone: result.transaction.phoneNumber || '',
+          expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
+          receipt: cleanReceipt,
+          createdAt: result.transaction.confirmedAt,
+          userId: result.transaction.userId,
+          email: result.transaction.userEmail,
+          accessSource: 'MPESA_PURCHASE'
+        });
+        const localTokenRecords = Object.fromEntries(cachedTokens.entries());
+        writeJsonFileSync(TOKENS_FILE, localTokenRecords);
+
+        const article = cachedArticles.find(item => item.id === result.transaction?.articleId);
+        if (article) {
+          article.downloadsCount = (article.downloadsCount || 0) + 1;
+          writeJsonFileSync(ARTICLES_FILE, cachedArticles);
+        }
+      }
+
+      if (result.transaction.affiliateCode) {
+        affiliateStore.recordAffiliateSale(
+          result.transaction,
+          result.transaction.affiliateCode,
+          result.transaction.campaignCode
+        );
+      }
+    }
+
+    return result;
+  },
+
+  async recordMpesaTerminalFailure(
+    identifier: string,
+    failure: {
+      merchantRequestId: string;
+      callbackCapabilityHash: string;
+      resultCode: number;
+      resultDesc: string;
+      status: 'FAILED' | 'CANCELLED' | 'TIMEOUT';
+    }
+  ): Promise<MpesaFailureResult> {
+    const transactionRef = getDb().collection('transactions').doc(identifier);
+    const result = await getDb().runTransaction(async firestoreTransaction => {
+      const snapshot = await firestoreTransaction.get(transactionRef);
+      if (!snapshot.exists) {
+        return { outcome: 'rejected' as const, error: 'Transaction not found.' };
+      }
+
+      const current = snapshot.data() as PaymentTransaction;
+      if (
+        current.paymentMethod !== 'mpesa' ||
+        (current.type !== 'PURCHASE' && current.type !== 'TIP') ||
+        current.merchantRequestId !== failure.merchantRequestId ||
+        current.callbackCapabilityHash !== failure.callbackCapabilityHash
+      ) {
+        return { outcome: 'rejected' as const, error: 'Payment details did not match the initiated transaction.' };
+      }
+
+      if (current.status === 'CONFIRMED' || current.status === 'SUCCESS' || current.status === 'PAID') {
+        return { outcome: 'rejected' as const, error: 'A confirmed payment cannot be replaced by a failure.' };
+      }
+      if (current.status === failure.status && current.resultCode === failure.resultCode) {
+        return { outcome: 'duplicate' as const, transaction: current };
+      }
+      if (current.status !== 'PENDING' && current.status !== 'INITIATED' && current.status !== 'STK_SENT') {
+        return { outcome: 'rejected' as const, error: 'A conflicting terminal payment result already exists.' };
+      }
+
+      const failed: PaymentTransaction = {
+        ...current,
+        status: failure.status,
+        resultCode: failure.resultCode,
+        resultDesc: failure.resultDesc,
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      firestoreTransaction.set(transactionRef, sanitizeForFirestore(failed), { merge: true });
+      return { outcome: 'committed' as const, transaction: failed };
+    });
+
+    if (result.transaction) {
+      cacheTransaction(result.transaction);
+      writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    }
+    return result;
   },
 
   async findRecentPendingTransaction(articleId: string, phoneNumber: string, maxAgeMs = 45000): Promise<PaymentTransaction | undefined> {

@@ -42,6 +42,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [checkoutRequestId, setCheckoutRequestId] = useState('');
+  const [paymentCapability, setPaymentCapability] = useState('');
   const [mpesaReceipt, setMpesaReceipt] = useState('');
   const [downloadToken, setDownloadToken] = useState('');
   const [copiedTill, setCopiedTill] = useState(false);
@@ -83,6 +84,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
     if (isOpen && article) {
       setStep('INPUT');
       setCheckoutRequestId('');
+      setPaymentCapability('');
       setErrorMessage('');
       setLoading(false);
       setCopiedTill(false);
@@ -112,7 +114,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
 
   // Robust live polling loop while in AWAITING_PIN or AWAITING_CONFIRMATION
   useEffect(() => {
-    if ((step !== 'AWAITING_PIN' && step !== 'AWAITING_CONFIRMATION') || !checkoutRequestId || !article) {
+    if ((step !== 'AWAITING_PIN' && step !== 'AWAITING_CONFIRMATION') || !checkoutRequestId || !paymentCapability || !article) {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
       return;
@@ -141,7 +143,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       if (!article || !isSubscribed || !checkoutRequestId) return;
 
       try {
-        const status = await api.getPaymentStatus(checkoutRequestId);
+        const status = await api.getPaymentStatus(checkoutRequestId, paymentCapability);
         if (!isSubscribed) return;
 
         const isSuccess = status.status === 'SUCCESS' || status.status === 'CONFIRMED' || status.status === 'PAID';
@@ -200,7 +202,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     };
-  }, [step, checkoutRequestId, article, phoneNumber, onClose, onPaymentSuccess]);
+  }, [step, checkoutRequestId, paymentCapability, article, phoneNumber, onClose, onPaymentSuccess]);
 
   if (!isOpen || !article) return null;
 
@@ -227,14 +229,16 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       localStorage.setItem('ink_user_phone', cleanPhone);
       
       const res = await api.initiateStkPush(article.id, cleanPhone, basePriceKes);
-      if (!res || !res.checkoutRequestId) {
+      if (!res || !res.checkoutRequestId || !res.paymentCapability) {
         throw new Error(res?.error || 'Safaricom did not return a valid CheckoutRequestID.');
       }
       setCheckoutRequestId(res.checkoutRequestId);
+      setPaymentCapability(res.paymentCapability);
       setSecondsRemaining(45);
       setStep('AWAITING_PIN');
     } catch (err: any) {
       setCheckoutRequestId('');
+      setPaymentCapability('');
       setErrorMessage(err.message || 'Failed to initiate M-Pesa STK Push. Please verify your phone number and try again.');
       setStep('INPUT');
     } finally {
@@ -244,11 +248,11 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
 
   // Manual trigger to immediately query Safaricom status
   const handleManualCheckStatus = async () => {
-    if (!checkoutRequestId) return;
+    if (!checkoutRequestId || !paymentCapability) return;
     try {
       setIsManualChecking(true);
       setErrorMessage('');
-      const status = await api.getPaymentStatus(checkoutRequestId);
+      const status = await api.getPaymentStatus(checkoutRequestId, paymentCapability);
       const isSuccess = status.status === 'SUCCESS' || status.status === 'CONFIRMED' || status.status === 'PAID';
       
       if (isSuccess) {
