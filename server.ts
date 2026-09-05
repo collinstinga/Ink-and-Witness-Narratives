@@ -21,6 +21,7 @@ import {
 } from "./src/server/affiliateCredentials.js";
 import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/server/auth.js";
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
+import { ImageValidationError, validateImageDataUrl } from "./src/server/imageSecurity.js";
 import {
   PAYMENT_CALLBACK_QUERY_PARAMETER,
   canRecoverMpesaPurchase,
@@ -326,14 +327,14 @@ export async function createApp() {
   app.use(cookieParser());
   app.use(requireSameOriginForCookieAuth);
 
-  // Only authenticated image endpoints retain the larger payload allowance.
-  // All other routes are capped well below the previous global 20 MB limit.
+  // Authenticated image uploads need room for Base64 overhead, but are still
+  // capped close to the 700 KB decoded storage limit.
   const largeAdminBodyRoutes = [
     '/api/admin/save-permanent-image',
     '/api/admin/upload-image'
   ];
-  app.use(largeAdminBodyRoutes, express.json({ limit: '20mb' }));
-  app.use(largeAdminBodyRoutes, express.urlencoded({ extended: true, limit: '20mb' }));
+  app.use(largeAdminBodyRoutes, express.json({ limit: '2mb' }));
+  app.use(largeAdminBodyRoutes, express.urlencoded({ extended: true, limit: '2mb' }));
   app.use('/api/mpesa/callback', express.json({ limit: '64kb' }));
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
@@ -492,13 +493,19 @@ export async function createApp() {
       const asset = await store.getUploadedAsset(assetId);
       if (!asset?.dataUrl) return res.status(404).json({ error: 'Image not found.' });
 
-      const match = asset.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-      if (!match) return res.status(500).json({ error: 'Stored image is invalid.' });
-      const image = Buffer.from(match[2], 'base64');
-      res.setHeader('Content-Type', asset.mimeType || match[1] || 'image/jpeg');
+      const image = validateImageDataUrl(asset.dataUrl);
+      res.setHeader('Content-Type', image.mimeType);
+      res.setHeader('Content-Disposition', `inline; filename="${assetId}.${image.extension}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      return res.send(image);
+      res.setHeader('Content-Length', String(image.buffer.length));
+      return res.send(image.buffer);
     } catch (err) {
+      if (err instanceof ImageValidationError) {
+        console.warn('[Assets] Rejected invalid stored image.');
+        return res.status(415).json({ error: 'Stored image is not an approved image type.' });
+      }
       console.error('[Assets] Failed to serve persistent image:', err);
       return res.status(503).json({ error: 'Image storage is temporarily unavailable.' });
     }
@@ -2219,6 +2226,9 @@ export async function createApp() {
       res.json(result);
     } catch (err: any) {
       console.error("Save permanent image error:", err);
+      if (err instanceof ImageValidationError) {
+        return res.status(400).json({ error: err.message });
+      }
       res.status(500).json({ error: err.message || "Failed to save image permanently." });
     }
   });
@@ -2259,7 +2269,10 @@ export async function createApp() {
       });
     } catch (err: any) {
       console.error("Upload error:", err);
-      res.status(400).json({ error: err.message || "Failed to upload image." });
+      if (err instanceof ImageValidationError) {
+        return res.status(400).json({ error: err.message });
+      }
+      res.status(500).json({ error: "Failed to upload image." });
     }
   });
 

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Article, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
 import { api } from '../../utils/api.js';
+import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
 
 interface HomepageManagerProps {
@@ -213,8 +214,9 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 15 * 1024 * 1024) {
-      setError('Image file is too large (max 15MB).');
+    const validationError = getImageUploadValidationError(file);
+    if (validationError) {
+      setError(validationError);
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
@@ -485,7 +487,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
             <input 
               ref={fileInputRef}
               type="file" 
-              accept="image/*" 
+              accept={IMAGE_UPLOAD_ACCEPT}
               onChange={handleImageUpload} 
               className="hidden" 
             />

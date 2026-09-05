@@ -42,6 +42,7 @@ import {
 } from 'lucide-react';
 import { Article, ArticleStatus, ArticleRevision, Category, Topic } from '../../types.js';
 import { api } from '../../utils/api.js';
+import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { ImageCropModal, CropSettings } from './ImageCropModal.js';
 import { CategoryManagerModal } from './CategoryManagerModal.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
@@ -399,8 +400,9 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 12 * 1024 * 1024) {
-      setError('Image file exceeds 12MB size limit.');
+    const validationError = getImageUploadValidationError(file);
+    if (validationError) {
+      setError(validationError);
       e.target.value = '';
       return;
     }
@@ -442,8 +444,9 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 12 * 1024 * 1024) {
-      setError('Image file exceeds 12MB size limit.');
+    const validationError = getImageUploadValidationError(file);
+    if (validationError) {
+      setError(validationError);
       e.target.value = '';
       return;
     }
@@ -663,7 +666,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       <input
         ref={imageUploadInputRef}
         type="file"
-        accept="image/*"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={handleImageFileSelected}
       />
@@ -1608,7 +1611,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               type="file"
               ref={coverImageFileInputRef}
               onChange={handleCoverFileSelected}
-              accept="image/*"
+              accept={IMAGE_UPLOAD_ACCEPT}
               className="hidden"
             />
 

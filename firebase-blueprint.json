@@ -192,7 +192,7 @@
     },
     "SavedAsset": {
       "title": "SavedAsset",
-      "description": "Permanently stored writer branding photo, monograph cover, or site asset",
+      "description": "Permanently stored and server-validated JPEG, PNG, or WebP branding photo, monograph cover, or site asset",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
@@ -200,8 +200,10 @@
         "filename": { "type": "string" },
         "url": { "type": "string" },
         "dataUrl": { "type": "string" },
-        "mimeType": { "type": "string" },
+        "mimeType": { "type": "string", "enum": ["image/jpeg", "image/png", "image/webp"] },
         "size": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
         "articleId": { "type": "string" },
         "savedPermanently": { "type": "boolean" },
         "savedAt": { "type": "string" },

@@ -6,6 +6,7 @@ import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSessionId, generateSecureToken } from './auth.js';
+import { validateImageDataUrl } from './imageSecurity.js';
 import { 
   getDb, 
   setFirestoreDoc, 
@@ -2267,32 +2268,11 @@ export const store = {
   async saveUploadedImage(base64DataUrl: string, prefix: string = 'img'): Promise<{ success: boolean; url: string; filename: string }> {
     ensureDataDir();
 
-    // Match data URI scheme: data:image/png;base64,.....
-    const matches = base64DataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-    let mimeType = 'image/jpeg';
-    let base64Data = base64DataUrl;
-
-    if (matches && matches.length === 3) {
-      mimeType = matches[1];
-      base64Data = matches[2];
-    }
-
-    let ext = 'jpg';
-    if (mimeType.includes('png')) ext = 'png';
-    else if (mimeType.includes('webp')) ext = 'webp';
-    else if (mimeType.includes('svg')) ext = 'svg';
-    else if (mimeType.includes('gif')) ext = 'gif';
-    else if (mimeType.includes('icon') || mimeType.includes('ico')) ext = 'ico';
-
-    const buffer = Buffer.from(base64Data, 'base64');
-    
-    // Firestore documents have a 1 MiB hard limit. Keep headroom for metadata.
-    if (buffer.length > 700 * 1024) {
-      throw new Error('Image is too large for persistent storage. Please compress it below 700 KB and try again.');
-    }
+    const image = validateImageDataUrl(base64DataUrl);
+    const safePrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'img';
 
     const randomStr = crypto.randomBytes(6).toString('hex');
-    const filename = `${prefix}-${Date.now()}-${randomStr}.${ext}`;
+    const filename = `${safePrefix}-${Date.now()}-${randomStr}.${image.extension}`;
     // Store in Firestore uploaded_assets collection for permanent cloud persistence
     const assetId = filename.replace(/[^a-zA-Z0-9_-]/g, '_');
     const publicUrl = `/api/assets/${assetId}`;
@@ -2300,10 +2280,12 @@ export const store = {
       id: assetId,
       filename,
       url: publicUrl,
-      dataUrl: `data:${mimeType};base64,${base64Data}`,
-      mimeType,
-      size: buffer.length,
-      prefix,
+      dataUrl: image.dataUrl,
+      mimeType: image.mimeType,
+      size: image.buffer.length,
+      width: image.width,
+      height: image.height,
+      prefix: safePrefix,
       savedPermanently: true,
       savedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -2312,7 +2294,7 @@ export const store = {
 
     if (!process.env.VERCEL) {
       ensureDataDir();
-      fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
+      fs.writeFileSync(path.join(UPLOADS_DIR, filename), image.buffer);
     }
 
     return {

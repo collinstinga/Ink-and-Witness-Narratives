@@ -21,6 +21,7 @@ import {
 import { Article, AuthorProfile } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { applyFavicon } from '../../utils/favicon.js';
+import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { ImageCropModal, CropSettings } from './ImageCropModal.js';
 
 interface PhotosAndBrandingSectionProps {
@@ -180,17 +181,9 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate size (max 15MB)
-    if (file.size > 15 * 1024 * 1024) {
-      showError(target, 'Image file exceeds 15MB size limit.');
-      e.target.value = '';
-      return;
-    }
-
-    // Validate types
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml', 'image/gif', 'image/x-icon', 'image/vnd.microsoft.icon'];
-    if (!validTypes.includes(file.type) && !file.name.match(/\.(jpg|jpeg|png|webp|svg|gif|ico)$/i)) {
-      showError(target, 'Invalid format. Supported: JPG, PNG, WebP, SVG, GIF, ICO.');
+    const validationError = getImageUploadValidationError(file);
+    if (validationError) {
+      showError(target, validationError);
       e.target.value = '';
       return;
     }
@@ -342,42 +335,42 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
       <input
         ref={welcomeBgInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(e) => handleFileSelected(e, 'welcome_background')}
       />
       <input
         ref={authorPhotoInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(e) => handleFileSelected(e, 'author_avatar')}
       />
       <input
         ref={authorCoverInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(e) => handleFileSelected(e, 'author_cover')}
       />
       <input
         ref={faviconInputRef}
         type="file"
-        accept="image/png,image/svg+xml,image/x-icon,image/vnd.microsoft.icon,image/webp,image/jpeg"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(e) => handleFileSelected(e, 'favicon')}
       />
       <input
         ref={logoInputRef}
         type="file"
-        accept="image/png,image/svg+xml,image/webp,image/jpeg"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(e) => handleFileSelected(e, 'logo')}
       />
       <input
         ref={pieceCoverInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif"
+        accept={IMAGE_UPLOAD_ACCEPT}
         className="hidden"
         onChange={(e) => handleFileSelected(e, 'piece_cover', selectedPiece?.id)}
       />
