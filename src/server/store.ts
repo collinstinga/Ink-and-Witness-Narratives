@@ -480,8 +480,11 @@ export const store = {
         (await getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'))
       )()),
       settings: captureStartupRead((async () =>
-        (await getFirestoreDoc<MpesaConfig>('site_configs', 'settings')) ||
-        (await getFirestoreDoc<MpesaConfig>('site_configs', 'mpesa_settings'))
+        // mpesa_settings is the canonical document written by Writer Settings.
+        // Keep the legacy settings document as a read-only fallback so a stale
+        // copy can no longer override a newer payment configuration.
+        (await getFirestoreDoc<MpesaConfig>('site_configs', 'mpesa_settings')) ||
+        (await getFirestoreDoc<MpesaConfig>('site_configs', 'settings'))
       )()),
       homepage: captureStartupRead((async () =>
         (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage')) ||
@@ -2488,30 +2491,63 @@ export const store = {
 
   // MPESA SETTINGS
   getMpesaSettings() {
+    const normalizePaymentType = (value: unknown): 'till' | 'paybill' | undefined => {
+      const normalized = String(value || '').trim().toLowerCase();
+      if (normalized === 'till' || normalized === 'customerbuygoodsonline') return 'till';
+      if (normalized === 'paybill' || normalized === 'customerpaybillonline') return 'paybill';
+      return undefined;
+    };
+    const envPaymentType = normalizePaymentType(process.env.MPESA_PAYMENT_TYPE);
+    const configuredTransactionType = (
+      process.env.MPESA_TRANSACTION_TYPE ||
+      (envPaymentType === 'paybill' ? 'CustomerPayBillOnline' : envPaymentType === 'till' ? 'CustomerBuyGoodsOnline' : '') ||
+      cachedMpesaSettings.transactionType ||
+      (cachedMpesaSettings.paymentType === 'paybill' ? 'CustomerPayBillOnline' : 'CustomerBuyGoodsOnline')
+    ).trim();
+    const effectivePaymentType: 'till' | 'paybill' = configuredTransactionType === 'CustomerPayBillOnline'
+      ? 'paybill'
+      : 'till';
+
     return {
       ...cachedMpesaSettings,
-      consumerKey: (cachedMpesaSettings.consumerKey || process.env.MPESA_TILL_CONSUMER_KEY || process.env.MPESA_CONSUMER_KEY || '').trim(),
-      consumerSecret: (cachedMpesaSettings.consumerSecret || process.env.MPESA_TILL_SECRET_KEY || process.env.MPESA_CONSUMER_SECRET || '').trim(),
-      passkey: (cachedMpesaSettings.passkey || process.env.MPESA_PASSKEY_ || process.env.MPESA_PASSKEY || '').trim(),
-      shortcode: (cachedMpesaSettings.shortcode || process.env.MPESA_SHORTCODE || '').trim(),
-      tillNumber: (cachedMpesaSettings.tillNumber || process.env.MPESA_TILL_NUMBER || '').trim(),
-      storeNumber: (cachedMpesaSettings.storeNumber || process.env.MPESA_STORE_NUMBER || process.env.MPESA_SHORTCODE || '').trim(),
-      paybillNumber: (cachedMpesaSettings.paybillNumber || process.env.MPESA_PAYBILL_NUMBER || '').trim(),
-      tillName: (cachedMpesaSettings.tillName || process.env.MPESA_TILL_NAME || 'Ink & Witness').trim(),
-      accountReference: (cachedMpesaSettings.accountReference || process.env.MPESA_ACCOUNT_REF || 'INKWITNESS').trim(),
-      transactionType: (cachedMpesaSettings.transactionType || process.env.MPESA_TRANSACTION_TYPE || process.env.MPESA_PAYMENT_TYPE || 'CustomerBuyGoodsOnline').trim(),
-      callbackUrl: (cachedMpesaSettings.callbackUrl || process.env.MPESA_CALLBACK_URL || '').trim(),
+      paymentType: effectivePaymentType,
+      consumerKey: (process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || cachedMpesaSettings.consumerKey || '').trim(),
+      consumerSecret: (process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || cachedMpesaSettings.consumerSecret || '').trim(),
+      passkey: (process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || cachedMpesaSettings.passkey || '').trim(),
+      shortcode: (process.env.MPESA_SHORTCODE || cachedMpesaSettings.shortcode || '').trim(),
+      tillNumber: (process.env.MPESA_TILL_NUMBER || cachedMpesaSettings.tillNumber || '').trim(),
+      storeNumber: (process.env.MPESA_STORE_NUMBER || cachedMpesaSettings.storeNumber || process.env.MPESA_SHORTCODE || cachedMpesaSettings.shortcode || '').trim(),
+      paybillNumber: (process.env.MPESA_PAYBILL_NUMBER || cachedMpesaSettings.paybillNumber || '').trim(),
+      tillName: (process.env.MPESA_TILL_NAME || cachedMpesaSettings.tillName || 'Ink & Witness').trim(),
+      accountReference: (process.env.MPESA_ACCOUNT_REF || cachedMpesaSettings.accountReference || 'INKWITNESS').trim(),
+      transactionType: configuredTransactionType,
+      callbackUrl: (process.env.MPESA_CALLBACK_URL || cachedMpesaSettings.callbackUrl || '').trim(),
       env: (process.env.MPESA_ENV === 'sandbox' ? 'sandbox' : 'production') as 'sandbox' | 'production'
     };
   },
 
-  saveMpesaSettings(settings: Partial<typeof cachedMpesaSettings>) {
+  async saveMpesaSettings(settings: Partial<typeof cachedMpesaSettings>) {
+    const normalizedSettings = { ...settings };
+    if (settings.paymentType !== undefined) {
+      if (settings.paymentType !== 'till' && settings.paymentType !== 'paybill') {
+        throw new Error('M-Pesa payment type must be till or paybill.');
+      }
+      normalizedSettings.transactionType = settings.paymentType === 'paybill'
+        ? 'CustomerPayBillOnline'
+        : 'CustomerBuyGoodsOnline';
+    } else if (settings.transactionType !== undefined) {
+      if (settings.transactionType !== 'CustomerBuyGoodsOnline' && settings.transactionType !== 'CustomerPayBillOnline') {
+        throw new Error('Unsupported M-Pesa transaction type.');
+      }
+      normalizedSettings.paymentType = settings.transactionType === 'CustomerPayBillOnline' ? 'paybill' : 'till';
+    }
+
     cachedMpesaSettings = {
       ...cachedMpesaSettings,
-      ...settings
+      ...normalizedSettings
     };
     writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
-    setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings).catch(() => {});
+    await setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings);
     return this.getMpesaSettings();
   },
 

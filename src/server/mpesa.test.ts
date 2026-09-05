@@ -9,6 +9,7 @@ import {
   formatKenyanPhone,
   isDarajaMerchantConfigurationError,
   isValidKenyanMpesaPhone,
+  resolveMpesaPaymentRail,
   resolveDarajaCallbackUrl
 } from './mpesa.js';
 
@@ -41,5 +42,41 @@ describe('M-Pesa request helpers', () => {
     expect(isDarajaMerchantConfigurationError('Merchant does not exist')).toBe(true);
     expect(isDarajaMerchantConfigurationError('Invalid BusinessShortCode')).toBe(true);
     expect(isDarajaMerchantConfigurationError('The transaction does not exist yet')).toBe(false);
+  });
+
+  it('maps Buy Goods to Store/Head Office and Till without using a PayBill value', () => {
+    expect(resolveMpesaPaymentRail({
+      paymentType: 'till',
+      transactionType: 'CustomerBuyGoodsOnline',
+      storeNumber: '600111',
+      tillNumber: '600222',
+      paybillNumber: '600333'
+    })).toEqual({
+      paymentType: 'till',
+      transactionType: 'CustomerBuyGoodsOnline',
+      businessShortCode: '600111',
+      partyB: '600222'
+    });
+  });
+
+  it('maps PayBill to one business number for both shortcode fields', () => {
+    expect(resolveMpesaPaymentRail({
+      paymentType: 'paybill',
+      transactionType: 'CustomerPayBillOnline',
+      shortcode: '600111',
+      paybillNumber: '600333'
+    })).toEqual({
+      paymentType: 'paybill',
+      transactionType: 'CustomerPayBillOnline',
+      businessShortCode: '600333',
+      partyB: '600333'
+    });
+  });
+
+  it('rejects contradictory environment rail settings before a payment request', () => {
+    expect(() => resolveMpesaPaymentRail(
+      { storeNumber: '600111', tillNumber: '600222' },
+      { MPESA_PAYMENT_TYPE: 'paybill', MPESA_TRANSACTION_TYPE: 'CustomerBuyGoodsOnline' }
+    )).toThrow(/conflicts/i);
   });
 });

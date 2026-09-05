@@ -63,11 +63,11 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
   const [avatarUrl, setAvatarUrl] = useState(author.avatarUrl || '');
 
   // M-Pesa Form State
-  const [storeNumber, setStoreNumber] = useState(mpesaConfig.storeNumber || '1145520');
-  const [tillNumber, setTillNumber] = useState(mpesaConfig.tillNumber || '1618656');
+  const [storeNumber, setStoreNumber] = useState(mpesaConfig.storeNumber || '');
+  const [tillNumber, setTillNumber] = useState(mpesaConfig.tillNumber || '');
   const [tillName, setTillName] = useState(mpesaConfig.tillName || 'Ink & Witness / Jake');
-  const [paybillNumber, setPaybillNumber] = useState(mpesaConfig.paybillNumber || '174379');
-  const [shortcode, setShortcode] = useState(mpesaConfig.shortcode || '1145520');
+  const [paybillNumber, setPaybillNumber] = useState(mpesaConfig.paybillNumber || '');
+  const [shortcode, setShortcode] = useState(mpesaConfig.shortcode || '');
   const [accountReference, setAccountReference] = useState(mpesaConfig.accountReference || 'INK_WITNESS');
   const [defaultPriceKes, setDefaultPriceKes] = useState(mpesaConfig.defaultPriceKes || 1050);
   const [paymentType, setPaymentType] = useState<'till' | 'paybill'>(mpesaConfig.paymentType || 'till');
@@ -112,11 +112,11 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
       const res = await api.getAdminMpesaConfig();
       if (res.success && res.config) {
         const c = res.config;
-        setStoreNumber(c.storeNumber || '1145520');
-        setTillNumber(c.tillNumber || '1618656');
+        setStoreNumber(c.storeNumber || '');
+        setTillNumber(c.tillNumber || '');
         setTillName(c.tillName || 'Ink & Witness / Jake');
-        setPaybillNumber(c.paybillNumber || '174379');
-        setShortcode(c.shortcode || '1145520');
+        setPaybillNumber(c.paybillNumber || '');
+        setShortcode(c.shortcode || '');
         setAccountReference(c.accountReference || 'INK_WITNESS');
         setDefaultPriceKes(c.defaultPriceKes || 1050);
         setPaymentType(c.paymentType || 'till');
@@ -699,11 +699,11 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                     type="text"
                     value={storeNumber}
                     onChange={(e) => setStoreNumber(e.target.value)}
-                    placeholder="1145520"
+                    placeholder="Enter Store / Head Office number"
                     className="w-full px-3 py-2.5 rounded-lg bg-[#080d1a] border border-slate-700 text-sky-400 font-mono text-sm font-bold focus:outline-none focus:border-sky-500"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Store / HO: <span className="text-slate-300 font-mono">1145520</span>
+                    Store / HO: <span className="text-slate-300 font-mono">{storeNumber || 'Not configured'}</span>
                   </p>
                 </div>
 
@@ -713,11 +713,11 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                     type="text"
                     value={tillNumber}
                     onChange={(e) => setTillNumber(e.target.value)}
-                    placeholder="1618656"
+                    placeholder="Enter Buy Goods Till number"
                     className="w-full px-3 py-2.5 rounded-lg bg-[#080d1a] border border-slate-700 text-emerald-400 font-mono text-sm font-bold focus:outline-none focus:border-emerald-500"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Till No: <span className="text-slate-300 font-mono">1618656</span>
+                    Till No: <span className="text-slate-300 font-mono">{tillNumber || 'Not configured'}</span>
                   </p>
                 </div>
               </div>
@@ -732,11 +732,11 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                     type="text"
                     value={paybillNumber}
                     onChange={(e) => setPaybillNumber(e.target.value)}
-                    placeholder="174379"
+                    placeholder="Enter PayBill business number"
                     className="w-full px-3 py-2.5 rounded-lg bg-[#080d1a] border border-slate-700 text-emerald-400 font-mono text-sm font-bold focus:outline-none focus:border-emerald-500"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Business Paybill: <span className="text-slate-300 font-mono">{paybillNumber || '174379'}</span>
+                    Business Paybill: <span className="text-slate-300 font-mono">{paybillNumber || 'Not configured'}</span>
                   </p>
                 </div>
 
@@ -791,7 +791,7 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
               <div className="space-y-1">
                 <p className="font-semibold text-white">Safaricom LIVE / Production Daraja Integration</p>
                 <p className="text-slate-300 text-[11px] leading-relaxed">
-                  Direct API connection to <strong className="text-emerald-400 font-mono">api.safaricom.co.ke</strong>. All credentials are stored securely backend-only and never exposed to website visitors. When a reader clicks Pay, a real STK Push prompt is sent directly to their physical mobile handset.
+                  Direct API connection to <strong className="text-emerald-400 font-mono">api.safaricom.co.ke</strong>. Credentials remain backend-only. Request acceptance does not prove handset delivery; the checkout waits for Safaricom's status or callback before reporting success.
                 </p>
               </div>
             </div>
@@ -864,7 +864,7 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                     type="text"
                     value={shortcode}
                     onChange={(e) => setShortcode(e.target.value)}
-                    placeholder="1145520 (Store No) or Paybill"
+                    placeholder="Enter the registered business shortcode"
                     className="w-full px-3 py-2 rounded-lg bg-[#0b1120] border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
                   />
                 </div>

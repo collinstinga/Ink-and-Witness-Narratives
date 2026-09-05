@@ -48,11 +48,27 @@ const dbMocks = vi.hoisted(() => {
     getAllFirestoreDocs: vi.fn(async (collectionName: string) =>
       collectionName === 'transactions' ? [remoteTransaction] : []
     ),
-    getFirestoreDoc: vi.fn(async (collectionName: string, docId: string) =>
-      collectionName === 'transactions' && docId === directTransaction.checkoutRequestId
-        ? directTransaction
-        : null
-    ),
+    getFirestoreDoc: vi.fn(async (collectionName: string, docId: string) => {
+      if (collectionName === 'transactions' && docId === directTransaction.checkoutRequestId) {
+        return directTransaction;
+      }
+      if (collectionName === 'site_configs' && docId === 'mpesa_settings') {
+        return {
+          paymentType: 'till',
+          transactionType: 'CustomerBuyGoodsOnline',
+          storeNumber: '600111',
+          tillNumber: '600222'
+        };
+      }
+      if (collectionName === 'site_configs' && docId === 'settings') {
+        return {
+          paymentType: 'paybill',
+          transactionType: 'CustomerPayBillOnline',
+          paybillNumber: '600333'
+        };
+      }
+      return null;
+    }),
     setFirestoreDoc: vi.fn(async () => undefined),
     deleteFirestoreDoc: vi.fn(async () => undefined)
   };
@@ -92,6 +108,8 @@ describe('lazy transaction hydration', () => {
     process.env.INITIAL_ADMIN_PASSWORD = '';
     process.env.ADMIN_EMAIL = '';
     process.env.ADMIN_PASSWORD = '';
+    delete process.env.MPESA_PAYMENT_TYPE;
+    delete process.env.MPESA_TRANSACTION_TYPE;
 
     ({ store } = await import('./store.js'));
     await store.init();
@@ -125,6 +143,27 @@ describe('lazy transaction hydration', () => {
     expect(dbMocks.recentQueryGet).toHaveBeenCalledTimes(1);
     expect(dbMocks.getAllFirestoreDocs.mock.calls
       .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
+  });
+
+  it('loads the canonical M-Pesa settings document before the legacy fallback', () => {
+    expect(store.getMpesaSettings()).toMatchObject({
+      paymentType: 'till',
+      transactionType: 'CustomerBuyGoodsOnline',
+      storeNumber: '600111',
+      tillNumber: '600222'
+    });
+    expect(dbMocks.getFirestoreDoc).toHaveBeenCalledWith('site_configs', 'mpesa_settings');
+    expect(dbMocks.getFirestoreDoc).not.toHaveBeenCalledWith('site_configs', 'settings');
+  });
+
+  it('keeps the saved payment selector and transaction type consistent', async () => {
+    await store.saveMpesaSettings({ paymentType: 'paybill', paybillNumber: '600333' });
+
+    expect(store.getMpesaSettings()).toMatchObject({
+      paymentType: 'paybill',
+      transactionType: 'CustomerPayBillOnline',
+      paybillNumber: '600333'
+    });
   });
 
   it('uses one Firestore scan and preserves writes made before hydration', async () => {

@@ -62,7 +62,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   const [mpesaConfig, setMpesaConfig] = useState<MpesaConfig>({
     paymentType: 'till',
     shortcode: '',
-    tillNumber: '1618656',
+    tillNumber: '',
     tillName: 'Ink & Witness / Jake',
     accountReference: 'INKWITNESS',
     env: 'production',
@@ -99,7 +99,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   }, [isOpen, article]);
 
   const basePriceKes = article?.priceKes || mpesaConfig.defaultPriceKes || 1050;
-  const currentTillNumber = mpesaConfig.tillNumber || '1618656';
+  const currentTillNumber = mpesaConfig.tillNumber || '';
   const currentTillName = mpesaConfig.tillName || 'Ink & Witness / Jake';
 
   const triggerSuccessNotification = () => {
@@ -179,9 +179,11 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
           const detail = status.resultDesc || (status as any).error || 'Safaricom could not complete this payment request.';
           setErrorMessage(`Safaricom Notice: ${detail}`);
           setStep('ERROR');
-        } else if (status.status === 'TIMED_OUT') {
-          // If genuinely reported timed out by Safaricom
-          setStep('AWAITING_CONFIRMATION');
+        } else if (status.status === 'TIMEOUT' || status.status === 'TIMED_OUT') {
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+          if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+          setErrorMessage(status.resultDesc || 'Safaricom did not deliver or complete the phone prompt in time. No successful payment was confirmed.');
+          setStep('ERROR');
         }
         // If status is PENDING or other, KEEP POLLING calmly. Do NOT fail!
       } catch (err) {
@@ -203,6 +205,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   if (!isOpen || !article) return null;
 
   const handleCopyTillNumber = () => {
+    if (!currentTillNumber) return;
     navigator.clipboard.writeText(currentTillNumber);
     setCopiedTill(true);
     setTimeout(() => setCopiedTill(false), 2000);
@@ -270,6 +273,10 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       } else if (status.status === 'FAILED') {
         const detail = status.resultDesc || (status as any).error || 'Safaricom could not complete this payment request.';
         setErrorMessage(`Safaricom Notice: ${detail}`);
+        setStep('ERROR');
+        return;
+      } else if (status.status === 'TIMEOUT' || status.status === 'TIMED_OUT') {
+        setErrorMessage(status.resultDesc || 'Safaricom did not deliver or complete the phone prompt in time. No successful payment was confirmed.');
         setStep('ERROR');
         return;
       }
@@ -488,10 +495,10 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
 
                 <div>
                   <h4 className="font-display font-bold text-lg text-white">
-                    STK Push sent. Check your phone now.
+                    Request accepted by Safaricom
                   </h4>
                   <p className="text-xs text-slate-300 mt-1.5 font-sans">
-                    A Safaricom prompt for <strong className="text-emerald-400 font-mono">KES {basePriceKes}</strong> was sent to <strong className="text-emerald-400 font-mono">{phoneNumber}</strong>.
+                    Safaricom accepted the request for <strong className="text-emerald-400 font-mono">KES {basePriceKes}</strong>. Waiting for confirmation that it reached <strong className="text-emerald-400 font-mono">{phoneNumber}</strong>.
                   </p>
                 </div>
 
@@ -505,11 +512,11 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
                   {/* Visual timer countdown */}
                   <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/30 text-emerald-300 text-[11px] font-mono">
                     <Clock className="w-3.5 h-3.5" />
-                    <span>Prompt valid for {formatTimer(secondsRemaining)}</span>
+                    <span>Delivery check {formatTimer(secondsRemaining)}</span>
                   </div>
 
                   <p className="text-[11px] text-slate-400 font-sans leading-relaxed">
-                    Please enter your private 4-digit M-Pesa PIN <strong>on your phone handset</strong> to authorize this transaction. Your monograph will unlock automatically as soon as Safaricom confirms.
+                    If the official prompt appears, enter your private M-Pesa PIN <strong>only on your phone handset</strong>. The page will show a provider error instead of waiting indefinitely if Safaricom rejects the merchant request.
                   </p>
 
                   <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
@@ -719,11 +726,12 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-slate-300">Till Number:</span>
                     <div className="flex items-center gap-2">
-                      <span className="text-emerald-400 font-bold">{currentTillNumber}</span>
+                        <span className="text-emerald-400 font-bold">{currentTillNumber || 'Not configured'}</span>
                       <button
                         type="button"
                         onClick={handleCopyTillNumber}
-                        className="px-2 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white cursor-pointer"
+                          disabled={!currentTillNumber}
+                          className="px-2 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {copiedTill ? 'Copied!' : 'Copy'}
                       </button>

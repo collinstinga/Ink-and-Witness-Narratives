@@ -636,14 +636,14 @@ export async function createApp() {
     res.json({
       paymentType: mpesaSettings.paymentType,
       shortcode: mpesaSettings.shortcode,
-      tillNumber: mpesaSettings.tillNumber || "1618656",
+      tillNumber: mpesaSettings.tillNumber,
       tillName: mpesaSettings.tillName || "Ink & Witness / Jake",
-      storeNumber: mpesaSettings.storeNumber || "1145520",
+      storeNumber: mpesaSettings.storeNumber,
       paybillNumber: mpesaSettings.paybillNumber,
       accountReference: mpesaSettings.accountReference,
-      businessPhone: mpesaSettings.businessPhone || "0715601209",
-      whatsappNumber: mpesaSettings.whatsappNumber || "0715601209",
-      callPhoneNumber: mpesaSettings.callPhoneNumber || "0715601209",
+      businessPhone: mpesaSettings.businessPhone,
+      whatsappNumber: mpesaSettings.whatsappNumber,
+      callPhoneNumber: mpesaSettings.callPhoneNumber,
       env: mpesaSettings.env,
       defaultPriceKes: mpesaSettings.defaultPriceKes || 1050,
       tippingEnabled: mpesaSettings.tippingEnabled !== false,
@@ -2263,9 +2263,9 @@ export async function createApp() {
 
   // Helper to safely mask M-Pesa secrets for response
   const formatSafeAdminMpesaConfig = (config: any) => {
-    const maskedKey = config.consumerKey ? `${config.consumerKey.slice(0, 6)}••••••••${config.consumerKey.slice(-4)}` : '';
+    const maskedKey = config.consumerKey ? '••••••••••••••••' : '';
     const maskedSecret = config.consumerSecret ? '••••••••••••••••' : '';
-    const maskedPasskey = config.passkey ? `${config.passkey.slice(0, 6)}••••••••${config.passkey.slice(-4)}` : '';
+    const maskedPasskey = config.passkey ? '••••••••••••••••' : '';
 
     return {
       ...config,
@@ -2298,8 +2298,17 @@ export async function createApp() {
   app.post(["/api/admin/mpesa", "/api/admin/mpesa/config"], requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const body = req.body || {};
-      const current = store.getMpesaSettings();
-      const toUpdate: any = { ...body };
+      const allowedFields = [
+        'paymentType', 'storeNumber', 'tillNumber', 'tillName', 'paybillNumber',
+        'shortcode', 'accountReference', 'defaultPriceKes', 'env', 'consumerKey',
+        'consumerSecret', 'passkey', 'businessPhone', 'whatsappNumber',
+        'callPhoneNumber', 'tippingEnabled', 'minTipKes'
+      ];
+      const toUpdate: any = Object.fromEntries(
+        allowedFields
+          .filter(field => Object.prototype.hasOwnProperty.call(body, field))
+          .map(field => [field, body[field]])
+      );
 
       // Prevent overwriting real keys with masked values
       if (body.consumerKey && body.consumerKey.includes('••••')) {

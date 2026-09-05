@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { store } from './store.js';
-import { PaymentTransaction } from '../types.js';
+import { MpesaConfig, PaymentTransaction } from '../types.js';
 
 /**
  * Safaricom Daraja Production M-Pesa Service
@@ -9,6 +9,77 @@ import { PaymentTransaction } from '../types.js';
 
 const DARAJA_PRODUCTION_URL = 'https://api.safaricom.co.ke';
 const VALID_TRANSACTION_TYPES = new Set(['CustomerPayBillOnline', 'CustomerBuyGoodsOnline']);
+
+type MpesaRailSettings = Partial<MpesaConfig> & { transactionType?: string };
+
+export interface ResolvedMpesaPaymentRail {
+  paymentType: 'till' | 'paybill';
+  transactionType: 'CustomerBuyGoodsOnline' | 'CustomerPayBillOnline';
+  businessShortCode: string;
+  partyB: string;
+}
+
+function normalizePaymentType(value: unknown): 'till' | 'paybill' | undefined {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'till' || normalized === 'customerbuygoodsonline') return 'till';
+  if (normalized === 'paybill' || normalized === 'customerpaybillonline') return 'paybill';
+  return undefined;
+}
+
+export function resolveMpesaPaymentRail(
+  settings: MpesaRailSettings,
+  environment: Record<string, string | undefined> = process.env
+): ResolvedMpesaPaymentRail {
+  const envTransactionType = String(environment.MPESA_TRANSACTION_TYPE || '').trim();
+  const storedTransactionType = String(settings.transactionType || '').trim();
+  const envPaymentType = normalizePaymentType(environment.MPESA_PAYMENT_TYPE);
+  const storedPaymentType = normalizePaymentType(settings.paymentType);
+
+  if (environment.MPESA_PAYMENT_TYPE && !envPaymentType) {
+    throw new Error('MPESA_PAYMENT_TYPE must be till or paybill.');
+  }
+  if (envTransactionType && !VALID_TRANSACTION_TYPES.has(envTransactionType)) {
+    throw new Error('MPESA_TRANSACTION_TYPE must be CustomerBuyGoodsOnline or CustomerPayBillOnline.');
+  }
+  if (!envTransactionType && storedTransactionType && !VALID_TRANSACTION_TYPES.has(storedTransactionType)) {
+    throw new Error('The saved M-Pesa transaction type is unsupported.');
+  }
+
+  const transactionType = (
+    envTransactionType ||
+    (envPaymentType === 'paybill' ? 'CustomerPayBillOnline' : envPaymentType === 'till' ? 'CustomerBuyGoodsOnline' : '') ||
+    storedTransactionType ||
+    (storedPaymentType === 'paybill' ? 'CustomerPayBillOnline' : 'CustomerBuyGoodsOnline')
+  ) as ResolvedMpesaPaymentRail['transactionType'];
+  const paymentType: ResolvedMpesaPaymentRail['paymentType'] = transactionType === 'CustomerPayBillOnline'
+    ? 'paybill'
+    : 'till';
+
+  if (envTransactionType && envPaymentType && envPaymentType !== paymentType) {
+    throw new Error('MPESA_PAYMENT_TYPE conflicts with MPESA_TRANSACTION_TYPE.');
+  }
+  if (!envTransactionType && !envPaymentType && storedTransactionType && storedPaymentType && storedPaymentType !== paymentType) {
+    throw new Error('The saved M-Pesa payment type conflicts with its transaction type. Save the intended rail again.');
+  }
+
+  const shortcode = String(environment.MPESA_SHORTCODE || settings.shortcode || '').trim();
+  const storeNumber = String(environment.MPESA_STORE_NUMBER || settings.storeNumber || shortcode).trim();
+  const tillNumber = String(environment.MPESA_TILL_NUMBER || settings.tillNumber || '').trim();
+  const paybillNumber = String(environment.MPESA_PAYBILL_NUMBER || settings.paybillNumber || shortcode).trim();
+  const businessShortCode = paymentType === 'till' ? storeNumber : paybillNumber;
+  const partyB = paymentType === 'till' ? tillNumber : businessShortCode;
+
+  if (!/^\d{5,10}$/.test(businessShortCode)) {
+    throw new Error(paymentType === 'till'
+      ? 'M-Pesa Buy Goods requires a valid numeric Store/Head Office number.'
+      : 'M-Pesa PayBill requires a valid numeric business number.');
+  }
+  if (!/^\d{5,10}$/.test(partyB)) {
+    throw new Error('M-Pesa Buy Goods requires a valid numeric Till number.');
+  }
+
+  return { paymentType, transactionType, businessShortCode, partyB };
+}
 
 export function createDarajaTimestamp(date = new Date()): string {
   const parts = new Intl.DateTimeFormat('en-GB', {
@@ -277,10 +348,6 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   // Load Credentials
   const mpesaSettings = store.getMpesaSettings();
   const passkey = (process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || mpesaSettings.passkey || '').trim();
-  const shortcode = (process.env.MPESA_SHORTCODE || mpesaSettings.shortcode || '').trim();
-  const storeNumber = (process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || '').trim();
-  const tillNumber = (process.env.MPESA_TILL_NUMBER || mpesaSettings.tillNumber || '').trim();
-  const transactionType = (process.env.MPESA_TRANSACTION_TYPE || mpesaSettings.transactionType || 'CustomerBuyGoodsOnline').trim();
 
   if (!passkey) {
     const err = 'M-Pesa production configuration missing: MPESA_PASSKEY. Please configure in settings.';
@@ -288,22 +355,15 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     return { success: false, error: err };
   }
 
-  if (!VALID_TRANSACTION_TYPES.has(transactionType)) {
-    const err = 'M-Pesa transaction type must be CustomerPayBillOnline or CustomerBuyGoodsOnline.';
+  let paymentRail: ResolvedMpesaPaymentRail;
+  try {
+    paymentRail = resolveMpesaPaymentRail(mpesaSettings);
+  } catch (error: any) {
+    const err = error?.message || 'The M-Pesa payment rail configuration is invalid.';
     console.error(`[M-PESA CONFIG ERROR] ${err}`);
     return { success: false, error: err };
   }
-
-  const isBuyGoods = transactionType === 'CustomerBuyGoodsOnline';
-  const businessShortCode = isBuyGoods ? (storeNumber || shortcode) : shortcode;
-  const partyB = isBuyGoods ? (tillNumber || shortcode) : shortcode;
-  if (!/^\d{5,10}$/.test(businessShortCode) || !/^\d{5,10}$/.test(partyB)) {
-    const err = isBuyGoods
-      ? 'M-Pesa Buy Goods requires valid numeric store/shortcode and till numbers.'
-      : 'M-Pesa PayBill requires a valid numeric business shortcode.';
-    console.error(`[M-PESA CONFIG ERROR] ${err}`);
-    return { success: false, error: err };
-  }
+  const { businessShortCode, partyB, transactionType } = paymentRail;
 
   // Generate OAuth Token
   const { token: accessToken, error: tokenError } = await getDarajaAccessToken();
@@ -645,13 +705,14 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
 
     const mpesaSettings = store.getMpesaSettings();
     const passkey = (process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || mpesaSettings.passkey || '').trim();
-    const transactionType = (process.env.MPESA_TRANSACTION_TYPE || mpesaSettings.transactionType || 'CustomerBuyGoodsOnline').trim();
-    const configuredShortcode = (process.env.MPESA_SHORTCODE || mpesaSettings.shortcode || '').trim();
-    const configuredStoreNumber = (process.env.MPESA_STORE_NUMBER || mpesaSettings.storeNumber || '').trim();
-    const shortcode = (
-      tx.shortcodeUsed ||
-      (transactionType === 'CustomerBuyGoodsOnline' ? configuredStoreNumber : configuredShortcode)
-    ).trim();
+    let shortcode = String(tx.shortcodeUsed || '').trim();
+    if (!shortcode) {
+      try {
+        shortcode = resolveMpesaPaymentRail(mpesaSettings).businessShortCode;
+      } catch (error: any) {
+        return { status: 'FAILED', resultDesc: error?.message || 'The M-Pesa status-query merchant configuration is invalid.' };
+      }
+    }
 
     if (!passkey || !/^\d{5,10}$/.test(shortcode)) {
       return {
