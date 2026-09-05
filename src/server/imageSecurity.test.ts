@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import sharp from 'sharp';
 import {
   ImageValidationError,
   MAX_STORED_IMAGE_BYTES,
+  sanitizeImageDataUrl,
   validateImageDataUrl
 } from './imageSecurity.js';
 
@@ -94,5 +96,44 @@ describe('image upload validation', () => {
   it('rejects appended polyglot content after a PNG end marker', () => {
     const polyglot = Buffer.concat([pngFixture(), Buffer.from('<script>alert(1)</script>')]);
     expect(() => validateImageDataUrl(asDataUrl('image/png', polyglot))).toThrow('contents do not match');
+  });
+
+  it.each([
+    ['image/jpeg', 'jpeg'],
+    ['image/png', 'png'],
+    ['image/webp', 'webp']
+  ] as const)('decodes and re-encodes a genuine %s upload', async (mimeType, format) => {
+    const source = sharp({
+      create: { width: 8, height: 6, channels: 4, background: '#9f1239' }
+    });
+    const buffer = await source[format]().toBuffer();
+
+    const sanitized = await sanitizeImageDataUrl(asDataUrl(mimeType, buffer));
+
+    expect(sanitized.mimeType).toBe(mimeType);
+    expect(sanitized.width).toBe(8);
+    expect(sanitized.height).toBe(6);
+    await expect(sharp(sanitized.buffer).metadata()).resolves.toMatchObject({ width: 8, height: 6 });
+  });
+
+  it('rejects a header-only file that cannot be decoded as pixels', async () => {
+    await expect(sanitizeImageDataUrl(asDataUrl('image/png', pngFixture())))
+      .rejects.toThrow('could not be decoded safely');
+  });
+
+  it('strips embedded image metadata during canonical re-encoding', async () => {
+    const original = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: '#0f172a' }
+    })
+      .jpeg()
+      .withMetadata({ exif: { IFD0: { ImageDescription: '<script>alert(1)</script>' } } })
+      .toBuffer();
+    expect((await sharp(original).metadata()).exif).toBeDefined();
+
+    const sanitized = await sanitizeImageDataUrl(asDataUrl('image/jpeg', original));
+    const metadata = await sharp(sanitized.buffer).metadata();
+
+    expect(metadata.exif).toBeUndefined();
+    expect(sanitized.buffer.toString('latin1')).not.toContain('<script>');
   });
 });

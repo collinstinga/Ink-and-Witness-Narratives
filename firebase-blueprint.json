@@ -204,6 +204,7 @@
         "size": { "type": "number" },
         "width": { "type": "number" },
         "height": { "type": "number" },
+        "sanitized": { "type": "boolean", "description": "True when the server decoded and re-encoded the stored image" },
         "articleId": { "type": "string" },
         "savedPermanently": { "type": "boolean" },
         "savedAt": { "type": "string" },

@@ -1,3 +1,5 @@
+import sharp from 'sharp';
+
 export const MAX_STORED_IMAGE_BYTES = 700 * 1024;
 export const MAX_IMAGE_DIMENSION = 8_192;
 export const MAX_IMAGE_PIXELS = 32_000_000;
@@ -195,4 +197,34 @@ export function validateImageDataUrl(value: unknown): ValidatedImage {
     height: detected.height,
     dataUrl: `data:${detected.mimeType};base64,${buffer.toString('base64')}`
   };
+}
+
+export async function sanitizeImageDataUrl(value: unknown): Promise<ValidatedImage> {
+  const source = validateImageDataUrl(value);
+
+  try {
+    const decoder = sharp(source.buffer, {
+      failOn: 'warning',
+      limitInputPixels: MAX_IMAGE_PIXELS,
+      sequentialRead: true
+    }).rotate();
+
+    let sanitizedBuffer: Buffer;
+    if (source.mimeType === 'image/jpeg') {
+      sanitizedBuffer = await decoder.jpeg({ quality: 90, progressive: true }).toBuffer();
+    } else if (source.mimeType === 'image/png') {
+      sanitizedBuffer = await decoder.png({ compressionLevel: 9 }).toBuffer();
+    } else {
+      sanitizedBuffer = await decoder.webp({ quality: 90 }).toBuffer();
+    }
+
+    // Sharp strips EXIF/XMP/comments by default. Revalidating its output also
+    // applies the persistent byte/dimension limits to the canonical result.
+    return validateImageDataUrl(
+      `data:${source.mimeType};base64,${sanitizedBuffer.toString('base64')}`
+    );
+  } catch (error) {
+    if (error instanceof ImageValidationError) throw error;
+    throw new ImageValidationError('Image could not be decoded safely. Please use a valid JPEG, PNG, or WebP file.');
+  }
 }

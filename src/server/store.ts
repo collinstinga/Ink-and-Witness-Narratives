@@ -6,7 +6,7 @@ import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSessionId, generateSecureToken } from './auth.js';
-import { validateImageDataUrl } from './imageSecurity.js';
+import { sanitizeImageDataUrl } from './imageSecurity.js';
 import { 
   getDb, 
   setFirestoreDoc, 
@@ -2268,7 +2268,7 @@ export const store = {
   async saveUploadedImage(base64DataUrl: string, prefix: string = 'img'): Promise<{ success: boolean; url: string; filename: string }> {
     ensureDataDir();
 
-    const image = validateImageDataUrl(base64DataUrl);
+    const image = await sanitizeImageDataUrl(base64DataUrl);
     const safePrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'img';
 
     const randomStr = crypto.randomBytes(6).toString('hex');
@@ -2285,6 +2285,7 @@ export const store = {
       size: image.buffer.length,
       width: image.width,
       height: image.height,
+      sanitized: true,
       prefix: safePrefix,
       savedPermanently: true,
       savedAt: new Date().toISOString(),
