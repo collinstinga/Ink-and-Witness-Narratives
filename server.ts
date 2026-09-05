@@ -11,7 +11,14 @@ import { GoogleGenAI } from "@google/genai";
 import { store } from "./src/server/store.js";
 import { Article, PaymentTransaction, User } from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
-import { hashAffiliatePassword, verifyAffiliatePassword } from "./src/server/affiliateStore.js";
+import { sanitizeAffiliateForResponse } from "./src/server/affiliateStore.js";
+import {
+  generateAffiliateTemporaryPassword,
+  hashAffiliatePassword,
+  rehashVerifiedAffiliatePassword,
+  validateAffiliatePasswordStrength,
+  verifyAffiliatePassword
+} from "./src/server/affiliateCredentials.js";
 import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/server/auth.js";
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import {
@@ -2646,7 +2653,7 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/validate/:code", handleValidateRef);
 
   // Public / Promoters: Affiliate Registration
-  app.post("/api/affiliate/register", registerLimiter, publicWriteValidators.affiliateRegister, (req: Request, res: Response) => {
+  app.post("/api/affiliate/register", registerLimiter, publicWriteValidators.affiliateRegister, async (req: Request, res: Response) => {
     try {
       const settings = store.affiliates.getSettings();
       if (!settings.allowSelfRegistration) {
@@ -2663,13 +2670,14 @@ ${currentDraft || prompt}
         return res.status(400).json({ success: false, error: "You must read and agree to all Affiliate Programme Terms & Conditions." });
       }
 
-      if (password.length < 6) {
-        return res.status(400).json({ success: false, error: "Password must be at least 6 characters." });
+      const passwordValidation = validateAffiliatePasswordStrength(password);
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ success: false, error: passwordValidation.error });
       }
 
       const now = new Date().toISOString();
-      const passwordHash = hashAffiliatePassword(password);
-      const newAffiliate = store.affiliates.createAffiliate({
+      const passwordHash = await hashAffiliatePassword(password);
+      const newAffiliate = await store.affiliates.createAffiliate({
         name,
         email,
         phone,
@@ -2724,7 +2732,7 @@ ${currentDraft || prompt}
   });
 
   // Affiliate: Login
-  app.post("/api/affiliate/login", loginLimiter, publicWriteValidators.affiliateLogin, (req: Request, res: Response) => {
+  app.post("/api/affiliate/login", loginLimiter, publicWriteValidators.affiliateLogin, async (req: Request, res: Response) => {
     try {
       const { login, emailOrCode, email, code, password } = req.body;
       const rawLogin = login || emailOrCode || email || code;
@@ -2740,12 +2748,25 @@ ${currentDraft || prompt}
         return res.status(401).json({ success: false, error: "Invalid login credentials. Please check your email or affiliate code." });
       }
 
-      if (aff.status === 'suspended') {
-        return res.status(403).json({ success: false, error: "This affiliate account is currently suspended. Please contact the administrator at info@inkandwitness.com." });
+      // Authentication must use the current shared credential/status rather
+      // than a possibly stale per-instance startup cache.
+      aff = await store.affiliates.getAffiliateByIdFresh(aff.id);
+      if (!aff) {
+        return res.status(401).json({ success: false, error: "Invalid login credentials. Please check your email or affiliate code." });
       }
 
-      if (!aff.passwordHash || !verifyAffiliatePassword(password, aff.passwordHash)) {
+      if (aff.status !== 'active') {
+        return res.status(403).json({ success: false, error: "This affiliate account is not currently active. Please contact the administrator at info@inkandwitness.com." });
+      }
+
+      const passwordVerification = await verifyAffiliatePassword(password, aff.passwordHash);
+      if (!passwordVerification.valid) {
         return res.status(401).json({ success: false, error: "Incorrect password. Please verify and try again." });
+      }
+
+      if (passwordVerification.needsRehash) {
+        const upgradedHash = await rehashVerifiedAffiliatePassword(password);
+        aff = await store.affiliates.updateAffiliateCredential(aff.id, upgradedHash, 'System (credential migration)');
       }
 
       // Update last login timestamp
@@ -2890,25 +2911,35 @@ ${currentDraft || prompt}
   app.put("/api/affiliate/payout-settings", requireAffiliateAuth, handleUpdateProfile);
 
   // Affiliate: Change Password
-  app.post("/api/affiliate/change-password", requireAffiliateAuth, (req: Request, res: Response) => {
+  app.post("/api/affiliate/change-password", requireAffiliateAuth, async (req: Request, res: Response) => {
     try {
-      const affiliate = (req as any).affiliate;
+      const sessionAffiliate = (req as any).affiliate;
       const { currentPassword, newPassword } = req.body;
 
-      if (!newPassword || newPassword.length < 6) {
-        return res.status(400).json({ success: false, error: "New password must be at least 6 characters." });
+      const passwordValidation = validateAffiliatePasswordStrength(newPassword);
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ success: false, error: passwordValidation.error });
       }
 
-      if (affiliate.passwordHash && !verifyAffiliatePassword(currentPassword, affiliate.passwordHash)) {
+      const affiliate = await store.affiliates.getAffiliateByIdFresh(sessionAffiliate.id);
+      if (!affiliate || affiliate.status !== 'active') {
+        return res.status(403).json({ success: false, error: "This affiliate account is not currently active." });
+      }
+
+      const currentPasswordVerification = await verifyAffiliatePassword(currentPassword, affiliate.passwordHash);
+      if (!currentPasswordVerification.valid) {
         return res.status(401).json({ success: false, error: "Current password does not match." });
       }
 
-      const passwordHash = hashAffiliatePassword(newPassword);
-      store.affiliates.updateAffiliate(affiliate.id, { passwordHash }, `Affiliate (${affiliate.name})`);
+      const passwordHash = await hashAffiliatePassword(newPassword);
+      await store.affiliates.updateAffiliateCredential(affiliate.id, passwordHash, `Affiliate (${affiliate.name})`);
+      store.affiliates.invalidateAffiliateSessions(affiliate.id);
+      const replacementToken = store.affiliates.createAffiliateSession(affiliate.id);
+      setAffiliateSessionCookie(res, replacementToken);
 
       res.json({
         success: true,
-        message: "Password changed successfully."
+        message: "Password changed successfully. Other active affiliate sessions were signed out."
       });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message || "Failed to update password." });
@@ -3044,7 +3075,7 @@ ${currentDraft || prompt}
       const payouts = store.affiliates.getPayouts({ affiliateId: id });
 
       res.json({
-        affiliate,
+        affiliate: sanitizeAffiliateForResponse(affiliate),
         commissions,
         payouts
       });
@@ -3054,7 +3085,7 @@ ${currentDraft || prompt}
   });
 
   // Admin: Create Affiliate
-  app.post("/api/admin/affiliates", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/affiliates", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { 
         name, 
@@ -3071,13 +3102,17 @@ ${currentDraft || prompt}
         notes
       } = req.body;
 
-      if (!name || !email) {
-        return res.status(400).json({ error: "Name and email are required." });
+      if (!name || !email || !password) {
+        return res.status(400).json({ error: "Name, email, and a strong initial password are required." });
       }
 
-      const passwordHash = password ? hashAffiliatePassword(password) : hashAffiliatePassword("affiliate123");
+      const passwordValidation = validateAffiliatePasswordStrength(password);
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ error: passwordValidation.error });
+      }
+      const passwordHash = await hashAffiliatePassword(password);
 
-      const created = store.affiliates.createAffiliate({
+      const created = await store.affiliates.createAffiliate({
         name,
         email,
         phone,
@@ -3094,7 +3129,7 @@ ${currentDraft || prompt}
 
       res.json({
         success: true,
-        affiliate: created,
+        affiliate: sanitizeAffiliateForResponse(created),
         message: `Affiliate ${created.name} (${created.affiliateCode}) created successfully.`
       });
     } catch (err: any) {
@@ -3103,14 +3138,46 @@ ${currentDraft || prompt}
   });
 
   // Admin: Update Affiliate
-  app.put("/api/admin/affiliates/:id", requireAdminAuth, (req: Request, res: Response) => {
+  app.put("/api/admin/affiliates/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const patch = req.body;
-      const updated = store.affiliates.updateAffiliate(id, patch, 'Admin (Jake)');
+      const existing = store.affiliates.getAffiliateById(id);
+      if (!existing) {
+        return res.status(404).json({ error: "Affiliate not found." });
+      }
+
+      // Keep the general editor away from credentials, identity keys, balances,
+      // counters, and timestamps. Status/link changes use their durable paths.
+      const editableFields = [
+        'name',
+        'email',
+        'phone',
+        'customCommissionRate',
+        'payoutMethod',
+        'payoutDetails',
+        'allowedPieceIds',
+        'attributionDays',
+        'notes'
+      ] as const;
+      const profilePatch: Record<string, unknown> = {};
+      for (const field of editableFields) {
+        if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+          profilePatch[field] = req.body[field];
+        }
+      }
+
+      let updated = Object.keys(profilePatch).length > 0
+        ? store.affiliates.updateAffiliate(id, profilePatch, 'Admin (Jake)')
+        : existing;
+      if (Object.prototype.hasOwnProperty.call(req.body, 'status') && req.body.status !== updated.status) {
+        updated = await store.affiliates.setAffiliateStatus(id, req.body.status, 'Admin (Jake)');
+      }
+      if (Object.prototype.hasOwnProperty.call(req.body, 'linksDisabled') && Boolean(req.body.linksDisabled) !== Boolean(updated.linksDisabled)) {
+        updated = await store.affiliates.toggleAffiliateLinks(id, Boolean(req.body.linksDisabled), 'Admin (Jake)');
+      }
       res.json({
         success: true,
-        affiliate: updated,
+        affiliate: sanitizeAffiliateForResponse(updated),
         message: `Affiliate ${updated.name} updated successfully.`
       });
     } catch (err: any) {
@@ -3130,14 +3197,14 @@ ${currentDraft || prompt}
   });
 
   // Admin: Set Status (Activate / Suspend)
-  app.post("/api/admin/affiliates/:id/status", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/affiliates/:id/status", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { status, reason } = req.body;
-      const updated = store.affiliates.setAffiliateStatus(id, status, 'Admin (Jake)', reason);
+      const updated = await store.affiliates.setAffiliateStatus(id, status, 'Admin (Jake)', reason);
       res.json({
         success: true,
-        affiliate: updated,
+        affiliate: sanitizeAffiliateForResponse(updated),
         message: `Affiliate status updated to ${status}.`
       });
     } catch (err: any) {
@@ -3146,15 +3213,15 @@ ${currentDraft || prompt}
   });
 
   // Admin: Toggle Links Enabled/Disabled (Supports /links-toggle and /toggle-links)
-  const handleAdminToggleLinks = (req: Request, res: Response) => {
+  const handleAdminToggleLinks = async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { disabled, linksDisabled } = req.body;
       const shouldDisable = disabled !== undefined ? Boolean(disabled) : Boolean(linksDisabled);
-      const updated = store.affiliates.toggleAffiliateLinks(id, shouldDisable, 'Admin (Jake)');
+      const updated = await store.affiliates.toggleAffiliateLinks(id, shouldDisable, 'Admin (Jake)');
       res.json({
         success: true,
-        affiliate: updated,
+        affiliate: sanitizeAffiliateForResponse(updated),
         message: `Referral links ${shouldDisable ? 'disabled' : 'enabled'} for ${updated.name}.`
       });
     } catch (err: any) {
@@ -3166,17 +3233,23 @@ ${currentDraft || prompt}
   app.post("/api/admin/affiliates/:id/toggle-links", requireAdminAuth, handleAdminToggleLinks);
 
   // Admin: Reset Affiliate Password
-  app.post("/api/admin/affiliates/:id/reset-password", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/affiliates/:id/reset-password", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { newPassword } = req.body;
-      const pass = newPassword || `IW-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-      const passwordHash = hashAffiliatePassword(pass);
-      const updated = store.affiliates.updateAffiliate(id, { passwordHash }, 'Admin (Jake)');
+      const generatedPassword = !newPassword;
+      const pass = generatedPassword ? generateAffiliateTemporaryPassword() : newPassword;
+      const passwordValidation = validateAffiliatePasswordStrength(pass);
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ success: false, error: passwordValidation.error });
+      }
+      const passwordHash = await hashAffiliatePassword(pass);
+      const updated = await store.affiliates.updateAffiliateCredential(id, passwordHash, 'Admin (Jake)');
+      store.affiliates.invalidateAffiliateSessions(id);
       res.json({
         success: true,
-        temporaryPassword: pass,
-        message: `Password reset successfully for ${updated.name}. Temporary password: ${pass}`
+        temporaryPassword: generatedPassword ? pass : undefined,
+        message: `Password reset successfully for ${updated.name}. Existing affiliate sessions were signed out.${generatedPassword ? ' The generated password is shown once.' : ''}`
       });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message || "Failed to reset password." });

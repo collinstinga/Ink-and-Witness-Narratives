@@ -41,6 +41,7 @@ import {
   Article
 } from '../../types.js';
 import { api } from '../../utils/api.js';
+import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 
 interface AffiliatesAdminTabProps {
   articles: Article[];
@@ -138,10 +139,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
 
   const handleCreateAffiliate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newAffName || !newAffEmail) {
-      setError('Please fill in Name and Email.');
+    if (!newAffName.trim() || !newAffEmail.trim() || !newAffPassword) {
+      setError('Please fill in Name, Email, and Initial Password.');
       return;
     }
+    const passwordError = validateAffiliatePasswordForInput(newAffPassword);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+    setError('');
     setCreatingAff(true);
     try {
       const res = await api.createAdminAffiliate({
@@ -150,7 +157,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         phone: newAffPhone.trim() || undefined,
         affiliateCode: newAffCode.trim() || undefined,
         customCommissionRate: newAffRate || 15,
-        password: newAffPassword.trim() || 'affiliate123'
+        password: newAffPassword
       });
       if (res.success) {
         setSuccessMsg(`Affiliate "${res.affiliate.name}" created with code "${res.affiliate.affiliateCode}"!`);
@@ -238,13 +245,36 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   };
 
   const handleResetPassword = async (aff: AffiliateAccount) => {
-    const newPass = prompt(`Enter new password for ${aff.name} (or leave blank to auto-generate):`);
+    const newPass = window.prompt(`Enter a new password for ${aff.name}, or leave blank to securely auto-generate one:`);
+    if (newPass === null) {
+      return;
+    }
+
+    const shouldGenerate = newPass.trim().length === 0;
+    if (shouldGenerate && !window.confirm(`Generate a secure temporary password for ${aff.name}?`)) {
+      return;
+    }
+
+    if (!shouldGenerate) {
+      const passwordError = validateAffiliatePasswordForInput(newPass);
+      if (passwordError) {
+        window.alert(passwordError);
+        return;
+      }
+    }
+
     try {
-      const res = await api.resetAdminAffiliatePassword(aff.id, newPass || undefined);
-      alert(`Password updated for ${aff.name}.\nTemporary password: ${res.temporaryPassword || newPass}`);
+      const res = await api.resetAdminAffiliatePassword(aff.id, shouldGenerate ? undefined : newPass);
+      const generatedPassword = (res as typeof res & { generatedPassword?: string }).generatedPassword
+        ?? res.temporaryPassword;
+      if (generatedPassword) {
+        window.alert(`Password updated for ${aff.name}.\n\nOne-time generated password:\n${generatedPassword}\n\nCopy and share it securely now. It will not be shown again.`);
+      } else {
+        window.alert(`Password updated for ${aff.name}.`);
+      }
       loadSummary(true);
     } catch (err: any) {
-      alert(`Failed to reset password: ${err.message}`);
+      window.alert(`Failed to reset password: ${err.message}`);
     }
   };
 
@@ -1315,27 +1345,36 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
               </div>
 
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs font-mono text-slate-300">Commission Rate (%)</label>
-                  <span className="text-[11px] font-mono text-slate-400">Flatbed default: 15%</span>
-                </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={90}
-                    value={newAffRate}
-                    onChange={(e) => setNewAffRate(Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-cyan-500"
-                  />
-                  <input
-                    type="text"
-                    value={newAffPassword}
-                    onChange={(e) => setNewAffPassword(e.target.value)}
-                    placeholder="default: affiliate123"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-sans focus:outline-none focus:border-cyan-500"
-                  />
+                  <div>
+                    <label className="block text-xs font-mono text-slate-300 mb-1">Commission Rate (%)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={90}
+                      value={newAffRate}
+                      onChange={(e) => setNewAffRate(Number(e.target.value))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-mono text-slate-300 mb-1">Initial Password</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      maxLength={256}
+                      autoComplete="new-password"
+                      value={newAffPassword}
+                      onChange={(e) => setNewAffPassword(e.target.value)}
+                      placeholder="Create a secure password"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-sans focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
                 </div>
+                <p className="text-[10px] font-sans text-slate-500">
+                  Use 8+ characters with a letter and a number or special character.
+                </p>
                 {/* Rate Presets */}
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
                   {[10, 15, 18, 20, 25, 30].map(r => (

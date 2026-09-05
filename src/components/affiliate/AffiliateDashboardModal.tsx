@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { 
+import {
   X, 
   Share2, 
   Copy, 
@@ -48,6 +48,7 @@ import { api, clearAffiliateToken } from '../../utils/api.js';
 import { playCoinDropSound } from '../../utils/coinSound.js';
 import { AffiliateTermsViewer } from './AffiliateTermsViewer.js';
 import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/affiliateTerms.js';
+import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 
 interface AffiliateDashboardModalProps {
   isOpen: boolean;
@@ -405,8 +406,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       setPasswordError('Please fill in both current and new password.');
       return;
     }
-    if (newPassword.length < 6) {
-      setPasswordError('New password must be at least 6 characters.');
+    const validationError = validateAffiliatePasswordForInput(newPassword, 'New password');
+    if (validationError) {
+      setPasswordError(validationError);
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -1559,6 +1561,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         <input
                           type="password"
                           required
+                          autoComplete="current-password"
                           value={currentPassword}
                           onChange={(e) => setCurrentPassword(e.target.value)}
                           className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-slate-200 font-sans focus:outline-none focus:border-cyan-500"
@@ -1570,9 +1573,12 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         <input
                           type="password"
                           required
+                          minLength={8}
+                          maxLength={256}
+                          autoComplete="new-password"
                           value={newPassword}
                           onChange={(e) => setNewPassword(e.target.value)}
-                          placeholder="Min 6 characters"
+                          placeholder="8+ characters, letter and number/symbol"
                           className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-slate-200 font-sans focus:outline-none focus:border-cyan-500"
                         />
                       </div>
@@ -1582,6 +1588,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         <input
                           type="password"
                           required
+                          minLength={8}
+                          maxLength={256}
+                          autoComplete="new-password"
                           value={confirmNewPassword}
                           onChange={(e) => setConfirmNewPassword(e.target.value)}
                           className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-slate-200 font-sans focus:outline-none focus:border-cyan-500"

@@ -8,8 +8,9 @@ import {
   deleteFirestoreDoc, 
   getAllFirestoreDocs 
 } from './db.js';
-import { 
-  AffiliateAccount, 
+import {
+  AffiliateAccount,
+  AffiliatePublicProfile,
   AffiliateSaleCommission, 
   AffiliateClickEvent, 
   AffiliatePayoutRequest, 
@@ -23,6 +24,7 @@ import {
   PayoutStatus,
   PaymentTransaction
 } from '../types.js';
+import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const AFFILIATES_FILE = path.join(DATA_DIR, 'affiliates.json');
@@ -77,34 +79,20 @@ function writeJsonFileSync(filePath: string, data: any) {
   }
 }
 
-// Password hashing utility using PBKDF2 with dynamic salt and timing-safe verification
-export function hashAffiliatePassword(password: string): string {
-  if (!password || typeof password !== 'string') {
-    throw new Error('Password is required.');
-  }
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derivedKey = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha512').toString('hex');
-  return `pbkdf2:${salt}:${derivedKey}`;
+export function sanitizeAffiliateForResponse(affiliate: AffiliateAccount): AffiliatePublicProfile {
+  const { passwordHash: _passwordHash, ...safeAffiliate } = affiliate;
+  return safeAffiliate;
 }
 
-export function verifyAffiliatePassword(password: string, hash: string): boolean {
-  if (!hash || !password) return false;
-  try {
-    if (hash.startsWith('pbkdf2:')) {
-      const parts = hash.split(':');
-      if (parts.length !== 3) return false;
-      const [, salt, originalKey] = parts;
-      const checkKey = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha512').toString('hex');
-      return crypto.timingSafeEqual(Buffer.from(checkKey), Buffer.from(originalKey));
-    }
-    // Backward compatibility for legacy SHA-256 hashes
-    const legacySalt = "ink_witness_affiliate_salt_2026";
-    const legacyHash = crypto.createHash('sha256').update(password + legacySalt).digest('hex');
-    if (legacyHash.length !== hash.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(hash));
-  } catch (err) {
-    return false;
-  }
+function sanitizeAuditValue(value: any): any {
+  if (Array.isArray(value)) return value.map(sanitizeAuditValue);
+  if (!value || typeof value !== 'object') return value;
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !/(password|secret|token)/i.test(key))
+      .map(([key, nestedValue]) => [key, sanitizeAuditValue(nestedValue)])
+  );
 }
 
 export const affiliateStore = {
@@ -291,10 +279,10 @@ export const affiliateStore = {
   },
 
   // AFFILIATES CRUD
-  getAffiliates(filter?: { status?: string }): AffiliateAccount[] {
+  getAffiliates(filter?: { status?: string }): AffiliatePublicProfile[] {
     const defaultRate = cachedSettings.defaultCommissionRate || 15;
     let list = cachedAffiliates.map(a => ({
-      ...a,
+      ...sanitizeAffiliateForResponse(a),
       commissionRate: (a.customCommissionRate !== null && a.customCommissionRate !== undefined && a.customCommissionRate > 0)
         ? a.customCommissionRate
         : defaultRate
@@ -329,7 +317,23 @@ export const affiliateStore = {
     return cachedAffiliates.find(a => a.email.toLowerCase() === clean);
   },
 
-  createAffiliate(data: Partial<AffiliateAccount>, actor = 'System'): AffiliateAccount {
+  async getAffiliateByIdFresh(id: string): Promise<AffiliateAccount | undefined> {
+    if (!id) return undefined;
+    const fresh = await getFirestoreDoc<AffiliateAccount>('affiliates', id);
+    if (!fresh) return undefined;
+
+    const refreshed: AffiliateAccount = { ...fresh, id };
+    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
+    if (index >= 0) {
+      cachedAffiliates[index] = refreshed;
+    } else {
+      cachedAffiliates.unshift(refreshed);
+    }
+    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+    return this.getAffiliateById(id);
+  },
+
+  async createAffiliate(data: Partial<AffiliateAccount>, actor = 'System'): Promise<AffiliateAccount> {
     const email = (data.email || '').trim().toLowerCase();
     if (!email) {
       throw new Error("Email address is required.");
@@ -353,6 +357,10 @@ export const affiliateStore = {
 
     const id = `aff_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
+    const passwordHash = String(data.passwordHash || '').trim();
+    if (!isCurrentAffiliatePasswordHash(passwordHash)) {
+      throw new Error('A current Argon2id affiliate credential is required.');
+    }
 
     const newAffiliate: AffiliateAccount = {
       id,
@@ -360,7 +368,7 @@ export const affiliateStore = {
       name: (data.name || '').trim(),
       email,
       phone: (data.phone || '').trim(),
-      passwordHash: data.passwordHash || hashAffiliatePassword("affiliate123"),
+      passwordHash,
       status: data.status || 'active',
       customCommissionRate: data.customCommissionRate !== undefined ? data.customCommissionRate : null,
       payoutMethod: data.payoutMethod || 'mpesa',
@@ -387,28 +395,37 @@ export const affiliateStore = {
       updatedAt: now
     };
 
+    await setFirestoreDoc('affiliates', newAffiliate.id, newAffiliate);
     cachedAffiliates.unshift(newAffiliate);
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', newAffiliate.id, newAffiliate).catch(() => {});
     this.recordAudit(actor, 'affiliate_created', 'affiliate', `Created affiliate ${newAffiliate.name} (${newAffiliate.affiliateCode})`, id, null, newAffiliate);
 
     return newAffiliate;
   },
 
   acceptAffiliateTerms(id: string, termsVersion = '2026.1', actor = 'Affiliate'): AffiliateAccount {
-    const affiliate = this.getAffiliateById(id);
-    if (!affiliate) {
+    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
+    if (index < 0) {
       throw new Error("Affiliate not found.");
     }
-    const prev = { ...affiliate };
+    const prev = { ...cachedAffiliates[index] };
     const now = new Date().toISOString();
-    affiliate.acceptedTerms = true;
-    affiliate.termsVersion = termsVersion;
-    affiliate.termsAcceptedAt = now;
-    affiliate.updatedAt = now;
+    const affiliate: AffiliateAccount = {
+      ...prev,
+      acceptedTerms: true,
+      termsVersion,
+      termsAcceptedAt: now,
+      updatedAt: now
+    };
 
+    cachedAffiliates[index] = affiliate;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, affiliate).catch(() => {});
+    setFirestoreDoc('affiliates', affiliate.id, {
+      acceptedTerms: affiliate.acceptedTerms,
+      termsVersion: affiliate.termsVersion,
+      termsAcceptedAt: affiliate.termsAcceptedAt,
+      updatedAt: affiliate.updatedAt
+    }).catch(() => {});
     this.recordAudit(actor, 'terms_accepted', 'affiliate', `Affiliate ${affiliate.name} accepted Terms & Conditions (Version: ${termsVersion})`, id, prev, affiliate);
     return affiliate;
   },
@@ -420,47 +437,100 @@ export const affiliateStore = {
     }
 
     const prev = { ...cachedAffiliates[index] };
+    const { passwordHash: _ignoredPasswordHash, ...safePatch } = patch;
     const updated: AffiliateAccount = {
       ...prev,
-      ...patch,
+      ...safePatch,
       payoutDetails: {
         ...prev.payoutDetails,
-        ...(patch.payoutDetails || {})
+        ...(safePatch.payoutDetails || {})
       },
       updatedAt: new Date().toISOString()
     };
 
     cachedAffiliates[index] = updated;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', updated.id, updated).catch(() => {});
+    const persistencePatch: Partial<AffiliateAccount> = {
+      ...safePatch,
+      updatedAt: updated.updatedAt
+    };
+    if (safePatch.payoutDetails) {
+      persistencePatch.payoutDetails = updated.payoutDetails;
+    }
+    setFirestoreDoc('affiliates', updated.id, persistencePatch).catch(() => {});
     this.recordAudit(actor, 'affiliate_updated', 'affiliate', `Updated profile/settings for ${updated.name} (${updated.affiliateCode})`, id, prev, updated);
 
     return updated;
   },
 
-  setAffiliateStatus(id: string, status: AffiliateStatus, actor = 'Admin', reason?: string): AffiliateAccount {
-    const affiliate = this.getAffiliateById(id);
-    if (!affiliate) {
+  async updateAffiliateCredential(id: string, passwordHash: string, actor = 'System'): Promise<AffiliateAccount> {
+    if (!cachedAffiliates.some(affiliate => affiliate.id === id)) {
+      throw new Error('Affiliate not found.');
+    }
+    if (!isCurrentAffiliatePasswordHash(passwordHash)) {
+      throw new Error('A current Argon2id affiliate credential is required.');
+    }
+
+    const updatedAt = new Date().toISOString();
+
+    // Persist before mutating the cache so a quota/network failure cannot be
+    // reported as a successful password change on only one warm instance.
+    await setFirestoreDoc('affiliates', id, { passwordHash, updatedAt });
+
+    const latestIndex = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
+    if (latestIndex < 0) {
+      throw new Error('Affiliate no longer exists.');
+    }
+    const updated: AffiliateAccount = {
+      ...cachedAffiliates[latestIndex],
+      passwordHash,
+      updatedAt
+    };
+    cachedAffiliates[latestIndex] = updated;
+    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+    this.recordAudit(actor, 'affiliate_credential_updated', 'affiliate', `Updated credential for affiliate ${updated.name} (${updated.affiliateCode})`, id);
+    return updated;
+  },
+  async setAffiliateStatus(id: string, status: AffiliateStatus, actor = 'Admin', reason?: string): Promise<AffiliateAccount> {
+    if (!['active', 'suspended', 'pending'].includes(status)) {
+      throw new Error('Invalid affiliate status.');
+    }
+    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
+    if (index < 0) {
       throw new Error("Affiliate not found.");
     }
-    const prevStatus = affiliate.status;
-    affiliate.status = status;
-    affiliate.updatedAt = new Date().toISOString();
+    const prevStatus = cachedAffiliates[index].status;
+    const affiliate: AffiliateAccount = {
+      ...cachedAffiliates[index],
+      status,
+      updatedAt: new Date().toISOString()
+    };
+    await setFirestoreDoc('affiliates', affiliate.id, { status, updatedAt: affiliate.updatedAt });
+    cachedAffiliates[index] = affiliate;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, affiliate).catch(() => {});
+    if (status !== 'active') {
+      this.invalidateAffiliateSessions(id);
+    }
     this.recordAudit(actor, 'status_change', 'affiliate', `Changed status of ${affiliate.name} from ${prevStatus} to ${status}${reason ? ` (${reason})` : ''}`, id, { status: prevStatus }, { status });
     return affiliate;
   },
 
-  toggleAffiliateLinks(id: string, disabled: boolean, actor = 'Admin'): AffiliateAccount {
-    const affiliate = this.getAffiliateById(id);
-    if (!affiliate) {
+  async toggleAffiliateLinks(id: string, disabled: boolean, actor = 'Admin'): Promise<AffiliateAccount> {
+    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
+    if (index < 0) {
       throw new Error("Affiliate not found.");
     }
-    affiliate.linksDisabled = disabled;
-    affiliate.updatedAt = new Date().toISOString();
+    const affiliate: AffiliateAccount = {
+      ...cachedAffiliates[index],
+      linksDisabled: disabled,
+      updatedAt: new Date().toISOString()
+    };
+    await setFirestoreDoc('affiliates', affiliate.id, {
+      linksDisabled: disabled,
+      updatedAt: affiliate.updatedAt
+    });
+    cachedAffiliates[index] = affiliate;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, affiliate).catch(() => {});
     this.recordAudit(actor, 'links_toggle', 'link', `${disabled ? 'Disabled' : 'Enabled'} referral links for ${affiliate.name} (${affiliate.affiliateCode})`, id, { linksDisabled: !disabled }, { linksDisabled: disabled });
     return affiliate;
   },
@@ -531,7 +601,11 @@ export const affiliateStore = {
     }
     affiliate.lastActivityAt = now;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, affiliate).catch(() => {});
+    setFirestoreDoc('affiliates', affiliate.id, {
+      totalClicks: affiliate.totalClicks,
+      uniqueVisitors: affiliate.uniqueVisitors,
+      lastActivityAt: affiliate.lastActivityAt
+    }).catch(() => {});
 
     // Update campaign stats if campaign attached
     if (campaignCode) {
@@ -702,7 +776,14 @@ export const affiliateStore = {
     }
     affiliate.lastActivityAt = now;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, affiliate).catch(() => {});
+    setFirestoreDoc('affiliates', affiliate.id, {
+      totalSalesCount: affiliate.totalSalesCount,
+      totalRevenueKes: affiliate.totalRevenueKes,
+      totalCommissionEarnedKes: affiliate.totalCommissionEarnedKes,
+      balanceAvailableKes: affiliate.balanceAvailableKes,
+      balancePendingKes: affiliate.balancePendingKes,
+      lastActivityAt: affiliate.lastActivityAt
+    }).catch(() => {});
 
     // Update campaign stats if campaign attached
     if (campaignCode) {
@@ -873,7 +954,10 @@ export const affiliateStore = {
         affiliate.balanceAvailableKes = Math.max(0, (affiliate.balanceAvailableKes || 0) - payout.amountKes);
         affiliate.totalCommissionPaidKes = (affiliate.totalCommissionPaidKes || 0) + payout.amountKes;
         writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-        setFirestoreDoc('affiliates', affiliate.id, affiliate).catch(() => {});
+        setFirestoreDoc('affiliates', affiliate.id, {
+          balanceAvailableKes: affiliate.balanceAvailableKes,
+          totalCommissionPaidKes: affiliate.totalCommissionPaidKes
+        }).catch(() => {});
       }
 
       // Mark linked commissions as PAID
@@ -972,8 +1056,8 @@ export const affiliateStore = {
       targetType,
       targetId,
       summary,
-      previousValue: previousValue ? JSON.parse(JSON.stringify(previousValue)) : undefined,
-      newValue: newValue ? JSON.parse(JSON.stringify(newValue)) : undefined
+      previousValue: previousValue ? sanitizeAuditValue(JSON.parse(JSON.stringify(previousValue))) : undefined,
+      newValue: newValue ? sanitizeAuditValue(JSON.parse(JSON.stringify(newValue))) : undefined
     };
 
     cachedAuditLogs.unshift(entry);
@@ -981,11 +1065,12 @@ export const affiliateStore = {
       cachedAuditLogs = cachedAuditLogs.slice(0, 1000);
     }
     writeJsonFileSync(AUDIT_FILE, cachedAuditLogs);
+    setFirestoreDoc('affiliate_audit', entry.id, entry).catch(() => {});
     return entry;
   },
 
   getAuditLogs(limit = 100): AffiliateAuditLogEntry[] {
-    return cachedAuditLogs.slice(0, limit);
+    return cachedAuditLogs.slice(0, limit).map(entry => sanitizeAuditValue(entry));
   },
 
   // STRICTLY PRIVATE AFFILIATE DASHBOARD
@@ -1065,7 +1150,7 @@ export const affiliateStore = {
   getAdminAffiliatesSummary(): AdminAffiliatesSummary {
     const defaultRate = cachedSettings.defaultCommissionRate || 15;
     const affiliates = cachedAffiliates.map(a => ({
-      ...a,
+      ...sanitizeAffiliateForResponse(a),
       commissionRate: (a.customCommissionRate !== null && a.customCommissionRate !== undefined && a.customCommissionRate > 0)
         ? a.customCommissionRate
         : defaultRate
@@ -1125,7 +1210,7 @@ export const affiliateStore = {
       payouts: cachedPayouts,
       campaigns: cachedCampaigns,
       settings: cachedSettings,
-      auditLogs: cachedAuditLogs.slice(0, 50),
+      auditLogs: this.getAuditLogs(50),
       flaggedCount,
       topAffiliates
     };
@@ -1151,7 +1236,7 @@ export const affiliateStore = {
       return null;
     }
     const affiliate = this.getAffiliateById(session.affiliateId);
-    if (!affiliate || affiliate.status === 'suspended') {
+    if (!affiliate || affiliate.status !== 'active') {
       return null;
     }
     return affiliate;
@@ -1160,6 +1245,19 @@ export const affiliateStore = {
   invalidateAffiliateSession(token: string) {
     cachedSessions.delete(token);
     writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
+  },
+
+  invalidateAffiliateSessions(affiliateId: string): number {
+    let invalidated = 0;
+    for (const [token, session] of cachedSessions) {
+      if (session.affiliateId !== affiliateId) continue;
+      cachedSessions.delete(token);
+      invalidated++;
+    }
+    if (invalidated > 0) {
+      writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
+    }
+    return invalidated;
   }
 };
 

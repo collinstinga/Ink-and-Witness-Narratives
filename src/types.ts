@@ -939,7 +939,7 @@ export interface AdminAffiliatesSummary {
   approvedCommissionsKes: number;
   paidCommissionsKes: number;
   outstandingBalanceKes: number;
-  affiliates: AffiliateAccount[];
+  affiliates: AffiliatePublicProfile[];
   recentSales: AffiliateSaleCommission[];
   payouts: AffiliatePayoutRequest[];
   campaigns: AffiliateCampaign[];

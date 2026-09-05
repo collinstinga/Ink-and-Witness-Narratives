@@ -23,6 +23,7 @@ import { api, setAffiliateToken } from '../../utils/api.js';
 import { AffiliateAccount } from '../../types.js';
 import { AffiliateTermsViewer } from './AffiliateTermsViewer.js';
 import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/affiliateTerms.js';
+import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 
 interface AffiliateAuthModalProps {
   isOpen: boolean;
@@ -224,13 +225,14 @@ export const AffiliateAuthModal: React.FC<AffiliateAuthModalProps> = ({
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !email.trim() || !phone.trim() || !password.trim()) {
+    if (!name.trim() || !email.trim() || !phone.trim() || !password) {
       setErrorMessage('Please fill in all required fields (Name, Email, Phone, and Password).');
       return;
     }
 
-    if (password.length < 6) {
-      setErrorMessage('Password must be at least 6 characters.');
+    const passwordError = validateAffiliatePasswordForInput(password);
+    if (passwordError) {
+      setErrorMessage(passwordError);
       return;
     }
 
@@ -621,9 +623,12 @@ export const AffiliateAuthModal: React.FC<AffiliateAuthModalProps> = ({
                     id="affiliate-reg-password"
                     type="password"
                     required
+                    minLength={8}
+                    maxLength={256}
+                    autoComplete="new-password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min 6 characters"
+                    placeholder="8+ characters, letter and number/symbol"
                     className="w-full bg-slate-900/90 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-sans"
                   />
                 </div>
@@ -636,6 +641,9 @@ export const AffiliateAuthModal: React.FC<AffiliateAuthModalProps> = ({
                     id="affiliate-reg-confirm-password"
                     type="password"
                     required
+                    minLength={8}
+                    maxLength={256}
+                    autoComplete="new-password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Re-enter password"

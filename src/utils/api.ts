@@ -2046,7 +2046,7 @@ export const api = {
     );
   },
 
-  async updateAdminAffiliate(id: string, data: Partial<AffiliateAccount>): Promise<{ success: boolean; affiliate: AffiliateAccount }> {
+  async updateAdminAffiliate(id: string, data: Partial<AffiliateAccount>): Promise<{ success: boolean; affiliate: AffiliatePublicProfile }> {
     const activeToken = getWriterToken();
     return safeFetchJson(
       `/api/admin/affiliates/${encodeURIComponent(id)}`,
