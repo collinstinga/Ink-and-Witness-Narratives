@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import argon2 from 'argon2';
-import { User, UserRecord, AuthSession, UserRole } from '../types.js';
 
 /**
  * Hash password using Argon2id with unique per-password salt and secure parameters
@@ -49,13 +48,6 @@ export function validatePasswordStrength(password: string): { valid: boolean; er
     return { valid: false, error: 'Password must contain at least one number or special character.' };
   }
   return { valid: true };
-}
-
-/**
- * Generate a cryptographically secure random session ID (opaque token)
- */
-export function generateSessionId(): string {
-  return 'sess_' + crypto.randomBytes(32).toString('hex');
 }
 
 /**

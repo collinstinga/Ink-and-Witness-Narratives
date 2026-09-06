@@ -58,6 +58,7 @@ import { generatePaymentCapability, hashPaymentCapability } from './src/server/p
 describe('public payment route security', () => {
   let server: Server;
   let baseUrl: string;
+  const adminSessionToken = `sess_${'a'.repeat(64)}`;
   const paymentCapability = generatePaymentCapability();
   const transaction = {
     id: 'tx_1',
@@ -95,7 +96,7 @@ describe('public payment route security', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     storeMocks.getAuthSession.mockResolvedValue({
-      sessionId: 'test-admin-session',
+      sessionId: adminSessionToken,
       userId: 'admin_1',
       email: 'admin@example.test',
       name: 'Test Admin',
@@ -210,7 +211,7 @@ describe('public payment route security', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        cookie: 'iw_session=test-admin-session',
+        cookie: `iw_session=${adminSessionToken}`,
         origin: baseUrl,
         'sec-fetch-site': 'same-origin'
       },
@@ -226,7 +227,7 @@ describe('public payment route security', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        cookie: 'iw_session=test-admin-session',
+        cookie: `iw_session=${adminSessionToken}`,
         origin: baseUrl,
         'sec-fetch-site': 'same-origin'
       },
@@ -242,7 +243,7 @@ describe('public payment route security', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        cookie: 'iw_session=test-admin-session',
+        cookie: `iw_session=${adminSessionToken}`,
         origin: baseUrl,
         'sec-fetch-site': 'same-origin'
       },
@@ -251,5 +252,25 @@ describe('public payment route security', () => {
 
     expect(response.status).toBe(200);
     expect(storeMocks.saveMpesaSettings).toHaveBeenCalledWith({ tillName: 'Safe public setting' });
+  });
+
+  it('never exposes the bearer session token through admin verification', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/verify`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      valid: true,
+      user: {
+        id: 'admin_1',
+        email: 'admin@example.test',
+        name: 'Test Admin',
+        role: 'admin'
+      }
+    });
+    expect(body.user).not.toHaveProperty('sessionId');
+    expect(JSON.stringify(body)).not.toContain(adminSessionToken);
   });
 });

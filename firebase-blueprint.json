@@ -254,16 +254,18 @@
     },
     "AuthSession": {
       "title": "AuthSession",
-      "description": "Active authenticated user session record",
+      "description": "Active authenticated user session record stored under a one-way SHA-256 document identifier; the signed reusable cookie token is never stored",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
+        "storageVersion": { "type": "number", "enum": [2] },
         "userId": { "type": "string" },
         "role": { "type": "string", "enum": ["client", "admin"] },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
         "createdAt": { "type": "number" },
         "expiresAt": { "type": "number" }
       },
-      "required": ["id", "userId", "role"]
+      "required": ["storageVersion", "userId", "role", "email", "name", "createdAt", "expiresAt"]
     },
     "ManualAccessGrant": {
       "title": "ManualAccessGrant",
@@ -304,9 +306,9 @@
       "schema": "User",
       "description": "User accounts and role definitions"
     },
-    "/sessions/{sessionId}": {
+    "/sessions/{hashedSessionId}": {
       "schema": "AuthSession",
-      "description": "Active user sessions"
+      "description": "Active user sessions keyed by v2_<sha256(cookie token)>"
     },
     "/affiliates/{affiliateId}": {
       "schema": "AffiliateAccount",

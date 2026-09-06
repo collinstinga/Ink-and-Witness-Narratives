@@ -979,7 +979,7 @@ export interface UserRecord extends User {
 }
 
 export interface AuthSession {
-  sessionId: string;
+  storageVersion: 2;
   userId: string;
   role: UserRole;
   email: string;

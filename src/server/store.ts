@@ -5,8 +5,18 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
-import { hashPassword, generateSessionId, generateSecureToken } from './auth.js';
+import { hashPassword, generateSecureToken } from './auth.js';
 import { sanitizeImageDataUrl } from './imageSecurity.js';
+import {
+  AUTH_SESSION_STORAGE_VERSION,
+  createSignedAuthSessionToken,
+  getAuthSessionTokenKind,
+  getAuthSessionDocumentId,
+  isAuthSessionDocumentId,
+  isLegacyAuthSessionMigrationAllowed,
+  normalizeAuthSessionRecord,
+  normalizeLegacyAuthSessionRecord
+} from './sessionSecurity.js';
 import {
   MPESA_SECRET_FIELDS,
   MPESA_SECRET_STORAGE_VERSION,
@@ -77,6 +87,7 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTHOR_FILE = path.join(DATA_DIR, 'author.json');
 const HOMEPAGE_FILE = path.join(DATA_DIR, 'homepage.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const AUTH_SESSIONS_FILE = path.join(DATA_DIR, 'auth_sessions.v2.json');
 const EVENTS_FILE = path.join(DATA_DIR, 'interaction_events.json');
 const LIKES_FILE = path.join(DATA_DIR, 'likes.json');
 const COMMENTS_FILE = path.join(DATA_DIR, 'comments.json');
@@ -86,6 +97,9 @@ const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 // Memory Cache synced with disk
 let cachedUsers: Map<string, UserRecord> = new Map();
 let cachedAuthSessions: Map<string, AuthSession> = new Map();
+let cachedAuthSessionVerifiedAt: Map<string, number> = new Map();
+let authSessionLookupPromises: Map<string, Promise<AuthSession | null>> = new Map();
+let missingAuthSessions: Map<string, number> = new Map();
 let cachedArticles: Article[] = [];
 let cachedCategories: Category[] = [];
 let cachedTopics: Topic[] = [];
@@ -100,6 +114,10 @@ let cachedSessions: Map<string, { createdAt: number; expiresAt: number }> = new 
 let cachedEvents: InteractionEvent[] = [];
 let cachedLikes: PieceLike[] = [];
 let cachedComments: PieceComment[] = [];
+
+const AUTH_SESSION_CACHE_TTL_MS = 60 * 1000;
+const MISSING_AUTH_SESSION_CACHE_TTL_MS = 30 * 1000;
+const MAX_MISSING_AUTH_SESSION_CACHE_ENTRIES = 1000;
 
 let cachedHomepageConfig: HomepageConfig = {
   welcomeBackground: {
@@ -290,6 +308,18 @@ function cacheTransaction(tx: PaymentTransaction): PaymentTransaction {
   const key = transactionCacheKey(tx);
   if (key && isPersistentTransaction(tx)) cachedTransactions.set(key, tx);
   return tx;
+}
+
+function persistAuthSessionCache() {
+  // Keys are one-way document identifiers and values never contain cookie tokens.
+  writeJsonFileSync(AUTH_SESSIONS_FILE, Object.fromEntries(cachedAuthSessions));
+}
+
+function rememberMissingAuthSession(documentId: string, now = Date.now()) {
+  if (missingAuthSessions.size >= MAX_MISSING_AUTH_SESSION_CACHE_ENTRIES) {
+    missingAuthSessions.clear();
+  }
+  missingAuthSessions.set(documentId, now + MISSING_AUTH_SESSION_CACHE_TTL_MS);
 }
 
 function paymentReceiptLookupId(receiptNumber: string): string {
@@ -571,7 +601,6 @@ export const store = {
 
     const startupReads = {
       users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
-      sessions: captureStartupRead(getAllFirestoreDocs<AuthSession>('sessions')),
       articles: captureStartupRead(getAllFirestoreDocs<Article>('articles')),
       licenses: captureStartupRead(getAllFirestoreDocs<any>('reader_licenses')),
       manualAccess: captureStartupRead(getAllFirestoreDocs<ManualAccessGrant>('manual_access')),
@@ -641,33 +670,34 @@ export const store = {
       console.warn('[Auth Security] Skipping admin provisioning because the users collection could not be read.');
     }
 
-    // 0b. Load Auth Sessions from persistent Firestore / JSON file
+    // 0b. Primary auth sessions are loaded by a one-document hashed lookup when
+    // used. Never scan the collection on a serverless cold start. Local
+    // development may restore only v2 records whose file keys are also hashed.
     cachedAuthSessions.clear();
-    try {
-      const fsSessions = await useStartupRead(startupReads.sessions);
-      const now = Date.now();
-      if (fsSessions && fsSessions.length > 0) {
-        for (const sess of fsSessions) {
-          if (sess.expiresAt > now) {
-            cachedAuthSessions.set(sess.sessionId, sess);
-          } else {
-            deleteFirestoreDoc('sessions', sess.sessionId).catch(() => {});
-          }
-        }
-        writeJsonFileSync(SESSIONS_FILE, Array.from(cachedAuthSessions.values()));
-      } else if (fs.existsSync(SESSIONS_FILE)) {
-        const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
+    cachedAuthSessionVerifiedAt.clear();
+    authSessionLookupPromises.clear();
+    missingAuthSessions.clear();
+    if (!process.env.VERCEL && fs.existsSync(AUTH_SESSIONS_FILE)) {
+      try {
+        const raw = fs.readFileSync(AUTH_SESSIONS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          for (const sess of parsed) {
-            if (sess.expiresAt > now) {
-              cachedAuthSessions.set(sess.sessionId, sess);
+        let removedInvalidRecord = false;
+        const now = Date.now();
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          for (const [documentId, value] of Object.entries(parsed)) {
+            const session = normalizeAuthSessionRecord(value);
+            if (isAuthSessionDocumentId(documentId) && session && session.expiresAt > now) {
+              cachedAuthSessions.set(documentId, session);
+              cachedAuthSessionVerifiedAt.set(documentId, 0);
+            } else {
+              removedInvalidRecord = true;
             }
           }
         }
+        if (removedInvalidRecord) persistAuthSessionCache();
+      } catch (err) {
+        console.warn('[Data Store] Error loading local v2 auth sessions:', err);
       }
-    } catch (err) {
-      console.warn('[Data Store] Error loading auth sessions:', err);
     }
 
     // 1. Load Articles from persistent Firestore / JSON file
@@ -4593,10 +4623,13 @@ export const store = {
   },
 
   async createAuthSession(user: UserRecord, durationMs: number = 7 * 24 * 60 * 60 * 1000): Promise<string> {
-    const sessionId = generateSessionId();
+    const sessionId = createSignedAuthSessionToken();
+    const documentId = getAuthSessionDocumentId(sessionId);
+    if (!documentId) throw new Error('Failed to generate a valid authentication session.');
+
     const now = Date.now();
     const session: AuthSession = {
-      sessionId,
+      storageVersion: AUTH_SESSION_STORAGE_VERSION,
       userId: user.id,
       role: user.role,
       email: user.email,
@@ -4605,39 +4638,183 @@ export const store = {
       expiresAt: now + durationMs
     };
 
-    cachedAuthSessions.set(sessionId, session);
-    writeJsonFileSync(SESSIONS_FILE, Array.from(cachedAuthSessions.values()));
-    setFirestoreDoc('sessions', sessionId, session).catch(() => {});
+    // Persist before issuing the cookie so another serverless instance can
+    // resolve it immediately. The reusable token is never written as a field or
+    // document ID.
+    await setFirestoreDoc('sessions', documentId, session);
+    cachedAuthSessions.set(documentId, session);
+    cachedAuthSessionVerifiedAt.set(documentId, now);
+    missingAuthSessions.delete(documentId);
+    persistAuthSessionCache();
     return sessionId;
   },
 
   async getAuthSession(sessionId: string): Promise<AuthSession | null> {
-    if (!sessionId) return null;
-    const session = cachedAuthSessions.get(sessionId);
-    if (!session) return null;
-    if (session.expiresAt < Date.now()) {
-      await this.invalidateAuthSession(sessionId);
-      return null;
+    const tokenKind = getAuthSessionTokenKind(sessionId);
+    if (!tokenKind || (tokenKind === 'legacy' && !isLegacyAuthSessionMigrationAllowed())) return null;
+    const documentId = getAuthSessionDocumentId(sessionId);
+    if (!documentId) return null;
+    const now = Date.now();
+
+    const missingUntil = missingAuthSessions.get(documentId);
+    if (missingUntil && missingUntil > now) return null;
+    if (missingUntil) missingAuthSessions.delete(documentId);
+
+    const cached = cachedAuthSessions.get(documentId);
+    const verifiedAt = cachedAuthSessionVerifiedAt.get(documentId) || 0;
+    if (cached && cached.expiresAt > now && now - verifiedAt < AUTH_SESSION_CACHE_TTL_MS) return cached;
+    if (cached) {
+      if (cached.expiresAt <= now) {
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        rememberMissingAuthSession(documentId, now);
+        persistAuthSessionCache();
+        await deleteFirestoreDoc('sessions', documentId).catch(() => {});
+        return null;
+      }
     }
-    return session;
+
+    const pendingLookup = authSessionLookupPromises.get(documentId);
+    if (pendingLookup) return pendingLookup;
+
+    const lookup = (async (): Promise<AuthSession | null> => {
+      const storedValue = await getFirestoreDoc<Record<string, unknown>>('sessions', documentId);
+      const storedSession = normalizeAuthSessionRecord(storedValue);
+      if (storedSession) {
+        if (storedSession.expiresAt <= Date.now()) {
+          cachedAuthSessions.delete(documentId);
+          cachedAuthSessionVerifiedAt.delete(documentId);
+          rememberMissingAuthSession(documentId);
+          persistAuthSessionCache();
+          await deleteFirestoreDoc('sessions', documentId).catch(() => {});
+          return null;
+        }
+        cachedAuthSessions.set(documentId, storedSession);
+        cachedAuthSessionVerifiedAt.set(documentId, Date.now());
+        missingAuthSessions.delete(documentId);
+        persistAuthSessionCache();
+        return storedSession;
+      }
+
+      // A present but malformed v2 record is never trusted and does not open the
+      // legacy read path. Only a genuinely absent hashed document can migrate.
+      if (storedValue !== null || tokenKind !== 'legacy' || !isLegacyAuthSessionMigrationAllowed()) {
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        rememberMissingAuthSession(documentId);
+        persistAuthSessionCache();
+        return null;
+      }
+
+      // Compatibility path for sessions issued before v2. The strict token
+      // format check above prevents attacker-selected Firestore paths. This path
+      // closes permanently after every seven-day legacy session has expired.
+      const db = getDb();
+      const legacyRef = db.collection('sessions').doc(sessionId);
+      let legacySnapshot;
+      try {
+        legacySnapshot = await legacyRef.get();
+      } catch (error) {
+        console.warn('[Auth Security] Legacy session lookup failed without exposing its identifier.');
+        throw error;
+      }
+      if (!legacySnapshot.exists) {
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        rememberMissingAuthSession(documentId);
+        persistAuthSessionCache();
+        return null;
+      }
+
+      const legacySession = normalizeLegacyAuthSessionRecord(legacySnapshot.data(), sessionId);
+      if (!legacySession) {
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        rememberMissingAuthSession(documentId);
+        persistAuthSessionCache();
+        return null;
+      }
+      if (legacySession.expiresAt <= Date.now()) {
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        rememberMissingAuthSession(documentId);
+        persistAuthSessionCache();
+        await legacyRef.delete().catch(() => {});
+        return null;
+      }
+
+      try {
+        const batch = db.batch();
+        batch.set(db.collection('sessions').doc(documentId), sanitizeForFirestore(legacySession));
+        batch.delete(legacyRef);
+        await batch.commit();
+        console.log('[Auth Security] Migrated one active legacy session to hashed storage.');
+      } catch {
+        // Authentication remains available during a transient migration failure;
+        // a later cold instance can retry the idempotent conversion.
+        console.warn('[Auth Security] An active legacy session could not yet be migrated.');
+      }
+
+      cachedAuthSessions.set(documentId, legacySession);
+      cachedAuthSessionVerifiedAt.set(documentId, Date.now());
+      missingAuthSessions.delete(documentId);
+      persistAuthSessionCache();
+      return legacySession;
+    })();
+
+    authSessionLookupPromises.set(documentId, lookup);
+    try {
+      return await lookup;
+    } finally {
+      authSessionLookupPromises.delete(documentId);
+    }
   },
 
   async invalidateAuthSession(sessionId: string): Promise<void> {
-    if (!sessionId) return;
-    cachedAuthSessions.delete(sessionId);
-    writeJsonFileSync(SESSIONS_FILE, Array.from(cachedAuthSessions.values()));
-    deleteFirestoreDoc('sessions', sessionId).catch(() => {});
+    const tokenKind = getAuthSessionTokenKind(sessionId);
+    if (!tokenKind || (tokenKind === 'legacy' && !isLegacyAuthSessionMigrationAllowed())) return;
+    const documentId = getAuthSessionDocumentId(sessionId);
+    if (!documentId) return;
+
+    const pendingLookup = authSessionLookupPromises.get(documentId);
+    if (pendingLookup) await pendingLookup.catch(() => null);
+    cachedAuthSessions.delete(documentId);
+    cachedAuthSessionVerifiedAt.delete(documentId);
+    authSessionLookupPromises.delete(documentId);
+    rememberMissingAuthSession(documentId);
+    persistAuthSessionCache();
+
+    // Delete both formats during the compatibility window. This is read-free
+    // and ensures logout revokes a legacy session on every runtime instance.
+    const db = getDb();
+    const batch = db.batch();
+    batch.delete(db.collection('sessions').doc(documentId));
+    if (tokenKind === 'legacy') batch.delete(db.collection('sessions').doc(sessionId));
+    await batch.commit();
   },
 
   async invalidateAllUserSessions(userId: string): Promise<void> {
     if (!userId) return;
-    for (const [sessionId, session] of cachedAuthSessions.entries()) {
+    await Promise.allSettled(Array.from(authSessionLookupPromises.values()));
+    for (const [documentId, session] of cachedAuthSessions.entries()) {
       if (session.userId === userId) {
-        cachedAuthSessions.delete(sessionId);
-        deleteFirestoreDoc('sessions', sessionId).catch(() => {});
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        authSessionLookupPromises.delete(documentId);
+        rememberMissingAuthSession(documentId);
       }
     }
-    writeJsonFileSync(SESSIONS_FILE, Array.from(cachedAuthSessions.values()));
+    persistAuthSessionCache();
+
+    // Credential or account changes are rare. Query only this user's records
+    // instead of scanning every session in the project.
+    const snapshot = await getDb().collection('sessions').where('userId', '==', userId).get();
+    const documents = snapshot.docs;
+    for (let offset = 0; offset < documents.length; offset += 450) {
+      const batch = getDb().batch();
+      for (const document of documents.slice(offset, offset + 450)) batch.delete(document.ref);
+      await batch.commit();
+    }
   },
 
   getAllUsers(): User[] {

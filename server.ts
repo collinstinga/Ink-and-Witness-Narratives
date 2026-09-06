@@ -221,12 +221,10 @@ async function loadSessionUser(req: Request, res: Response, next: NextFunction) 
           id: session.userId,
           email: session.email,
           role: session.role,
-          name: session.name,
-          sessionId: session.sessionId
+          name: session.name
         };
         return next();
-      } else if (session) {
-        await store.invalidateAuthSession(sessionId);
+      } else {
         clearSessionCookie(res);
       }
     }
@@ -1434,9 +1432,12 @@ export async function createApp() {
 
   // User Sign Out
   app.post("/api/auth/logout", async (req: Request, res: Response) => {
-    const sessionId = (req as any).cookies?.[SESSION_COOKIE_NAME] || (req as any).user?.sessionId;
-    if (sessionId) {
-      await store.invalidateAuthSession(sessionId);
+    const sessionId = (req as any).cookies?.[SESSION_COOKIE_NAME];
+    try {
+      if (sessionId) await store.invalidateAuthSession(sessionId);
+    } catch {
+      clearSessionCookie(res);
+      return res.status(503).json({ success: false, error: "The session could not be revoked. Please try signing out again." });
     }
     clearSessionCookie(res);
     return res.json({ success: true, message: "Logged out successfully." });
@@ -1509,16 +1510,27 @@ export async function createApp() {
   app.get("/api/admin/verify", (req: Request, res: Response) => {
     const user = (req as any).user;
     if (user && user.role === 'admin') {
-      return res.json({ valid: true, user });
+      return res.json({
+        valid: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role
+        }
+      });
     }
     return res.status(401).json({ valid: false, error: "Administrator session invalid or expired." });
   });
 
   // Writer Auth: Logout
   app.post("/api/admin/logout", async (req: Request, res: Response) => {
-    const sessionId = (req as any).cookies?.[SESSION_COOKIE_NAME] || (req as any).user?.sessionId;
-    if (sessionId) {
-      await store.invalidateAuthSession(sessionId);
+    const sessionId = (req as any).cookies?.[SESSION_COOKIE_NAME];
+    try {
+      if (sessionId) await store.invalidateAuthSession(sessionId);
+    } catch {
+      clearSessionCookie(res);
+      return res.status(503).json({ success: false, error: "The session could not be revoked. Please try signing out again." });
     }
     clearSessionCookie(res);
     return res.json({ success: true, message: "Logged out successfully." });
