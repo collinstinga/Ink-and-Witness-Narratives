@@ -23,8 +23,7 @@ import {
   RotateCcw,
   Upload,
   FileJson,
-  CheckCircle2,
-  Lock
+  CheckCircle2
 } from 'lucide-react';
 import { Article, AuthorProfile, MpesaConfig } from '../../types.js';
 import { api } from '../../utils/api.js';
@@ -72,9 +71,6 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
   const [defaultPriceKes, setDefaultPriceKes] = useState(mpesaConfig.defaultPriceKes || 1050);
   const [paymentType, setPaymentType] = useState<'till' | 'paybill'>(mpesaConfig.paymentType || 'till');
   const [env, setEnv] = useState<'sandbox' | 'production'>(mpesaConfig.env || 'production');
-  const [mpesaConsumerKey, setMpesaConsumerKey] = useState('');
-  const [mpesaConsumerSecret, setMpesaConsumerSecret] = useState('');
-  const [mpesaPasskey, setMpesaPasskey] = useState('');
   const [mpesaHasKey, setMpesaHasKey] = useState(mpesaConfig.hasConsumerKey || false);
   const [mpesaHasSecret, setMpesaHasSecret] = useState(mpesaConfig.hasConsumerSecret || false);
   const [mpesaHasPasskey, setMpesaHasPasskey] = useState(mpesaConfig.hasPasskey || false);
@@ -124,9 +120,6 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
         setMpesaHasKey(c.hasConsumerKey || false);
         setMpesaHasSecret(c.hasConsumerSecret || false);
         setMpesaHasPasskey(c.hasPasskey || false);
-        setMpesaConsumerKey(c.consumerKey || '');
-        setMpesaConsumerSecret(c.consumerSecret || '');
-        setMpesaPasskey(c.passkey || '');
       }
     } catch (err: any) {
       console.warn("Failed to load M-Pesa admin settings:", err);
@@ -187,16 +180,6 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
         env
       };
 
-      if (mpesaConsumerKey.trim() && !mpesaConsumerKey.includes('••••')) {
-        payload.consumerKey = mpesaConsumerKey.trim();
-      }
-      if (mpesaConsumerSecret.trim() && !mpesaConsumerSecret.includes('••••')) {
-        payload.consumerSecret = mpesaConsumerSecret.trim();
-      }
-      if (mpesaPasskey.trim() && !mpesaPasskey.includes('••••')) {
-        payload.passkey = mpesaPasskey.trim();
-      }
-
       const updated = await api.updateMpesaConfig(payload);
       onMpesaUpdated(updated);
       setMpesaSuccess(true);
@@ -213,15 +196,7 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
     setTestingMpesa(true);
     setMpesaTestResult(null);
     try {
-      const payload: any = { env };
-      if (mpesaConsumerKey.trim() && !mpesaConsumerKey.includes('••••')) {
-        payload.consumerKey = mpesaConsumerKey.trim();
-      }
-      if (mpesaConsumerSecret.trim() && !mpesaConsumerSecret.includes('••••')) {
-        payload.consumerSecret = mpesaConsumerSecret.trim();
-      }
-
-      const res = await api.testMpesaConnection(payload);
+      const res = await api.testMpesaConnection({ env });
       setMpesaTestResult({
         status: 'success',
         message: res.message || 'Successfully generated OAuth token from Safaricom Daraja API!'
@@ -653,7 +628,7 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
             <div className="space-y-1">
               <p className="font-semibold text-white">Secure M-Pesa Rails &amp; Daraja STK Push</p>
               <p className="text-slate-300 leading-relaxed">
-                Credentials entered here are securely processed server-side. For automated Instant STK Push, provide your Safaricom Daraja Consumer Key, Secret, and Passkey. Manual SMS code verification continues to work seamlessly as a reliable fallback.
+                Daraja credentials are isolated in protected Vercel environment variables. Writer Studio can show whether each credential is active, but it cannot read, replace, or store the credential values.
               </p>
             </div>
           </div>
@@ -796,12 +771,12 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
               </div>
             </div>
 
-            {/* Daraja STK Push API Credentials Vault */}
+            {/* Daraja STK Push environment credential status */}
             <div className="p-4 rounded-xl bg-[#080d1a] border border-slate-800 space-y-3.5">
               <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                 <div className="flex items-center gap-2">
                   <Key className="w-4 h-4 text-emerald-400" />
-                  <h3 className="font-semibold text-white text-xs">LIVE Daraja API Credentials (STK Push)</h3>
+                  <h3 className="font-semibold text-white text-xs">LIVE Daraja Environment Credentials (STK Push)</h3>
                 </div>
                 <div className="flex items-center gap-2">
                   {mpesaHasKey && (
@@ -823,39 +798,19 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-mono text-slate-400 mb-1">Live Consumer Key</label>
-                  <input
-                    type="text"
-                    value={mpesaConsumerKey}
-                    onChange={(e) => setMpesaConsumerKey(e.target.value)}
-                    placeholder={mpesaHasKey ? "•••••••••••••••• (Leave unchanged to keep)" : "Enter Live Consumer Key"}
-                    className="w-full px-3 py-2 rounded-lg bg-[#0b1120] border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-mono text-slate-400 mb-1">Live Consumer Secret</label>
-                  <input
-                    type="password"
-                    value={mpesaConsumerSecret}
-                    onChange={(e) => setMpesaConsumerSecret(e.target.value)}
-                    placeholder={mpesaHasSecret ? "•••••••••••••••• (Leave unchanged to keep)" : "Enter Live Consumer Secret"}
-                    className="w-full px-3 py-2 rounded-lg bg-[#0b1120] border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-mono text-slate-400 mb-1">Live Online Passkey (Lipa Na M-Pesa Online)</label>
-                  <input
-                    type="password"
-                    value={mpesaPasskey}
-                    onChange={(e) => setMpesaPasskey(e.target.value)}
-                    placeholder={mpesaHasPasskey ? "•••••••••••••••• (Leave unchanged to keep)" : "Enter Live Daraja Passkey"}
-                    className="w-full px-3 py-2 rounded-lg bg-[#0b1120] border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
-                  />
+                <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {[
+                    { label: 'Consumer Key', active: mpesaHasKey },
+                    { label: 'Consumer Secret', active: mpesaHasSecret },
+                    { label: 'Online Passkey', active: mpesaHasPasskey }
+                  ].map(({ label, active }) => (
+                    <div key={label} className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800">
+                      <p className="text-[10px] font-mono text-slate-500">{label}</p>
+                      <p className={`mt-1 text-xs font-semibold ${active ? 'text-emerald-400' : 'text-amber-300'}`}>
+                        {active ? 'Active in Vercel' : 'Missing from Vercel'}
+                      </p>
+                    </div>
+                  ))}
                 </div>
 
                 <div>
@@ -869,6 +824,10 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                   />
                 </div>
               </div>
+
+              <p className="text-[10px] leading-relaxed text-slate-500">
+                To rotate a provider credential, update the protected Production environment variable in Vercel and redeploy. Credential values never pass through this page or Firestore.
+              </p>
 
               {/* Live Webhook Callback Endpoint */}
               <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] font-mono text-slate-400">

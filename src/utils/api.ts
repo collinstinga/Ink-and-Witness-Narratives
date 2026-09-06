@@ -1128,7 +1128,7 @@ export const api = {
     return json.config;
   },
 
-  async testMpesaConnection(data?: { consumerKey?: string; consumerSecret?: string; env?: 'sandbox' | 'production' }): Promise<{ success: boolean; message: string; env?: string }> {
+  async testMpesaConnection(data?: { env?: 'sandbox' | 'production' }): Promise<{ success: boolean; message: string; env?: string }> {
     const activeToken = getWriterToken();
     return safeFetchJson<{ success: boolean; message: string; env?: string }>(
       '/api/admin/mpesa/test-connection',

@@ -7,6 +7,14 @@ import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSessionId, generateSecureToken } from './auth.js';
 import { sanitizeImageDataUrl } from './imageSecurity.js';
+import {
+  MPESA_SECRET_FIELDS,
+  MPESA_SECRET_STORAGE_VERSION,
+  containsStoredMpesaSecrets,
+  getRuntimeMpesaSecrets,
+  hasCompleteRuntimeMpesaSecrets,
+  stripStoredMpesaSecrets
+} from './mpesaSecretStorage.js';
 import { 
   getDb, 
   setFirestoreDoc, 
@@ -117,7 +125,16 @@ let cachedHomepageConfig: HomepageConfig = {
   mostSellingMode: 'auto'
 };
 
-let cachedMpesaSettings = {
+type StoredMpesaSettings = Omit<
+  MpesaConfig,
+  'consumerKey' | 'consumerSecret' | 'passkey' | 'hasConsumerKey' | 'hasConsumerSecret' | 'hasPasskey'
+> & {
+  transactionType: string;
+  callbackUrl: string;
+  secretStorageVersion?: number;
+};
+
+let cachedMpesaSettings: StoredMpesaSettings = {
   paymentType: (process.env.MPESA_PAYMENT_TYPE as 'till' | 'paybill') || 'till',
   shortcode: process.env.MPESA_SHORTCODE || process.env.MPESA_STORE_NUMBER || '',
   tillNumber: process.env.MPESA_TILL_NUMBER || '',
@@ -128,16 +145,69 @@ let cachedMpesaSettings = {
   businessPhone: process.env.BUSINESS_PHONE || '',
   whatsappNumber: process.env.BUSINESS_PHONE || '',
   callPhoneNumber: process.env.BUSINESS_PHONE || '',
-  consumerKey: process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || '',
-  consumerSecret: process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || '',
-  passkey: process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || '',
   env: 'production' as 'sandbox' | 'production',
   transactionType: process.env.MPESA_TRANSACTION_TYPE || 'CustomerBuyGoodsOnline',
   callbackUrl: process.env.MPESA_CALLBACK_URL || '',
   defaultPriceKes: 1050,
   tippingEnabled: true,
-  minTipKes: 300
+  minTipKes: 300,
+  secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
 };
+
+type MpesaSettingsRead = {
+  settings: Record<string, unknown> | null;
+  source: 'canonical' | 'legacy' | 'none';
+};
+
+function requiresMpesaSecretStorageMigration(settings: Record<string, unknown>): boolean {
+  const version = Number(settings.secretStorageVersion || 0);
+  return containsStoredMpesaSecrets(settings) ||
+    !Number.isFinite(version) ||
+    version < MPESA_SECRET_STORAGE_VERSION;
+}
+
+async function migrateStoredMpesaSecrets(read: MpesaSettingsRead): Promise<boolean> {
+  if (!read.settings || read.source === 'none') return false;
+  if (!requiresMpesaSecretStorageMigration(read.settings)) return false;
+
+  if (!hasCompleteRuntimeMpesaSecrets()) {
+    if (containsStoredMpesaSecrets(read.settings)) {
+      console.warn('[M-PESA SECURITY] Legacy database credentials remain because the complete runtime secret set is unavailable.');
+    }
+    return false;
+  }
+
+  const db = getDb();
+  const batch = db.batch();
+  const deletionPatch: Record<string, unknown> = {
+    secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
+  };
+  for (const field of MPESA_SECRET_FIELDS) deletionPatch[field] = FieldValue.delete();
+
+  let changedDocuments = 0;
+  if (read.source === 'legacy') {
+    batch.set(
+      db.collection('site_configs').doc('mpesa_settings'),
+      { ...stripStoredMpesaSecrets(read.settings), secretStorageVersion: MPESA_SECRET_STORAGE_VERSION },
+      { merge: true }
+    );
+    batch.set(db.collection('site_configs').doc('settings'), deletionPatch, { merge: true });
+    changedDocuments = 2;
+  } else {
+    batch.set(db.collection('site_configs').doc('mpesa_settings'), deletionPatch, { merge: true });
+    changedDocuments = 1;
+
+    const legacy = await getFirestoreDoc<Record<string, unknown>>('site_configs', 'settings');
+    if (legacy && requiresMpesaSecretStorageMigration(legacy)) {
+      batch.set(db.collection('site_configs').doc('settings'), deletionPatch, { merge: true });
+      changedDocuments += 1;
+    }
+  }
+
+  await batch.commit();
+  console.log(`[M-PESA SECURITY] Migrated ${changedDocuments} configuration document(s) to environment-only credential storage.`);
+  return true;
+}
 
 // Ensure data directory exists
 function ensureDataDir() {
@@ -498,13 +568,18 @@ export const store = {
         (await getFirestoreDoc<AuthorProfile>('site_configs', 'author')) ||
         (await getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'))
       )()),
-      settings: captureStartupRead((async () =>
+      settings: captureStartupRead((async (): Promise<MpesaSettingsRead> => {
         // mpesa_settings is the canonical document written by Writer Settings.
         // Keep the legacy settings document as a read-only fallback so a stale
         // copy can no longer override a newer payment configuration.
-        (await getFirestoreDoc<MpesaConfig>('site_configs', 'mpesa_settings')) ||
-        (await getFirestoreDoc<MpesaConfig>('site_configs', 'settings'))
-      )()),
+        const canonical = await getFirestoreDoc<Record<string, unknown>>('site_configs', 'mpesa_settings');
+        if (canonical) return { settings: canonical, source: 'canonical' };
+
+        const legacy = await getFirestoreDoc<Record<string, unknown>>('site_configs', 'settings');
+        return legacy
+          ? { settings: legacy, source: 'legacy' }
+          : { settings: null, source: 'none' };
+      })()),
       homepage: captureStartupRead((async () =>
         (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage')) ||
         (await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage_config'))
@@ -751,21 +826,38 @@ export const store = {
 
     // 5. Load Settings from Firestore / JSON
     try {
-      const fsSettings = await useStartupRead(startupReads.settings);
-      if (fsSettings) {
-        cachedMpesaSettings = { ...cachedMpesaSettings, ...fsSettings };
+      const settingsRead = await useStartupRead(startupReads.settings);
+      if (settingsRead.settings) {
+        cachedMpesaSettings = {
+          ...cachedMpesaSettings,
+          ...stripStoredMpesaSecrets(settingsRead.settings),
+          secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
+        } as StoredMpesaSettings;
         writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
+        try {
+          await migrateStoredMpesaSecrets(settingsRead);
+        } catch {
+          // Runtime credentials remain environment-only even when the one-time
+          // database cleanup cannot complete. A later cold start can retry.
+          console.warn('[M-PESA SECURITY] Credential-storage migration could not complete and will be retried.');
+        }
       } else if (fs.existsSync(SETTINGS_FILE)) {
         const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-        cachedMpesaSettings = { ...cachedMpesaSettings, ...JSON.parse(raw) };
-        setFirestoreDoc('site_configs', 'settings', cachedMpesaSettings).catch(() => {});
+        const localSettings = JSON.parse(raw) as Record<string, unknown>;
+        cachedMpesaSettings = {
+          ...cachedMpesaSettings,
+          ...stripStoredMpesaSecrets(localSettings),
+          secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
+        } as StoredMpesaSettings;
+        writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
         setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings).catch(() => {});
       } else {
         writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
-        setFirestoreDoc('site_configs', 'settings', cachedMpesaSettings).catch(() => {});
         setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings).catch(() => {});
       }
-    } catch {}
+    } catch {
+      console.warn('[M-PESA SECURITY] Public payment settings could not be loaded; runtime credentials remain isolated.');
+    }
 
     // 6. Load Sessions
     if (fs.existsSync(SESSIONS_FILE)) {
@@ -2743,12 +2835,13 @@ export const store = {
       ? 'paybill'
       : 'till';
 
+    const runtimeSecrets = getRuntimeMpesaSecrets();
     return {
       ...cachedMpesaSettings,
       paymentType: effectivePaymentType,
-      consumerKey: (process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || cachedMpesaSettings.consumerKey || '').trim(),
-      consumerSecret: (process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || cachedMpesaSettings.consumerSecret || '').trim(),
-      passkey: (process.env.MPESA_PASSKEY || process.env.MPESA_PASSKEY_ || cachedMpesaSettings.passkey || '').trim(),
+      consumerKey: runtimeSecrets.consumerKey,
+      consumerSecret: runtimeSecrets.consumerSecret,
+      passkey: runtimeSecrets.passkey,
       shortcode: (process.env.MPESA_SHORTCODE || cachedMpesaSettings.shortcode || '').trim(),
       tillNumber: (process.env.MPESA_TILL_NUMBER || cachedMpesaSettings.tillNumber || '').trim(),
       storeNumber: (process.env.MPESA_STORE_NUMBER || cachedMpesaSettings.storeNumber || process.env.MPESA_SHORTCODE || cachedMpesaSettings.shortcode || '').trim(),
@@ -2761,8 +2854,8 @@ export const store = {
     };
   },
 
-  async saveMpesaSettings(settings: Partial<typeof cachedMpesaSettings>) {
-    const normalizedSettings = { ...settings };
+  async saveMpesaSettings(settings: Partial<MpesaConfig & { transactionType: string; callbackUrl: string }>) {
+    const normalizedSettings = stripStoredMpesaSecrets({ ...settings });
     if (settings.paymentType !== undefined) {
       if (settings.paymentType !== 'till' && settings.paymentType !== 'paybill') {
         throw new Error('M-Pesa payment type must be till or paybill.');
@@ -2779,8 +2872,9 @@ export const store = {
 
     cachedMpesaSettings = {
       ...cachedMpesaSettings,
-      ...normalizedSettings
-    };
+      ...normalizedSettings,
+      secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
+    } as StoredMpesaSettings;
     writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
     await setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings);
     return this.getMpesaSettings();
@@ -4047,7 +4141,6 @@ export const store = {
         setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig).catch(() => {});
       }
       if (cachedMpesaSettings) {
-        setFirestoreDoc('site_configs', 'settings', cachedMpesaSettings).catch(() => {});
         setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings).catch(() => {});
       }
       if (cachedCategories && Array.isArray(cachedCategories)) {
@@ -4128,9 +4221,12 @@ export const store = {
     }
 
     if (archive.settings) {
-      cachedMpesaSettings = { ...cachedMpesaSettings, ...archive.settings };
+      cachedMpesaSettings = {
+        ...cachedMpesaSettings,
+        ...stripStoredMpesaSecrets(archive.settings),
+        secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
+      } as StoredMpesaSettings;
       writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
-      setFirestoreDoc('site_configs', 'settings', cachedMpesaSettings).catch(() => {});
       setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings).catch(() => {});
     }
 

@@ -132,6 +132,31 @@
       },
       "required": ["token", "articleId", "phone"]
     },
+    "MpesaPublicConfig": {
+      "title": "MpesaPublicConfig",
+      "description": "Non-secret M-Pesa rail and display settings. Provider credentials are environment-only and must never be stored in Firestore.",
+      "type": "object",
+      "properties": {
+        "paymentType": { "type": "string", "enum": ["till", "paybill"] },
+        "transactionType": { "type": "string", "enum": ["CustomerBuyGoodsOnline", "CustomerPayBillOnline"] },
+        "shortcode": { "type": "string" },
+        "tillNumber": { "type": "string" },
+        "tillName": { "type": "string" },
+        "storeNumber": { "type": "string" },
+        "paybillNumber": { "type": "string" },
+        "accountReference": { "type": "string" },
+        "businessPhone": { "type": "string" },
+        "whatsappNumber": { "type": "string" },
+        "callPhoneNumber": { "type": "string" },
+        "env": { "type": "string", "enum": ["sandbox", "production"] },
+        "callbackUrl": { "type": "string" },
+        "defaultPriceKes": { "type": "number" },
+        "tippingEnabled": { "type": "boolean" },
+        "minTipKes": { "type": "number" },
+        "secretStorageVersion": { "type": "number", "description": "Migration marker confirming provider credentials are isolated from Firestore" }
+      },
+      "required": ["paymentType", "shortcode", "accountReference", "env", "defaultPriceKes", "secretStorageVersion"]
+    },
     "HomepageConfig": {
       "title": "HomepageConfig",
       "description": "Curated layout, welcome background, hero quote, and section text",
@@ -298,6 +323,10 @@
     "/manual_access/{grantId}": {
       "schema": "ManualAccessGrant",
       "description": "Admin manual access authorizations for monographs"
+    },
+    "/site_configs/mpesa_settings": {
+      "schema": "MpesaPublicConfig",
+      "description": "Non-secret M-Pesa rail settings; provider credentials live only in protected runtime environment variables"
     },
     "/site_configs/{configId}": {
       "schema": "HomepageConfig",

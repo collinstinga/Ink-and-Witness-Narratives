@@ -173,10 +173,10 @@ export function isDarajaMerchantConfigurationError(message: unknown): boolean {
  * 1. Safaricom Daraja OAuth Token Generator
  * Secure server-side basic authentication with token caching
  */
-export async function getDarajaAccessToken(customKey?: string, customSecret?: string): Promise<{ token: string | null; error?: string }> {
+export async function getDarajaAccessToken(): Promise<{ token: string | null; error?: string }> {
   const mpesaSettings = store.getMpesaSettings();
-  const consumerKey = (customKey || process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || mpesaSettings.consumerKey || '').trim();
-  const consumerSecret = (customSecret || process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || mpesaSettings.consumerSecret || '').trim();
+  const consumerKey = (process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || mpesaSettings.consumerKey || '').trim();
+  const consumerSecret = (process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || mpesaSettings.consumerSecret || '').trim();
 
   if (!consumerKey || !consumerSecret) {
     const err = 'MPESA_CONSUMER_KEY or MPESA_CONSUMER_SECRET not configured on server.';

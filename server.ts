@@ -22,6 +22,7 @@ import {
 import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/server/auth.js";
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import { ImageValidationError, validateImageDataUrl } from "./src/server/imageSecurity.js";
+import { hasUnsafeMpesaSecretUpdate } from "./src/server/mpesaSecretStorage.js";
 import {
   PAYMENT_CALLBACK_QUERY_PARAMETER,
   canRecoverMpesaPurchase,
@@ -2344,10 +2345,16 @@ export async function createApp() {
   app.post(["/api/admin/mpesa", "/api/admin/mpesa/config"], requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const body = req.body || {};
+      if (hasUnsafeMpesaSecretUpdate(body)) {
+        return res.status(400).json({
+          success: false,
+          error: "M-Pesa provider credentials are managed through protected Vercel environment variables and cannot be saved in Writer Studio."
+        });
+      }
       const allowedFields = [
         'paymentType', 'storeNumber', 'tillNumber', 'tillName', 'paybillNumber',
-        'shortcode', 'accountReference', 'defaultPriceKes', 'env', 'consumerKey',
-        'consumerSecret', 'passkey', 'businessPhone', 'whatsappNumber',
+        'shortcode', 'accountReference', 'defaultPriceKes', 'env',
+        'businessPhone', 'whatsappNumber',
         'callPhoneNumber', 'tippingEnabled', 'minTipKes'
       ];
       const toUpdate: any = Object.fromEntries(
@@ -2356,27 +2363,7 @@ export async function createApp() {
           .map(field => [field, body[field]])
       );
 
-      // Prevent overwriting real keys with masked values
-      if (body.consumerKey && body.consumerKey.includes('••••')) {
-        delete toUpdate.consumerKey;
-      }
-      if (body.consumerSecret && body.consumerSecret.includes('••••')) {
-        delete toUpdate.consumerSecret;
-      }
-      if (body.passkey && body.passkey.includes('••••')) {
-        delete toUpdate.passkey;
-      }
-
       // Trim any accidental whitespace
-      if (toUpdate.consumerKey && typeof toUpdate.consumerKey === 'string') {
-        toUpdate.consumerKey = toUpdate.consumerKey.trim();
-      }
-      if (toUpdate.consumerSecret && typeof toUpdate.consumerSecret === 'string') {
-        toUpdate.consumerSecret = toUpdate.consumerSecret.trim();
-      }
-      if (toUpdate.passkey && typeof toUpdate.passkey === 'string') {
-        toUpdate.passkey = toUpdate.passkey.trim();
-      }
       if (toUpdate.shortcode && typeof toUpdate.shortcode === 'string') {
         toUpdate.shortcode = toUpdate.shortcode.trim();
       }
@@ -2398,24 +2385,14 @@ export async function createApp() {
   // Writer: Test M-Pesa Daraja Connection
   app.post("/api/admin/mpesa/test-connection", requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const mpesaSettings = store.getMpesaSettings();
-      const { consumerKey, consumerSecret } = req.body || {};
-      
-      const keyToUse = (consumerKey && !consumerKey.includes('••••'))
-        ? consumerKey.trim()
-        : (process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || mpesaSettings.consumerKey);
-      const secretToUse = (consumerSecret && !consumerSecret.includes('••••'))
-        ? consumerSecret.trim()
-        : (process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || mpesaSettings.consumerSecret);
-
-      if (!keyToUse || !secretToUse) {
+      if (hasUnsafeMpesaSecretUpdate(req.body || {})) {
         return res.status(400).json({
           success: false,
-          error: "Consumer Key and Consumer Secret are required to test Daraja OAuth authentication."
+          error: "Test requests cannot supply M-Pesa provider credentials. Configure them as protected Vercel environment variables."
         });
       }
 
-      const { token, error } = await getDarajaAccessToken(keyToUse, secretToUse);
+      const { token, error } = await getDarajaAccessToken();
 
       if (!token) {
         return res.status(400).json({

@@ -94,6 +94,20 @@ describe('public payment route security', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    storeMocks.getAuthSession.mockResolvedValue({
+      sessionId: 'test-admin-session',
+      userId: 'admin_1',
+      email: 'admin@example.test',
+      name: 'Test Admin',
+      role: 'admin',
+      expiresAt: Date.now() + 60_000
+    });
+    storeMocks.saveMpesaSettings.mockImplementation(async (settings: Record<string, unknown>) => ({
+      ...settings,
+      consumerKey: '',
+      consumerSecret: '',
+      passkey: ''
+    }));
     storeMocks.loadTransaction.mockResolvedValue({ ...transaction });
     storeMocks.findTransactionByReceipt.mockResolvedValue(undefined);
     mpesaMocks.queryPaymentStatus.mockResolvedValue({
@@ -189,5 +203,53 @@ describe('public payment route security', () => {
     });
     expect(retryable.status).toBe(503);
     expect(await retryable.json()).toEqual({ ResultCode: 1, ResultDesc: 'Retry' });
+  });
+
+  it('rejects attempts to persist M-Pesa provider credentials through Writer Studio', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/mpesa/config`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_session=test-admin-session',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ consumerSecret: 'attempted-secret-write' })
+    });
+
+    expect(response.status).toBe(400);
+    expect(storeMocks.saveMpesaSettings).not.toHaveBeenCalled();
+  });
+
+  it('tests Daraja only with runtime credentials, never request-supplied credentials', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/mpesa/test-connection`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_session=test-admin-session',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ consumerKey: 'attempted-request-key' })
+    });
+
+    expect(response.status).toBe(400);
+    expect(mpesaMocks.getDarajaAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('still permits updates to non-secret payment settings', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/mpesa/config`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_session=test-admin-session',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ tillName: 'Safe public setting' })
+    });
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.saveMpesaSettings).toHaveBeenCalledWith({ tillName: 'Safe public setting' });
   });
 });

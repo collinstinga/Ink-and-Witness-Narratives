@@ -39,12 +39,16 @@ const dbMocks = vi.hoisted(() => {
   const recentQueryGet = vi.fn(async () => ({
     docs: [{ data: () => recentTransaction }]
   }));
+  const batchSet = vi.fn();
+  const batchCommit = vi.fn(async () => undefined);
 
   return {
     remoteTransaction,
     directTransaction,
     recentTransaction,
     recentQueryGet,
+    batchSet,
+    batchCommit,
     getAllFirestoreDocs: vi.fn(async (collectionName: string) =>
       collectionName === 'transactions' ? [remoteTransaction] : []
     ),
@@ -57,7 +61,10 @@ const dbMocks = vi.hoisted(() => {
           paymentType: 'till',
           transactionType: 'CustomerBuyGoodsOnline',
           storeNumber: '600111',
-          tillNumber: '600222'
+          tillNumber: '600222',
+          consumerKey: 'legacy-database-key',
+          consumerSecret: 'legacy-database-secret',
+          passkey: 'legacy-database-passkey'
         };
       }
       if (collectionName === 'site_configs' && docId === 'settings') {
@@ -69,14 +76,19 @@ const dbMocks = vi.hoisted(() => {
       }
       return null;
     }),
-    setFirestoreDoc: vi.fn(async () => undefined),
+    setFirestoreDoc: vi.fn(async (_collectionName: string, _docId: string, _data: unknown) => undefined),
     deleteFirestoreDoc: vi.fn(async () => undefined)
   };
 });
 
 vi.mock('./db.js', () => ({
   getDb: vi.fn(() => ({
+    batch: vi.fn(() => ({
+      set: dbMocks.batchSet,
+      commit: dbMocks.batchCommit
+    })),
     collection: vi.fn(() => ({
+      doc: vi.fn((id: string) => ({ id })),
       where: vi.fn(() => ({
         orderBy: vi.fn(() => ({
           limit: vi.fn(() => ({ get: dbMocks.recentQueryGet }))
@@ -110,10 +122,13 @@ describe('lazy transaction hydration', () => {
     process.env.ADMIN_PASSWORD = '';
     delete process.env.MPESA_PAYMENT_TYPE;
     delete process.env.MPESA_TRANSACTION_TYPE;
+    process.env.MPESA_CONSUMER_KEY = 'runtime-key';
+    process.env.MPESA_CONSUMER_SECRET = 'runtime-secret';
+    process.env.MPESA_PASSKEY = 'runtime-passkey';
 
     ({ store } = await import('./store.js'));
     await store.init();
-  });
+  }, 60_000);
 
   it('does not scan transactions during a Vercel cold start', () => {
     const startupTransactionReads = dbMocks.getAllFirestoreDocs.mock.calls
@@ -145,7 +160,7 @@ describe('lazy transaction hydration', () => {
       .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
   });
 
-  it('loads the canonical M-Pesa settings document before the legacy fallback', () => {
+  it('loads the canonical M-Pesa settings document before inspecting the legacy copy', () => {
     expect(store.getMpesaSettings()).toMatchObject({
       paymentType: 'till',
       transactionType: 'CustomerBuyGoodsOnline',
@@ -153,10 +168,34 @@ describe('lazy transaction hydration', () => {
       tillNumber: '600222'
     });
     expect(dbMocks.getFirestoreDoc).toHaveBeenCalledWith('site_configs', 'mpesa_settings');
-    expect(dbMocks.getFirestoreDoc).not.toHaveBeenCalledWith('site_configs', 'settings');
+    const settingsCalls = dbMocks.getFirestoreDoc.mock.calls
+      .filter(([collectionName]) => collectionName === 'site_configs')
+      .map(([, documentId]) => documentId);
+    expect(settingsCalls.indexOf('mpesa_settings')).toBeLessThan(settingsCalls.indexOf('settings'));
+  });
+
+  it('removes legacy database credentials only after runtime credentials are complete', () => {
+    expect(dbMocks.batchCommit).toHaveBeenCalledTimes(1);
+    expect(dbMocks.batchSet).toHaveBeenCalledTimes(2);
+
+    for (const [, patch] of dbMocks.batchSet.mock.calls) {
+      expect(patch).toMatchObject({ secretStorageVersion: 2 });
+      expect(patch).not.toMatchObject({
+        consumerKey: 'legacy-database-key',
+        consumerSecret: 'legacy-database-secret',
+        passkey: 'legacy-database-passkey'
+      });
+    }
+
+    expect(store.getMpesaSettings()).toMatchObject({
+      consumerKey: 'runtime-key',
+      consumerSecret: 'runtime-secret',
+      passkey: 'runtime-passkey'
+    });
   });
 
   it('keeps the saved payment selector and transaction type consistent', async () => {
+    dbMocks.setFirestoreDoc.mockClear();
     await store.saveMpesaSettings({ paymentType: 'paybill', paybillNumber: '600333' });
 
     expect(store.getMpesaSettings()).toMatchObject({
@@ -164,6 +203,27 @@ describe('lazy transaction hydration', () => {
       transactionType: 'CustomerPayBillOnline',
       paybillNumber: '600333'
     });
+  });
+
+  it('defensively strips provider credentials from every settings write', async () => {
+    dbMocks.setFirestoreDoc.mockClear();
+    await store.saveMpesaSettings({
+      consumerKey: 'attempted-database-key',
+      consumerSecret: 'attempted-database-secret',
+      passkey: 'attempted-database-passkey',
+      tillName: 'Safe public setting'
+    });
+
+    expect(dbMocks.setFirestoreDoc).toHaveBeenCalledTimes(1);
+    const [collectionName, documentId, saved] = dbMocks.setFirestoreDoc.mock.calls[0];
+    expect([collectionName, documentId]).toEqual(['site_configs', 'mpesa_settings']);
+    expect(saved).toMatchObject({
+      tillName: 'Safe public setting',
+      secretStorageVersion: 2
+    });
+    expect(saved).not.toHaveProperty('consumerKey');
+    expect(saved).not.toHaveProperty('consumerSecret');
+    expect(saved).not.toHaveProperty('passkey');
   });
 
   it('uses one Firestore scan and preserves writes made before hydration', async () => {
