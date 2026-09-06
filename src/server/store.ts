@@ -198,7 +198,14 @@ function requiresMpesaSecretStorageMigration(settings: Record<string, unknown>):
 
 async function migrateStoredMpesaSecrets(read: MpesaSettingsRead): Promise<boolean> {
   if (!read.settings || read.source === 'none') return false;
-  if (!requiresMpesaSecretStorageMigration(read.settings)) return false;
+  const sourceRequiresMigration = requiresMpesaSecretStorageMigration(read.settings);
+
+  // When the canonical document is already clean, an older legacy settings
+  // document may still contain credentials. Do not spend that extra read until
+  // the complete replacement set and the explicit one-time approval are both
+  // present, but do inspect it after approval instead of silently declaring the
+  // migration complete.
+  if (!sourceRequiresMigration && read.source !== 'canonical') return false;
 
   if (!hasCompleteRuntimeMpesaSecrets()) {
     if (containsStoredMpesaSecrets(read.settings)) {
@@ -231,8 +238,10 @@ async function migrateStoredMpesaSecrets(read: MpesaSettingsRead): Promise<boole
     batch.set(db.collection('site_configs').doc('settings'), deletionPatch, { merge: true });
     changedDocuments = 2;
   } else {
-    batch.set(db.collection('site_configs').doc('mpesa_settings'), deletionPatch, { merge: true });
-    changedDocuments = 1;
+    if (sourceRequiresMigration) {
+      batch.set(db.collection('site_configs').doc('mpesa_settings'), deletionPatch, { merge: true });
+      changedDocuments = 1;
+    }
 
     const legacy = await getFirestoreDoc<Record<string, unknown>>('site_configs', 'settings');
     if (legacy && requiresMpesaSecretStorageMigration(legacy)) {
@@ -241,6 +250,7 @@ async function migrateStoredMpesaSecrets(read: MpesaSettingsRead): Promise<boole
     }
   }
 
+  if (changedDocuments === 0) return false;
   await batch.commit();
   console.log(`[M-PESA SECURITY] Migrated ${changedDocuments} configuration document(s) to environment-only credential storage.`);
   return true;

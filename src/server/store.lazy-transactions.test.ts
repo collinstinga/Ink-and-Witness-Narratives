@@ -1,6 +1,23 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 const dbMocks = vi.hoisted(() => {
+  const settingsState = {
+    canonical: {
+      paymentType: 'till',
+      transactionType: 'CustomerBuyGoodsOnline',
+      storeNumber: '600111',
+      tillNumber: '600222',
+      consumerKey: 'legacy-database-key',
+      consumerSecret: 'legacy-database-secret',
+      passkey: 'legacy-database-passkey'
+    } as Record<string, unknown> | null,
+    legacy: {
+      paymentType: 'paybill',
+      transactionType: 'CustomerPayBillOnline',
+      paybillNumber: '600333'
+    } as Record<string, unknown> | null
+  };
+
   const remoteTransaction = {
     id: 'tx_remote',
     checkoutRequestId: 'checkout_remote',
@@ -47,6 +64,7 @@ const dbMocks = vi.hoisted(() => {
     directTransaction,
     recentTransaction,
     recentQueryGet,
+    settingsState,
     batchSet,
     batchCommit,
     getAllFirestoreDocs: vi.fn(async (collectionName: string) =>
@@ -57,22 +75,10 @@ const dbMocks = vi.hoisted(() => {
         return directTransaction;
       }
       if (collectionName === 'site_configs' && docId === 'mpesa_settings') {
-        return {
-          paymentType: 'till',
-          transactionType: 'CustomerBuyGoodsOnline',
-          storeNumber: '600111',
-          tillNumber: '600222',
-          consumerKey: 'legacy-database-key',
-          consumerSecret: 'legacy-database-secret',
-          passkey: 'legacy-database-passkey'
-        };
+        return settingsState.canonical;
       }
       if (collectionName === 'site_configs' && docId === 'settings') {
-        return {
-          paymentType: 'paybill',
-          transactionType: 'CustomerPayBillOnline',
-          paybillNumber: '600333'
-        };
+        return settingsState.legacy;
       }
       return null;
     }),
@@ -198,6 +204,41 @@ describe('lazy transaction hydration', () => {
         passkey: 'legacy-database-passkey'
       });
     }
+
+    delete process.env.MPESA_SECRET_MIGRATION_APPROVED;
+  });
+
+  it('checks and cleans legacy settings after approval even when canonical settings are already clean', async () => {
+    dbMocks.batchSet.mockClear();
+    dbMocks.batchCommit.mockClear();
+    dbMocks.getFirestoreDoc.mockClear();
+    dbMocks.settingsState.canonical = {
+      paymentType: 'till',
+      transactionType: 'CustomerBuyGoodsOnline',
+      storeNumber: '600111',
+      tillNumber: '600222',
+      secretStorageVersion: 2
+    };
+    dbMocks.settingsState.legacy = {
+      paymentType: 'paybill',
+      consumerKey: 'older-legacy-key',
+      consumerSecret: 'older-legacy-secret',
+      passkey: 'older-legacy-passkey'
+    };
+
+    process.env.MPESA_SECRET_MIGRATION_APPROVED = 'true';
+    await store.init();
+
+    expect(dbMocks.getFirestoreDoc).toHaveBeenCalledWith('site_configs', 'settings');
+    expect(dbMocks.batchCommit).toHaveBeenCalledTimes(1);
+    expect(dbMocks.batchSet).toHaveBeenCalledTimes(1);
+    expect(dbMocks.batchSet.mock.calls[0][0]).toMatchObject({ id: 'settings' });
+    expect(dbMocks.batchSet.mock.calls[0][1]).toMatchObject({ secretStorageVersion: 2 });
+    expect(dbMocks.batchSet.mock.calls[0][1]).not.toMatchObject({
+      consumerKey: 'older-legacy-key',
+      consumerSecret: 'older-legacy-secret',
+      passkey: 'older-legacy-passkey'
+    });
 
     delete process.env.MPESA_SECRET_MIGRATION_APPROVED;
   });
