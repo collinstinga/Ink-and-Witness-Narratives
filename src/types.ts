@@ -789,10 +789,20 @@ export interface AffiliateAccount {
   updatedAt: string;
   lastLoginAt?: string;
   lastActivityAt?: string;
+  /** Private revocation generation. Never include this in browser responses. */
+  sessionVersion?: string;
 }
 
-export type AffiliatePublicProfile = Omit<AffiliateAccount, 'passwordHash'>;
+export type AffiliatePublicProfile = Omit<AffiliateAccount, 'passwordHash' | 'sessionVersion'>;
 export type AffiliateDashboardData = AffiliateDashboardStats;
+
+export interface AffiliateSession {
+  storageVersion: 2;
+  affiliateId: string;
+  sessionVersion: string;
+  createdAt: number;
+  expiresAt: number;
+}
 
 export interface AffiliateSaleCommission {
   id: string;
@@ -908,7 +918,7 @@ export interface AffiliatePublicStats {
 }
 
 export interface AffiliateDashboardStats {
-  affiliate: Omit<AffiliateAccount, 'passwordHash'>;
+  affiliate: AffiliatePublicProfile;
   clicks: number;
   uniqueVisitors: number;
   totalPiecesSold: number;

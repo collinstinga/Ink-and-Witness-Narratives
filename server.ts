@@ -12,6 +12,7 @@ import { store } from "./src/server/store.js";
 import { Article, PaymentTransaction, User } from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import { sanitizeAffiliateForResponse } from "./src/server/affiliateStore.js";
+import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
   generateAffiliateTemporaryPassword,
   hashAffiliatePassword,
@@ -139,7 +140,7 @@ function clearSessionCookie(res: Response) {
   });
 }
 
-function setAffiliateSessionCookie(res: Response, sessionId: string, maxAgeMs: number = 7 * 24 * 60 * 60 * 1000) {
+function setAffiliateSessionCookie(res: Response, sessionId: string, maxAgeMs: number = AFFILIATE_SESSION_MAX_AGE_MS) {
   res.cookie(AFFILIATE_SESSION_COOKIE_NAME, sessionId, {
     httpOnly: true,
     secure: isProduction,
@@ -262,7 +263,7 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 // Authentication middleware for Affiliate Portal (Strictly isolated from Writer Portal)
-function requireAffiliateAuth(req: Request, res: Response, next: NextFunction) {
+async function requireAffiliateAuth(req: Request, res: Response, next: NextFunction) {
   res.setHeader('Content-Type', 'application/json');
   const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
 
@@ -274,17 +275,28 @@ function requireAffiliateAuth(req: Request, res: Response, next: NextFunction) {
     });
   }
 
-  const affiliate = store.affiliates.verifyAffiliateSession(token);
-  if (!affiliate) {
-    return res.status(401).json({
+  try {
+    const forceFresh = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
+    const affiliate = await store.affiliates.verifyAffiliateSession(token, { forceFresh });
+    if (!affiliate) {
+      clearAffiliateSessionCookie(res);
+      return res.status(401).json({
+        success: false,
+        error: "Affiliate session expired or invalid. Please log in again.",
+        code: "SESSION_EXPIRED"
+      });
+    }
+
+    // Route handlers receive only the browser-safe identity/profile shape.
+    (req as any).affiliate = sanitizeAffiliateForResponse(affiliate);
+    return next();
+  } catch {
+    return res.status(503).json({
       success: false,
-      error: "Affiliate session expired or invalid. Please log in again.",
-      code: "SESSION_EXPIRED"
+      error: "Affiliate authentication is temporarily unavailable. Please try again shortly.",
+      code: "AUTH_UNAVAILABLE"
     });
   }
-
-  (req as any).affiliate = affiliate;
-  return next();
 }
 
 // Lazy Gemini SDK initialization
@@ -2719,7 +2731,17 @@ ${currentDraft || prompt}
         termsAcceptedAt: now
       }, 'Self-Registered');
 
-      const token = store.affiliates.createAffiliateSession(newAffiliate.id);
+      let token: string;
+      try {
+        token = await store.affiliates.createAffiliateSession(newAffiliate);
+      } catch {
+        return res.status(503).json({
+          success: false,
+          accountCreated: true,
+          code: 'ACCOUNT_CREATED_SESSION_UNAVAILABLE',
+          error: "Your affiliate account was created, but sign-in is temporarily unavailable. Please use the login form with the password you just set."
+        });
+      }
       setAffiliateSessionCookie(res, token);
       const dashboard = store.affiliates.getAffiliateDashboard(newAffiliate.id);
 
@@ -2800,7 +2822,16 @@ ${currentDraft || prompt}
       // Update last login timestamp
       aff = store.affiliates.updateAffiliate(aff.id, { lastLoginAt: new Date().toISOString() }, 'System');
 
-      const token = store.affiliates.createAffiliateSession(aff.id);
+      let token: string;
+      try {
+        token = await store.affiliates.createAffiliateSession(aff);
+      } catch {
+        return res.status(503).json({
+          success: false,
+          code: 'SESSION_UNAVAILABLE',
+          error: "Your credentials were accepted, but a durable session could not be created. Please try signing in again."
+        });
+      }
       setAffiliateSessionCookie(res, token);
       const dashboard = store.affiliates.getAffiliateDashboard(aff.id);
 
@@ -2816,13 +2847,19 @@ ${currentDraft || prompt}
   });
 
   // Affiliate: Logout
-  app.post("/api/affiliate/logout", (req: Request, res: Response) => {
+  app.post("/api/affiliate/logout", async (req: Request, res: Response) => {
     const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
-    if (token) {
-      store.affiliates.invalidateAffiliateSession(token);
+    try {
+      if (token) await store.affiliates.invalidateAffiliateSession(token);
+    } catch {
+      clearAffiliateSessionCookie(res);
+      return res.status(503).json({
+        success: false,
+        error: "The affiliate session could not be revoked. Please try signing out again."
+      });
     }
     clearAffiliateSessionCookie(res);
-    res.json({ success: true, message: "Logged out successfully." });
+    return res.json({ success: true, message: "Logged out successfully." });
   });
 
   // Helper for generating safe payout settings
@@ -2886,8 +2923,7 @@ ${currentDraft || prompt}
     try {
       const affiliate = (req as any).affiliate;
       const settings = store.affiliates.getSettings();
-      const safeAff = { ...affiliate };
-      delete safeAff.passwordHash;
+      const safeAff = sanitizeAffiliateForResponse(affiliate);
 
       res.json({
         success: true,
@@ -2960,9 +2996,24 @@ ${currentDraft || prompt}
       }
 
       const passwordHash = await hashAffiliatePassword(newPassword);
-      await store.affiliates.updateAffiliateCredential(affiliate.id, passwordHash, `Affiliate (${affiliate.name})`);
-      store.affiliates.invalidateAffiliateSessions(affiliate.id);
-      const replacementToken = store.affiliates.createAffiliateSession(affiliate.id);
+      const updatedAffiliate = await store.affiliates.updateAffiliateCredential(
+        affiliate.id,
+        passwordHash,
+        `Affiliate (${affiliate.name})`
+      );
+      let replacementToken: string;
+      try {
+        replacementToken = await store.affiliates.createAffiliateSession(updatedAffiliate);
+      } catch {
+        clearAffiliateSessionCookie(res);
+        return res.status(503).json({
+          success: false,
+          passwordChanged: true,
+          reauthenticate: true,
+          code: 'PASSWORD_CHANGED_REAUTH_REQUIRED',
+          error: "Your password was changed, but a replacement session could not be created. Please sign in again with your new password."
+        });
+      }
       setAffiliateSessionCookie(res, replacementToken);
 
       res.json({
@@ -3214,10 +3265,10 @@ ${currentDraft || prompt}
   });
 
   // Admin: Delete Affiliate
-  app.delete("/api/admin/affiliates/:id", requireAdminAuth, (req: Request, res: Response) => {
+  app.delete("/api/admin/affiliates/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const success = store.affiliates.deleteAffiliate(id, 'Admin (Jake)');
+      const success = await store.affiliates.deleteAffiliate(id, 'Admin (Jake)');
       res.json({ success });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to delete affiliate." });
@@ -3273,7 +3324,6 @@ ${currentDraft || prompt}
       }
       const passwordHash = await hashAffiliatePassword(pass);
       const updated = await store.affiliates.updateAffiliateCredential(id, passwordHash, 'Admin (Jake)');
-      store.affiliates.invalidateAffiliateSessions(id);
       res.json({
         success: true,
         temporaryPassword: generatedPassword ? pass : undefined,

@@ -25,6 +25,7 @@ import {
   getStoredMpesaSecrets,
   hasCompleteMpesaSecretSet,
   hasCompleteRuntimeMpesaSecrets,
+  isMpesaSecretMigrationApproved,
   resolveMpesaSecretSource,
   stripStoredMpesaSecrets
 } from './mpesaSecretStorage.js';
@@ -202,6 +203,13 @@ async function migrateStoredMpesaSecrets(read: MpesaSettingsRead): Promise<boole
   if (!hasCompleteRuntimeMpesaSecrets()) {
     if (containsStoredMpesaSecrets(read.settings)) {
       console.warn('[M-PESA SECURITY] Legacy database credentials remain because the complete runtime secret set is unavailable.');
+    }
+    return false;
+  }
+
+  if (!isMpesaSecretMigrationApproved()) {
+    if (containsStoredMpesaSecrets(read.settings)) {
+      console.warn('[M-PESA SECURITY] Environment credentials are present; legacy deletion awaits explicit migration approval.');
     }
     return false;
   }

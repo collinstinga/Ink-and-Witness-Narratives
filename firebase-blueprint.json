@@ -53,13 +53,15 @@
     },
     "AffiliateAccount": {
       "title": "AffiliateAccount",
-      "description": "Affiliate partner account details, referral code, and balances",
+      "description": "Affiliate partner account details, referral code, balances, and private authentication state",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "email": { "type": "string" },
         "name": { "type": "string" },
         "phone": { "type": "string" },
+        "passwordHash": { "type": "string", "description": "Server-only Argon2id credential hash; never returned to browsers" },
+        "sessionVersion": { "type": "string", "description": "Server-only 256-bit revocation generation; never returned to browsers" },
         "referralCode": { "type": "string" },
         "status": { "type": "string", "enum": ["active", "suspended", "pending"] },
         "payoutMethod": { "type": "string", "enum": ["mpesa", "bank", "pesapal_paypal"] },
@@ -77,6 +79,19 @@
         "termsVersion": { "type": "string" }
       },
       "required": ["id", "email", "name", "referralCode", "status"]
+    },
+    "AffiliateSession": {
+      "title": "AffiliateSession",
+      "description": "Server-only affiliate session metadata stored under a one-way hash of a signed bearer token",
+      "type": "object",
+      "properties": {
+        "storageVersion": { "type": "number", "enum": [2] },
+        "affiliateId": { "type": "string" },
+        "sessionVersion": { "type": "string", "description": "Private revocation generation copied from the affiliate account" },
+        "createdAt": { "type": "number" },
+        "expiresAt": { "type": "number" }
+      },
+      "required": ["storageVersion", "affiliateId", "sessionVersion", "createdAt", "expiresAt"]
     },
     "PaymentTransaction": {
       "title": "PaymentTransaction",
@@ -313,6 +328,10 @@
     "/affiliates/{affiliateId}": {
       "schema": "AffiliateAccount",
       "description": "Affiliate accounts and profiles"
+    },
+    "/affiliate_sessions/{hashedSessionId}": {
+      "schema": "AffiliateSession",
+      "description": "Signed affiliate sessions keyed by v2_<sha256(cookie token)>; bearer values are never persisted"
     },
     "/transactions/{transactionId}": {
       "schema": "PaymentTransaction",

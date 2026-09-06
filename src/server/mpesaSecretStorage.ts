@@ -66,6 +66,10 @@ export function hasCompleteRuntimeMpesaSecrets(env: EnvironmentLike = process.en
   return hasCompleteMpesaSecretSet(getRuntimeMpesaSecrets(env));
 }
 
+export function isMpesaSecretMigrationApproved(env: EnvironmentLike = process.env): boolean {
+  return env.MPESA_SECRET_MIGRATION_APPROVED?.trim().toLowerCase() === 'true';
+}
+
 export function containsStoredMpesaSecrets(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;

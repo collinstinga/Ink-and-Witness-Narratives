@@ -6,6 +6,7 @@ import {
   hasCompleteMpesaSecretSet,
   hasCompleteRuntimeMpesaSecrets,
   hasUnsafeMpesaSecretUpdate,
+  isMpesaSecretMigrationApproved,
   resolveMpesaSecretSource,
   stripStoredMpesaSecrets
 } from './mpesaSecretStorage.js';
@@ -33,6 +34,12 @@ describe('M-Pesa environment-only secret storage', () => {
       MPESA_PASSKEY: 'passkey'
     })).toBe(true);
     expect(hasCompleteRuntimeMpesaSecrets({ MPESA_CONSUMER_KEY: 'key' })).toBe(false);
+  });
+
+  it('requires an explicit one-time approval before deleting legacy secrets', () => {
+    expect(isMpesaSecretMigrationApproved({})).toBe(false);
+    expect(isMpesaSecretMigrationApproved({ MPESA_SECRET_MIGRATION_APPROVED: 'false' })).toBe(false);
+    expect(isMpesaSecretMigrationApproved({ MPESA_SECRET_MIGRATION_APPROVED: ' true ' })).toBe(true);
   });
 
   it('extracts a complete temporary fallback without retaining unrelated settings', () => {

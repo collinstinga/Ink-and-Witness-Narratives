@@ -63,6 +63,15 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
   }
 }
 
+export async function updateFirestoreDoc(collectionName: string, docId: string, data: any): Promise<void> {
+  try {
+    await getDb().collection(collectionName).doc(docId).update(sanitizeForFirestore(data));
+  } catch (error) {
+    console.error(`[Firestore] Error updating ${collectionName}/${docId}:`, error);
+    throw error;
+  }
+}
+
 export async function getFirestoreDoc<T = any>(collectionName: string, docId: string): Promise<T | null> {
   try {
     const snapshot = await getDb().collection(collectionName).doc(docId).get();

@@ -125,6 +125,7 @@ describe('lazy transaction hydration', () => {
     process.env.MPESA_CONSUMER_KEY = 'runtime-key';
     process.env.MPESA_CONSUMER_SECRET = 'runtime-secret';
     process.env.MPESA_PASSKEY = 'runtime-passkey';
+    delete process.env.MPESA_SECRET_MIGRATION_APPROVED;
 
     ({ store } = await import('./store.js'));
     await store.init();
@@ -160,7 +161,7 @@ describe('lazy transaction hydration', () => {
       .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
   });
 
-  it('loads the canonical M-Pesa settings document before inspecting the legacy copy', () => {
+  it('loads the canonical M-Pesa settings without touching the legacy copy before approval', () => {
     expect(store.getMpesaSettings()).toMatchObject({
       paymentType: 'till',
       transactionType: 'CustomerBuyGoodsOnline',
@@ -171,10 +172,21 @@ describe('lazy transaction hydration', () => {
     const settingsCalls = dbMocks.getFirestoreDoc.mock.calls
       .filter(([collectionName]) => collectionName === 'site_configs')
       .map(([, documentId]) => documentId);
-    expect(settingsCalls.indexOf('mpesa_settings')).toBeLessThan(settingsCalls.indexOf('settings'));
+    expect(settingsCalls).toContain('mpesa_settings');
+    expect(settingsCalls).not.toContain('settings');
   });
 
-  it('removes legacy database credentials only after runtime credentials are complete', () => {
+  it('removes legacy database credentials only after runtime credentials are complete and explicitly approved', async () => {
+    expect(dbMocks.batchCommit).not.toHaveBeenCalled();
+    expect(store.getMpesaSettings()).toMatchObject({
+      consumerKey: 'runtime-key',
+      consumerSecret: 'runtime-secret',
+      passkey: 'runtime-passkey'
+    });
+
+    process.env.MPESA_SECRET_MIGRATION_APPROVED = 'true';
+    await store.init();
+
     expect(dbMocks.batchCommit).toHaveBeenCalledTimes(1);
     expect(dbMocks.batchSet).toHaveBeenCalledTimes(2);
 
@@ -187,11 +199,7 @@ describe('lazy transaction hydration', () => {
       });
     }
 
-    expect(store.getMpesaSettings()).toMatchObject({
-      consumerKey: 'runtime-key',
-      consumerSecret: 'runtime-secret',
-      passkey: 'runtime-passkey'
-    });
+    delete process.env.MPESA_SECRET_MIGRATION_APPROVED;
   });
 
   it('keeps the saved payment selector and transaction type consistent', async () => {

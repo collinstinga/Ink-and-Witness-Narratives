@@ -3,8 +3,9 @@ import path from 'path';
 import crypto from 'crypto';
 import { 
   getDb, 
-  setFirestoreDoc, 
-  getFirestoreDoc, 
+  setFirestoreDoc,
+  updateFirestoreDoc,
+  getFirestoreDoc,
   deleteFirestoreDoc, 
   getAllFirestoreDocs 
 } from './db.js';
@@ -22,9 +23,21 @@ import {
   AffiliateStatus,
   CommissionStatus,
   PayoutStatus,
-  PaymentTransaction
+  PaymentTransaction,
+  AffiliateSession
 } from '../types.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
+import {
+  AFFILIATE_SESSION_MAX_AGE_MS,
+  AFFILIATE_SESSION_STORAGE_VERSION,
+  createAffiliateSessionVersion,
+  createSignedAffiliateSessionToken,
+  getAffiliateSessionDocumentId,
+  isAffiliateSessionDocumentId,
+  isValidSignedAffiliateSessionToken,
+  normalizeAffiliateSessionRecord,
+  resolveAffiliateSessionVersion
+} from './affiliateSessionSecurity.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const AFFILIATES_FILE = path.join(DATA_DIR, 'affiliates.json');
@@ -34,7 +47,7 @@ const PAYOUTS_FILE = path.join(DATA_DIR, 'affiliate_payouts.json');
 const CAMPAIGNS_FILE = path.join(DATA_DIR, 'affiliate_campaigns.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'affiliate_settings.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'affiliate_audit.json');
-const SESSIONS_FILE = path.join(DATA_DIR, 'affiliate_sessions.json');
+const AFFILIATE_SESSIONS_FILE = path.join(DATA_DIR, 'affiliate_sessions.v2.json');
 
 // In-Memory state
 let cachedAffiliates: AffiliateAccount[] = [];
@@ -54,7 +67,15 @@ let cachedSettings: AffiliateSettings = {
   pieceCommissionOverrides: {}
 };
 let cachedAuditLogs: AffiliateAuditLogEntry[] = [];
-let cachedSessions: Map<string, { affiliateId: string; createdAt: number; expiresAt: number }> = new Map();
+let cachedSessions: Map<string, AffiliateSession> = new Map();
+let cachedSessionVerifiedAt: Map<string, number> = new Map();
+let sessionLookupPromises: Map<string, Promise<AffiliateAccount | null>> = new Map();
+let missingSessions: Map<string, number> = new Map();
+let affiliateSessionInvalidationEpochs: Map<string, number> = new Map();
+
+const AFFILIATE_SESSION_CACHE_TTL_MS = 60 * 1000;
+const MISSING_AFFILIATE_SESSION_CACHE_TTL_MS = 30 * 1000;
+const MAX_MISSING_AFFILIATE_SESSION_CACHE_ENTRIES = 1000;
 
 function writeJsonFileSync(filePath: string, data: any) {
   if (process.env.VERCEL) return;
@@ -80,7 +101,11 @@ function writeJsonFileSync(filePath: string, data: any) {
 }
 
 export function sanitizeAffiliateForResponse(affiliate: AffiliateAccount): AffiliatePublicProfile {
-  const { passwordHash: _passwordHash, ...safeAffiliate } = affiliate;
+  const {
+    passwordHash: _passwordHash,
+    sessionVersion: _sessionVersion,
+    ...safeAffiliate
+  } = affiliate;
   return safeAffiliate;
 }
 
@@ -90,9 +115,62 @@ function sanitizeAuditValue(value: any): any {
 
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !/(password|secret|token)/i.test(key))
+      .filter(([key]) => !/(password|secret|token|sessionVersion)/i.test(key))
       .map(([key, nestedValue]) => [key, sanitizeAuditValue(nestedValue)])
   );
+}
+
+function persistAffiliateSessionCache() {
+  // Keys are one-way identifiers. Cookie tokens are never stored on disk.
+  writeJsonFileSync(AFFILIATE_SESSIONS_FILE, Object.fromEntries(cachedSessions));
+}
+
+function rememberMissingAffiliateSession(documentId: string, now = Date.now()) {
+  if (missingSessions.size >= MAX_MISSING_AFFILIATE_SESSION_CACHE_ENTRIES) {
+    missingSessions.clear();
+  }
+  missingSessions.set(documentId, now + MISSING_AFFILIATE_SESSION_CACHE_TTL_MS);
+}
+
+function forgetCachedAffiliateSession(documentId: string, rememberMissing = false): void {
+  cachedSessions.delete(documentId);
+  cachedSessionVerifiedAt.delete(documentId);
+  if (rememberMissing) rememberMissingAffiliateSession(documentId);
+}
+
+function forgetCachedAffiliateSessionsForAffiliate(affiliateId: string): number {
+  affiliateSessionInvalidationEpochs.set(
+    affiliateId,
+    (affiliateSessionInvalidationEpochs.get(affiliateId) || 0) + 1
+  );
+  let invalidated = 0;
+  for (const [documentId, session] of cachedSessions) {
+    if (session.affiliateId !== affiliateId) continue;
+    forgetCachedAffiliateSession(documentId, true);
+    invalidated++;
+  }
+  if (invalidated > 0) persistAffiliateSessionCache();
+  return invalidated;
+}
+
+function cacheFreshAffiliateRecord(id: string, fresh: AffiliateAccount | null): AffiliateAccount | undefined {
+  const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
+  if (!fresh) {
+    if (index >= 0) {
+      cachedAffiliates.splice(index, 1);
+      writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+    }
+    return undefined;
+  }
+
+  const refreshed: AffiliateAccount = { ...fresh, id };
+  if (index >= 0) {
+    cachedAffiliates[index] = refreshed;
+  } else {
+    cachedAffiliates.unshift(refreshed);
+  }
+  writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+  return refreshed;
 }
 
 export const affiliateStore = {
@@ -100,6 +178,12 @@ export const affiliateStore = {
     if (!process.env.VERCEL && !fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
+
+    cachedSessions.clear();
+    cachedSessionVerifiedAt.clear();
+    sessionLookupPromises.clear();
+    missingSessions.clear();
+    affiliateSessionInvalidationEpochs.clear();
 
     // 1. Load Settings from Firestore / JSON
     try {
@@ -242,21 +326,29 @@ export const affiliateStore = {
       }
     }
 
-    // 8. Load Sessions
-    if (fs.existsSync(SESSIONS_FILE)) {
+    // 8. Load only v2 hashed session records for local development. Former
+    // raw-token affiliate sessions are deliberately not imported: production
+    // never persisted them, so one honest re-authentication is required.
+    if (!process.env.VERCEL && fs.existsSync(AFFILIATE_SESSIONS_FILE)) {
       try {
-        const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
+        const raw = fs.readFileSync(AFFILIATE_SESSIONS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
-        cachedSessions.clear();
+        let removedInvalidRecord = false;
         if (parsed && typeof parsed === 'object') {
-          for (const [token, data] of Object.entries(parsed)) {
-            const s = data as { affiliateId: string; createdAt: number; expiresAt: number };
-            if (s.expiresAt > Date.now()) {
-              cachedSessions.set(token, s);
+          for (const [documentId, value] of Object.entries(parsed)) {
+            const session = normalizeAffiliateSessionRecord(value);
+            if (isAffiliateSessionDocumentId(documentId) && session && session.expiresAt > Date.now()) {
+              cachedSessions.set(documentId, session);
+              cachedSessionVerifiedAt.set(documentId, 0);
+            } else {
+              removedInvalidRecord = true;
             }
           }
         }
-      } catch {}
+        if (removedInvalidRecord) persistAffiliateSessionCache();
+      } catch (error) {
+        console.warn('[Affiliate Auth] Error loading local v2 affiliate sessions:', error);
+      }
     }
   },
 
@@ -320,16 +412,7 @@ export const affiliateStore = {
   async getAffiliateByIdFresh(id: string): Promise<AffiliateAccount | undefined> {
     if (!id) return undefined;
     const fresh = await getFirestoreDoc<AffiliateAccount>('affiliates', id);
-    if (!fresh) return undefined;
-
-    const refreshed: AffiliateAccount = { ...fresh, id };
-    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
-    if (index >= 0) {
-      cachedAffiliates[index] = refreshed;
-    } else {
-      cachedAffiliates.unshift(refreshed);
-    }
-    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+    cacheFreshAffiliateRecord(id, fresh);
     return this.getAffiliateById(id);
   },
 
@@ -392,7 +475,8 @@ export const affiliateStore = {
       termsVersion: data.termsVersion || '2026.1',
       termsAcceptedAt: data.termsAcceptedAt || now,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      sessionVersion: createAffiliateSessionVersion()
     };
 
     await setFirestoreDoc('affiliates', newAffiliate.id, newAffiliate);
@@ -437,7 +521,11 @@ export const affiliateStore = {
     }
 
     const prev = { ...cachedAffiliates[index] };
-    const { passwordHash: _ignoredPasswordHash, ...safePatch } = patch;
+    const {
+      passwordHash: _ignoredPasswordHash,
+      sessionVersion: _ignoredSessionVersion,
+      ...safePatch
+    } = patch;
     const updated: AffiliateAccount = {
       ...prev,
       ...safePatch,
@@ -472,10 +560,11 @@ export const affiliateStore = {
     }
 
     const updatedAt = new Date().toISOString();
+    const sessionVersion = createAffiliateSessionVersion();
 
     // Persist before mutating the cache so a quota/network failure cannot be
     // reported as a successful password change on only one warm instance.
-    await setFirestoreDoc('affiliates', id, { passwordHash, updatedAt });
+    await updateFirestoreDoc('affiliates', id, { passwordHash, sessionVersion, updatedAt });
 
     const latestIndex = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
     if (latestIndex < 0) {
@@ -484,9 +573,11 @@ export const affiliateStore = {
     const updated: AffiliateAccount = {
       ...cachedAffiliates[latestIndex],
       passwordHash,
+      sessionVersion,
       updatedAt
     };
     cachedAffiliates[latestIndex] = updated;
+    forgetCachedAffiliateSessionsForAffiliate(id);
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
     this.recordAudit(actor, 'affiliate_credential_updated', 'affiliate', `Updated credential for affiliate ${updated.name} (${updated.affiliateCode})`, id);
     return updated;
@@ -503,14 +594,17 @@ export const affiliateStore = {
     const affiliate: AffiliateAccount = {
       ...cachedAffiliates[index],
       status,
+      sessionVersion: createAffiliateSessionVersion(),
       updatedAt: new Date().toISOString()
     };
-    await setFirestoreDoc('affiliates', affiliate.id, { status, updatedAt: affiliate.updatedAt });
+    await updateFirestoreDoc('affiliates', affiliate.id, {
+      status,
+      sessionVersion: affiliate.sessionVersion,
+      updatedAt: affiliate.updatedAt
+    });
     cachedAffiliates[index] = affiliate;
+    forgetCachedAffiliateSessionsForAffiliate(id);
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    if (status !== 'active') {
-      this.invalidateAffiliateSessions(id);
-    }
     this.recordAudit(actor, 'status_change', 'affiliate', `Changed status of ${affiliate.name} from ${prevStatus} to ${status}${reason ? ` (${reason})` : ''}`, id, { status: prevStatus }, { status });
     return affiliate;
   },
@@ -535,13 +629,14 @@ export const affiliateStore = {
     return affiliate;
   },
 
-  deleteAffiliate(id: string, actor = 'Admin'): boolean {
+  async deleteAffiliate(id: string, actor = 'Admin'): Promise<boolean> {
     const idx = cachedAffiliates.findIndex(a => a.id === id);
     if (idx < 0) return false;
     const deleted = cachedAffiliates[idx];
+    await deleteFirestoreDoc('affiliates', id);
     cachedAffiliates.splice(idx, 1);
+    forgetCachedAffiliateSessionsForAffiliate(id);
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    deleteFirestoreDoc('affiliates', id).catch(() => {});
     this.recordAudit(actor, 'affiliate_deleted', 'affiliate', `Deleted affiliate ${deleted.name} (${deleted.affiliateCode})`, id);
     return true;
   },
@@ -1115,9 +1210,8 @@ export const affiliateStore = {
       ? affiliate.customCommissionRate
       : (cachedSettings.defaultCommissionRate || 15);
 
-    const { passwordHash, ...safeAffiliateBase } = affiliate;
     const safeAffiliate = {
-      ...safeAffiliateBase,
+      ...sanitizeAffiliateForResponse(affiliate),
       commissionRate: activeRate
     };
 
@@ -1217,47 +1311,160 @@ export const affiliateStore = {
   },
 
   // SESSIONS
-  createAffiliateSession(affiliateId: string): string {
-    const random = crypto.randomBytes(24).toString('hex');
-    const token = `aff_sess_${Date.now()}_${random}`;
-    const expiresAt = Date.now() + 14 * 24 * 60 * 60 * 1000; // 14 days
-    cachedSessions.set(token, { affiliateId, createdAt: Date.now(), expiresAt });
-    writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
+  async createAffiliateSession(
+    authenticatedAffiliate: AffiliateAccount,
+    durationMs: number = AFFILIATE_SESSION_MAX_AGE_MS
+  ): Promise<string> {
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > AFFILIATE_SESSION_MAX_AGE_MS) {
+      throw new Error('Affiliate session duration is invalid.');
+    }
+    const expectedSessionVersion = resolveAffiliateSessionVersion(authenticatedAffiliate);
+    if (authenticatedAffiliate.status !== 'active' || !expectedSessionVersion) {
+      throw new Error('An active affiliate account is required to create a session.');
+    }
+
+    const token = createSignedAffiliateSessionToken();
+    const documentId = getAffiliateSessionDocumentId(token);
+    if (!documentId) throw new Error('Failed to generate a valid affiliate session.');
+
+    const now = Date.now();
+    const session: AffiliateSession = {
+      storageVersion: AFFILIATE_SESSION_STORAGE_VERSION,
+      affiliateId: authenticatedAffiliate.id,
+      sessionVersion: expectedSessionVersion,
+      createdAt: now,
+      expiresAt: now + durationMs
+    };
+
+    // Recheck the exact account generation inside the same transaction that
+    // writes the session. A concurrent password reset/status change therefore
+    // cannot issue a cookie for credentials that were never authenticated.
+    const db = getDb();
+    await db.runTransaction(async transaction => {
+      const affiliateRef = db.collection('affiliates').doc(authenticatedAffiliate.id);
+      const currentSnapshot = await transaction.get(affiliateRef);
+      if (!currentSnapshot.exists) throw new Error('Affiliate account no longer exists.');
+      const currentAffiliate = {
+        ...(currentSnapshot.data() as AffiliateAccount),
+        id: authenticatedAffiliate.id
+      };
+      const currentSessionVersion = resolveAffiliateSessionVersion(currentAffiliate);
+      if (currentAffiliate.status !== 'active' || currentSessionVersion !== expectedSessionVersion) {
+        throw new Error('Affiliate credentials changed before the session could be issued. Please sign in again.');
+      }
+      transaction.set(db.collection('affiliate_sessions').doc(documentId), session);
+    });
+
+    // Persist before issuing the cookie. No raw token is stored in the document
+    // identifier, body, process cache key, or local development file.
+    cachedSessions.set(documentId, session);
+    cachedSessionVerifiedAt.set(documentId, now);
+    missingSessions.delete(documentId);
+    persistAffiliateSessionCache();
     return token;
   },
 
-  verifyAffiliateSession(token?: string | null): AffiliateAccount | null {
-    if (!token) return null;
-    const session = cachedSessions.get(token);
-    if (!session) return null;
-    if (session.expiresAt < Date.now()) {
-      cachedSessions.delete(token);
-      writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
+  async verifyAffiliateSession(
+    token?: string | null,
+    options: { forceFresh?: boolean } = {}
+  ): Promise<AffiliateAccount | null> {
+    // Validate the HMAC before deriving a Firestore path or spending a read.
+    if (!isValidSignedAffiliateSessionToken(token)) return null;
+    const documentId = getAffiliateSessionDocumentId(token);
+    if (!documentId) return null;
+    const now = Date.now();
+
+    const missingUntil = missingSessions.get(documentId);
+    if (missingUntil && missingUntil > now) return null;
+    if (missingUntil) missingSessions.delete(documentId);
+
+    const cached = cachedSessions.get(documentId);
+    const verifiedAt = cachedSessionVerifiedAt.get(documentId) || 0;
+    if (cached && !options.forceFresh && cached.expiresAt > now && now - verifiedAt < AFFILIATE_SESSION_CACHE_TTL_MS) {
+      const affiliate = this.getAffiliateById(cached.affiliateId);
+      const currentVersion = affiliate ? resolveAffiliateSessionVersion(affiliate) : null;
+      if (affiliate?.status === 'active' && currentVersion === cached.sessionVersion) return affiliate;
+      forgetCachedAffiliateSession(documentId, true);
+      persistAffiliateSessionCache();
       return null;
     }
-    const affiliate = this.getAffiliateById(session.affiliateId);
-    if (!affiliate || affiliate.status !== 'active') {
-      return null;
+
+    const pendingLookup = sessionLookupPromises.get(documentId);
+    if (pendingLookup) return pendingLookup;
+
+    const lookup = (async (): Promise<AffiliateAccount | null> => {
+      const storedValue = await getFirestoreDoc<Record<string, unknown>>('affiliate_sessions', documentId);
+      const storedSession = normalizeAffiliateSessionRecord(storedValue);
+      if (!storedSession || storedSession.expiresAt <= Date.now()) {
+        forgetCachedAffiliateSession(documentId, true);
+        persistAffiliateSessionCache();
+        if (storedSession) {
+          await deleteFirestoreDoc('affiliate_sessions', documentId).catch(() => {});
+        }
+        return null;
+      }
+
+      // A direct account read makes suspension, deletion, password rotation,
+      // and explicit all-session revocation visible across warm instances.
+      const invalidationEpoch = affiliateSessionInvalidationEpochs.get(storedSession.affiliateId) || 0;
+      const freshAffiliate = await getFirestoreDoc<AffiliateAccount>('affiliates', storedSession.affiliateId);
+      const affiliate = freshAffiliate ? { ...freshAffiliate, id: storedSession.affiliateId } : undefined;
+      const currentVersion = affiliate ? resolveAffiliateSessionVersion(affiliate) : null;
+      if (
+        (affiliateSessionInvalidationEpochs.get(storedSession.affiliateId) || 0) !== invalidationEpoch ||
+        affiliate?.status !== 'active' ||
+        currentVersion !== storedSession.sessionVersion
+      ) {
+        if ((affiliateSessionInvalidationEpochs.get(storedSession.affiliateId) || 0) === invalidationEpoch) {
+          cacheFreshAffiliateRecord(storedSession.affiliateId, affiliate || null);
+        }
+        forgetCachedAffiliateSession(documentId, true);
+        persistAffiliateSessionCache();
+        await deleteFirestoreDoc('affiliate_sessions', documentId).catch(() => {});
+        return null;
+      }
+
+      cacheFreshAffiliateRecord(storedSession.affiliateId, affiliate);
+      cachedSessions.set(documentId, storedSession);
+      cachedSessionVerifiedAt.set(documentId, Date.now());
+      missingSessions.delete(documentId);
+      persistAffiliateSessionCache();
+      return this.getAffiliateById(storedSession.affiliateId) || affiliate;
+    })();
+
+    sessionLookupPromises.set(documentId, lookup);
+    try {
+      return await lookup;
+    } finally {
+      sessionLookupPromises.delete(documentId);
     }
-    return affiliate;
   },
 
-  invalidateAffiliateSession(token: string) {
-    cachedSessions.delete(token);
-    writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
+  async invalidateAffiliateSession(token: string): Promise<void> {
+    if (!isValidSignedAffiliateSessionToken(token)) return;
+    const documentId = getAffiliateSessionDocumentId(token);
+    if (!documentId) return;
+
+    const pendingLookup = sessionLookupPromises.get(documentId);
+    if (pendingLookup) await pendingLookup.catch(() => null);
+    forgetCachedAffiliateSession(documentId, true);
+    persistAffiliateSessionCache();
+    sessionLookupPromises.delete(documentId);
+    await deleteFirestoreDoc('affiliate_sessions', documentId);
   },
 
-  invalidateAffiliateSessions(affiliateId: string): number {
-    let invalidated = 0;
-    for (const [token, session] of cachedSessions) {
-      if (session.affiliateId !== affiliateId) continue;
-      cachedSessions.delete(token);
-      invalidated++;
-    }
-    if (invalidated > 0) {
-      writeJsonFileSync(SESSIONS_FILE, Object.fromEntries(cachedSessions));
-    }
-    return invalidated;
+  async invalidateAffiliateSessions(affiliateId: string): Promise<number> {
+    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === affiliateId);
+    if (index < 0) return 0;
+
+    // Rotate one private generation value rather than scanning and deleting an
+    // unbounded session collection. Verification rejects every older version.
+    const sessionVersion = createAffiliateSessionVersion();
+    const updatedAt = new Date().toISOString();
+    await updateFirestoreDoc('affiliates', affiliateId, { sessionVersion, updatedAt });
+    cachedAffiliates[index] = { ...cachedAffiliates[index], sessionVersion, updatedAt };
+    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+    return forgetCachedAffiliateSessionsForAffiliate(affiliateId);
   }
 };
 
