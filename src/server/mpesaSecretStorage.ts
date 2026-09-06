@@ -17,9 +17,53 @@ export function getRuntimeMpesaSecrets(env: EnvironmentLike = process.env): Runt
   };
 }
 
-export function hasCompleteRuntimeMpesaSecrets(env: EnvironmentLike = process.env): boolean {
-  const secrets = getRuntimeMpesaSecrets(env);
+export function getStoredMpesaSecrets(value: unknown): RuntimeMpesaSecrets {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { consumerKey: '', consumerSecret: '', passkey: '' };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    consumerKey: typeof record.consumerKey === 'string' ? record.consumerKey.trim() : '',
+    consumerSecret: typeof record.consumerSecret === 'string' ? record.consumerSecret.trim() : '',
+    passkey: typeof record.passkey === 'string' ? record.passkey.trim() : ''
+  };
+}
+
+export function hasCompleteMpesaSecretSet(secrets: RuntimeMpesaSecrets): boolean {
   return Boolean(secrets.consumerKey && secrets.consumerSecret && secrets.passkey);
+}
+
+export function resolveMpesaSecretSource(
+  runtimeSecrets: RuntimeMpesaSecrets,
+  legacySecrets: RuntimeMpesaSecrets | null
+): {
+  secrets: RuntimeMpesaSecrets;
+  credentialsEnvironmentManaged: boolean;
+  credentialsLegacyFallback: boolean;
+} {
+  if (hasCompleteMpesaSecretSet(runtimeSecrets)) {
+    return {
+      secrets: runtimeSecrets,
+      credentialsEnvironmentManaged: true,
+      credentialsLegacyFallback: false
+    };
+  }
+  if (legacySecrets && hasCompleteMpesaSecretSet(legacySecrets)) {
+    return {
+      secrets: legacySecrets,
+      credentialsEnvironmentManaged: false,
+      credentialsLegacyFallback: true
+    };
+  }
+  return {
+    secrets: runtimeSecrets,
+    credentialsEnvironmentManaged: false,
+    credentialsLegacyFallback: false
+  };
+}
+
+export function hasCompleteRuntimeMpesaSecrets(env: EnvironmentLike = process.env): boolean {
+  return hasCompleteMpesaSecretSet(getRuntimeMpesaSecrets(env));
 }
 
 export function containsStoredMpesaSecrets(value: unknown): boolean {

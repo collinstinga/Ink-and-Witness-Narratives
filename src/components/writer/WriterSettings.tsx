@@ -74,6 +74,9 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
   const [mpesaHasKey, setMpesaHasKey] = useState(mpesaConfig.hasConsumerKey || false);
   const [mpesaHasSecret, setMpesaHasSecret] = useState(mpesaConfig.hasConsumerSecret || false);
   const [mpesaHasPasskey, setMpesaHasPasskey] = useState(mpesaConfig.hasPasskey || false);
+  const [mpesaCredentialsEnvironmentManaged, setMpesaCredentialsEnvironmentManaged] = useState(
+    mpesaConfig.credentialsEnvironmentManaged === true
+  );
   const [testingMpesa, setTestingMpesa] = useState(false);
   const [mpesaTestResult, setMpesaTestResult] = useState<{ status: 'success' | 'error'; message: string } | null>(null);
 
@@ -120,6 +123,7 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
         setMpesaHasKey(c.hasConsumerKey || false);
         setMpesaHasSecret(c.hasConsumerSecret || false);
         setMpesaHasPasskey(c.hasPasskey || false);
+        setMpesaCredentialsEnvironmentManaged(c.credentialsEnvironmentManaged === true);
       }
     } catch (err: any) {
       console.warn("Failed to load M-Pesa admin settings:", err);
@@ -628,7 +632,9 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
             <div className="space-y-1">
               <p className="font-semibold text-white">Secure M-Pesa Rails &amp; Daraja STK Push</p>
               <p className="text-slate-300 leading-relaxed">
-                Daraja credentials are isolated in protected Vercel environment variables. Writer Studio can show whether each credential is active, but it cannot read, replace, or store the credential values.
+                {mpesaCredentialsEnvironmentManaged
+                  ? 'Daraja credentials are isolated in protected Vercel environment variables. Writer Studio can show whether each credential is active, but it cannot read, replace, or store the credential values.'
+                  : 'Daraja credentials are temporarily using the read-only legacy configuration while the protected Vercel values are completed. Writer Studio cannot read, replace, or store the credential values.'}
               </p>
             </div>
           </div>
@@ -807,7 +813,9 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                     <div key={label} className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800">
                       <p className="text-[10px] font-mono text-slate-500">{label}</p>
                       <p className={`mt-1 text-xs font-semibold ${active ? 'text-emerald-400' : 'text-amber-300'}`}>
-                        {active ? 'Active in Vercel' : 'Missing from Vercel'}
+                        {active
+                          ? (mpesaCredentialsEnvironmentManaged ? 'Active in Vercel' : 'Active · migration pending')
+                          : 'Not configured'}
                       </p>
                     </div>
                   ))}
@@ -826,7 +834,9 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
               </div>
 
               <p className="text-[10px] leading-relaxed text-slate-500">
-                To rotate a provider credential, update the protected Production environment variable in Vercel and redeploy. Credential values never pass through this page or Firestore.
+                {mpesaCredentialsEnvironmentManaged
+                  ? 'To rotate a provider credential, update the protected Production environment variable in Vercel and redeploy. Credential values never pass through this page or Firestore.'
+                  : 'Complete all three protected Production credential values in Vercel, then redeploy. The guarded cleanup will remove the read-only legacy copies only after the runtime set is complete.'}
               </p>
 
               {/* Live Webhook Callback Endpoint */}

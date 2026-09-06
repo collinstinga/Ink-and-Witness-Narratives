@@ -701,6 +701,8 @@ export interface MpesaConfig {
   hasConsumerKey: boolean;
   hasConsumerSecret: boolean;
   hasPasskey: boolean;
+  credentialsEnvironmentManaged?: boolean;
+  credentialsLegacyFallback?: boolean;
 }
 
 export interface DashboardStats {

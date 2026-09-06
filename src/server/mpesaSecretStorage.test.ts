@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   containsStoredMpesaSecrets,
   getRuntimeMpesaSecrets,
+  getStoredMpesaSecrets,
+  hasCompleteMpesaSecretSet,
   hasCompleteRuntimeMpesaSecrets,
   hasUnsafeMpesaSecretUpdate,
+  resolveMpesaSecretSource,
   stripStoredMpesaSecrets
 } from './mpesaSecretStorage.js';
 
@@ -30,6 +33,42 @@ describe('M-Pesa environment-only secret storage', () => {
       MPESA_PASSKEY: 'passkey'
     })).toBe(true);
     expect(hasCompleteRuntimeMpesaSecrets({ MPESA_CONSUMER_KEY: 'key' })).toBe(false);
+  });
+
+  it('extracts a complete temporary fallback without retaining unrelated settings', () => {
+    const fallback = getStoredMpesaSecrets({
+      consumerKey: ' database-key ',
+      consumerSecret: ' database-secret ',
+      passkey: ' database-passkey ',
+      tillNumber: '123456'
+    });
+
+    expect(fallback).toEqual({
+      consumerKey: 'database-key',
+      consumerSecret: 'database-secret',
+      passkey: 'database-passkey'
+    });
+    expect(hasCompleteMpesaSecretSet(fallback)).toBe(true);
+    expect(hasCompleteMpesaSecretSet(getStoredMpesaSecrets({ consumerKey: 'partial' }))).toBe(false);
+  });
+
+  it('never mixes a partial runtime set with legacy provider credentials', () => {
+    const runtime = { consumerKey: 'new-key-only', consumerSecret: '', passkey: '' };
+    const legacy = { consumerKey: 'old-key', consumerSecret: 'old-secret', passkey: 'old-passkey' };
+
+    expect(resolveMpesaSecretSource(runtime, legacy)).toEqual({
+      secrets: legacy,
+      credentialsEnvironmentManaged: false,
+      credentialsLegacyFallback: true
+    });
+    expect(resolveMpesaSecretSource({
+      consumerKey: 'new-key',
+      consumerSecret: 'new-secret',
+      passkey: 'new-passkey'
+    }, legacy)).toMatchObject({
+      credentialsEnvironmentManaged: true,
+      credentialsLegacyFallback: false
+    });
   });
 
   it('removes reusable provider secrets without changing public rail settings', () => {

@@ -12,7 +12,10 @@ import {
   MPESA_SECRET_STORAGE_VERSION,
   containsStoredMpesaSecrets,
   getRuntimeMpesaSecrets,
+  getStoredMpesaSecrets,
+  hasCompleteMpesaSecretSet,
   hasCompleteRuntimeMpesaSecrets,
+  resolveMpesaSecretSource,
   stripStoredMpesaSecrets
 } from './mpesaSecretStorage.js';
 import { 
@@ -127,7 +130,14 @@ let cachedHomepageConfig: HomepageConfig = {
 
 type StoredMpesaSettings = Omit<
   MpesaConfig,
-  'consumerKey' | 'consumerSecret' | 'passkey' | 'hasConsumerKey' | 'hasConsumerSecret' | 'hasPasskey'
+  | 'consumerKey'
+  | 'consumerSecret'
+  | 'passkey'
+  | 'hasConsumerKey'
+  | 'hasConsumerSecret'
+  | 'hasPasskey'
+  | 'credentialsEnvironmentManaged'
+  | 'credentialsLegacyFallback'
 > & {
   transactionType: string;
   callbackUrl: string;
@@ -153,6 +163,7 @@ let cachedMpesaSettings: StoredMpesaSettings = {
   minTipKes: 300,
   secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
 };
+let cachedLegacyMpesaSecrets: ReturnType<typeof getStoredMpesaSecrets> | null = null;
 
 type MpesaSettingsRead = {
   settings: Record<string, unknown> | null;
@@ -828,6 +839,8 @@ export const store = {
     try {
       const settingsRead = await useStartupRead(startupReads.settings);
       if (settingsRead.settings) {
+        const storedSecrets = getStoredMpesaSecrets(settingsRead.settings);
+        cachedLegacyMpesaSecrets = hasCompleteMpesaSecretSet(storedSecrets) ? storedSecrets : null;
         cachedMpesaSettings = {
           ...cachedMpesaSettings,
           ...stripStoredMpesaSecrets(settingsRead.settings),
@@ -835,15 +848,21 @@ export const store = {
         } as StoredMpesaSettings;
         writeJsonFileSync(SETTINGS_FILE, cachedMpesaSettings);
         try {
-          await migrateStoredMpesaSecrets(settingsRead);
+          const migrated = await migrateStoredMpesaSecrets(settingsRead);
+          if (migrated) cachedLegacyMpesaSecrets = null;
         } catch {
           // Runtime credentials remain environment-only even when the one-time
           // database cleanup cannot complete. A later cold start can retry.
           console.warn('[M-PESA SECURITY] Credential-storage migration could not complete and will be retried.');
         }
+        if (cachedLegacyMpesaSecrets && !hasCompleteRuntimeMpesaSecrets()) {
+          console.warn('[M-PESA SECURITY] Temporary legacy credential fallback is active; persisted copies remain read-only.');
+        }
       } else if (fs.existsSync(SETTINGS_FILE)) {
         const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
         const localSettings = JSON.parse(raw) as Record<string, unknown>;
+        const storedSecrets = getStoredMpesaSecrets(localSettings);
+        cachedLegacyMpesaSecrets = hasCompleteMpesaSecretSet(storedSecrets) ? storedSecrets : null;
         cachedMpesaSettings = {
           ...cachedMpesaSettings,
           ...stripStoredMpesaSecrets(localSettings),
@@ -2836,12 +2855,15 @@ export const store = {
       : 'till';
 
     const runtimeSecrets = getRuntimeMpesaSecrets();
+    const resolvedSecrets = resolveMpesaSecretSource(runtimeSecrets, cachedLegacyMpesaSecrets);
     return {
       ...cachedMpesaSettings,
       paymentType: effectivePaymentType,
-      consumerKey: runtimeSecrets.consumerKey,
-      consumerSecret: runtimeSecrets.consumerSecret,
-      passkey: runtimeSecrets.passkey,
+      consumerKey: resolvedSecrets.secrets.consumerKey,
+      consumerSecret: resolvedSecrets.secrets.consumerSecret,
+      passkey: resolvedSecrets.secrets.passkey,
+      credentialsEnvironmentManaged: resolvedSecrets.credentialsEnvironmentManaged,
+      credentialsLegacyFallback: resolvedSecrets.credentialsLegacyFallback,
       shortcode: (process.env.MPESA_SHORTCODE || cachedMpesaSettings.shortcode || '').trim(),
       tillNumber: (process.env.MPESA_TILL_NUMBER || cachedMpesaSettings.tillNumber || '').trim(),
       storeNumber: (process.env.MPESA_STORE_NUMBER || cachedMpesaSettings.storeNumber || process.env.MPESA_SHORTCODE || cachedMpesaSettings.shortcode || '').trim(),
