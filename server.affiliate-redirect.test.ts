@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 vi.hoisted(() => {
   process.env.VERCEL = '1';
   process.env.NODE_ENV = 'test';
+  process.env.SESSION_SIGNING_SECRET = 'affiliate-click-dedup-test-secret-with-32-plus-characters';
 });
 
 const affiliateMocks = vi.hoisted(() => ({
@@ -79,6 +80,10 @@ describe('affiliate redirect route', () => {
       status: 'active',
       linksDisabled: false
     });
+    affiliateMocks.registerClick.mockReturnValue({
+      valid: true,
+      affiliate: { name: 'Test Partner' }
+    });
   });
 
   async function requestRedirect(path: string): Promise<Response> {
@@ -105,9 +110,12 @@ describe('affiliate redirect route', () => {
     expect(response.status).toBe(302);
     expect(target.pathname).toBe('/');
     expect(Object.fromEntries(target.searchParams)).toEqual({
-      ref: 'PARTNER_7',
-      iw_ref_tracked: '1'
+      ref: 'PARTNER_7'
     });
+    expect(response.headers.get('set-cookie')).toContain('iw_affiliate_click_dedup=');
+    expect(response.headers.get('set-cookie')).toContain('HttpOnly');
+    expect(response.headers.get('set-cookie')).toContain('SameSite=Lax');
+    expect(response.headers.get('set-cookie')).toContain('Path=/api/affiliate/click');
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
     expect(affiliateMocks.registerClick).toHaveBeenCalledWith(
       'PARTNER_7',
@@ -127,7 +135,6 @@ describe('affiliate redirect route', () => {
     expect(target.pathname).toBe('/');
     expect(Object.fromEntries(target.searchParams)).toEqual({
       ref: 'PARTNER_7',
-      iw_ref_tracked: '1',
       article: 'piece_42'
     });
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
@@ -146,7 +153,6 @@ describe('affiliate redirect route', () => {
     expect(target.pathname).toBe('/');
     expect(Object.fromEntries(target.searchParams)).toEqual({
       ref: 'PARTNER_7',
-      iw_ref_tracked: '1',
       c: 'launch_2026'
     });
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
@@ -167,8 +173,7 @@ describe('affiliate redirect route', () => {
 
     expect(response.status).toBe(302);
     expect(Object.fromEntries(target.searchParams)).toEqual({
-      ref: 'PARTNER_7',
-      iw_ref_tracked: '1'
+      ref: 'PARTNER_7'
     });
     expect(response.headers.get('location')).not.toContain('evil.example.test');
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
@@ -186,5 +191,60 @@ describe('affiliate redirect route', () => {
     expect(response.headers.get('location')).toBe('/');
     expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
     expect(affiliateMocks.registerClick).not.toHaveBeenCalled();
+  });
+
+  it('consumes a matching signed cookie without recording the redirect click twice', async () => {
+    const redirect = await requestRedirect(
+      '/api/affiliate/redirect/PARTNER_7?article=piece_42&c=launch_2026'
+    );
+    const cookiePair = redirect.headers.get('set-cookie')?.split(';')[0];
+
+    expect(cookiePair).toMatch(/^iw_affiliate_click_dedup=/);
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: cookiePair!
+      },
+      body: JSON.stringify({
+        ref: 'partner_7',
+        articleId: 'piece_42',
+        campaign: 'launch_2026'
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, deduplicated: true });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('set-cookie')).toContain('iw_affiliate_click_dedup=;');
+    expect(response.headers.get('set-cookie')).toContain('Path=/api/affiliate/click');
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not deduplicate a cookie whose article does not match the submitted click', async () => {
+    const redirect = await requestRedirect('/api/affiliate/redirect/PARTNER_7?article=piece_42');
+    const cookiePair = redirect.headers.get('set-cookie')?.split(';')[0];
+    affiliateMocks.registerClick.mockClear();
+
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: cookiePair!
+      },
+      body: JSON.stringify({ ref: 'partner_7', articleId: 'piece_43' })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, deduplicated: false });
+    expect(response.headers.get('set-cookie')).toContain('iw_affiliate_click_dedup=;');
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+    expect(affiliateMocks.registerClick.mock.calls[0]?.slice(0, 3)).toEqual([
+      'partner_7',
+      'piece_43',
+      undefined
+    ]);
   });
 });

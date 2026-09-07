@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const storeMocks = vi.hoisted(() => ({
   loadTransaction: vi.fn(),
+  attachMpesaCallbackIntent: vi.fn(),
   settleMpesaTransaction: vi.fn(),
   recordMpesaTerminalFailure: vi.fn()
 }));
@@ -59,6 +60,7 @@ describe('Daraja callback security', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     storeMocks.loadTransaction.mockResolvedValue(pendingTransaction());
+    storeMocks.attachMpesaCallbackIntent.mockResolvedValue(pendingTransaction());
     storeMocks.settleMpesaTransaction.mockResolvedValue({ outcome: 'committed' });
     storeMocks.recordMpesaTerminalFailure.mockResolvedValue({ outcome: 'committed' });
   });
@@ -89,11 +91,25 @@ describe('Daraja callback security', () => {
     expect(storeMocks.settleMpesaTransaction).not.toHaveBeenCalled();
   });
 
-  it('requests a retry when the provider callback races transaction persistence', async () => {
+  it('reconstructs a pending transaction when the provider callback wins the response-side attachment race', async () => {
     storeMocks.loadTransaction.mockResolvedValueOnce(undefined);
 
     await expect(handleDarajaCallback(successCallback(), callbackCapability))
-      .resolves.toMatchObject({ success: false, outcome: 'retryable_error' });
+      .resolves.toMatchObject({ success: true, outcome: 'committed' });
+    expect(storeMocks.attachMpesaCallbackIntent).toHaveBeenCalledWith(
+      hashPaymentCapability(callbackCapability),
+      'ws_CO_123456789',
+      'merchant_123456789'
+    );
+    expect(storeMocks.settleMpesaTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a well-formed callback that has neither a transaction nor a durable intent', async () => {
+    storeMocks.loadTransaction.mockResolvedValueOnce(undefined);
+    storeMocks.attachMpesaCallbackIntent.mockResolvedValueOnce(undefined);
+
+    await expect(handleDarajaCallback(successCallback(), callbackCapability))
+      .resolves.toMatchObject({ success: false, outcome: 'rejected' });
     expect(storeMocks.settleMpesaTransaction).not.toHaveBeenCalled();
   });
 

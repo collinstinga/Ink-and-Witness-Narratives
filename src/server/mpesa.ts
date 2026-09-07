@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { store } from './store.js';
+import { store, type MpesaCallbackIntent } from './store.js';
 import { MpesaConfig, PaymentTransaction } from '../types.js';
 import {
   attachCallbackCapability,
@@ -319,6 +319,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     articleId,
     articleTitle = 'Ink & Witness Monograph Unlock',
     isTip = false,
+    type: requestedType,
     currency = 'KES',
     originalAmount,
     exchangeRate,
@@ -333,6 +334,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   const formattedPhone = formatKenyanPhone(phoneNumber);
   const cleanAmount = Math.max(1, Math.round(Number(amount) || 1));
   const masked = maskPhone(formattedPhone);
+  const paymentType: 'PURCHASE' | 'TIP' = requestedType === 'TIP' || isTip ? 'TIP' : 'PURCHASE';
 
   if (!isValidKenyanMpesaPhone(formattedPhone)) {
     return {
@@ -397,6 +399,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   // Resolve Public HTTPS Callback URL
   let callbackUrl: string;
   const callbackCapability = generatePaymentCapability();
+  const callbackCapabilityHash = hashPaymentCapability(callbackCapability);
+  const paymentCapability = generatePaymentCapability();
   try {
     callbackUrl = attachCallbackCapability(
       resolveDarajaCallbackUrl(
@@ -412,6 +416,52 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   const accountReference = (process.env.MPESA_ACCOUNT_REF || params.accountReference || articleTitle || 'INKWITNESS')
     .replace(/[^a-zA-Z0-9]/g, '')
     .substring(0, 12) || 'INKWITNESS';
+
+  const preparedAt = new Date();
+  const normalizedCurrency = /^[A-Z]{3,8}$/.test(String(currency || '').trim().toUpperCase())
+    ? String(currency).trim().toUpperCase()
+    : 'KES';
+  const normalizedOriginalAmount = Number(originalAmount);
+  const normalizedExchangeRate = Number(exchangeRate);
+  const normalizedExchangeRateTimestamp = exchangeRateTimestamp && Number.isFinite(Date.parse(exchangeRateTimestamp))
+    ? exchangeRateTimestamp
+    : preparedAt.toISOString();
+  const intent: MpesaCallbackIntent = {
+    version: 1,
+    callbackCapabilityHash,
+    paymentCapabilityHash: hashPaymentCapability(paymentCapability),
+    articleId: articleId || (paymentType === 'TIP' ? 'general_tip' : 'custom'),
+    articleTitle,
+    phoneNumber: formattedPhone,
+    amount: cleanAmount,
+    currency: normalizedCurrency,
+    originalAmount: Number.isFinite(normalizedOriginalAmount) && normalizedOriginalAmount > 0
+      ? normalizedOriginalAmount
+      : cleanAmount,
+    exchangeRate: Number.isFinite(normalizedExchangeRate) && normalizedExchangeRate > 0
+      ? normalizedExchangeRate
+      : 1,
+    exchangeRateTimestamp: normalizedExchangeRateTimestamp,
+    type: paymentType,
+    affiliateCode: affiliateCode || undefined,
+    campaignCode: campaignCode || undefined,
+    userId: userId || undefined,
+    userEmail: userEmail || undefined,
+    shortcodeUsed: businessShortCode,
+    createdAt: preparedAt.toISOString(),
+    expiresAt: new Date(preparedAt.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    status: 'PREPARED'
+  };
+
+  try {
+    // Persist the complete, capability-bound intent before contacting Daraja.
+    // If the provider accepts while the response-side transaction write fails,
+    // the authenticated callback can reconstruct the pending transaction.
+    await store.saveMpesaCallbackIntent(intent);
+  } catch {
+    console.error('[M-PESA INTENT ERROR] Secure payment intent could not be persisted.');
+    return { success: false, error: 'Payment could not be prepared safely. Please retry in a moment.' };
+  }
 
   const stkPayload = {
     BusinessShortCode: businessShortCode,
@@ -466,12 +516,9 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
         if (retryData?.ResponseCode === '0' && retryData?.CheckoutRequestID) {
           return handleSuccessfulStkResponse(
             retryData,
-            params,
-            formattedPhone,
-            cleanAmount,
-            businessShortCode,
             masked,
-            callbackCapability
+            intent,
+            paymentCapability
           );
         }
       }
@@ -480,16 +527,16 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     if (stkData?.ResponseCode === '0' && stkData?.CheckoutRequestID) {
       return handleSuccessfulStkResponse(
         stkData,
-        params,
-        formattedPhone,
-        cleanAmount,
-        businessShortCode,
         masked,
-        callbackCapability
+        intent,
+        paymentCapability
       );
     } else {
       const errorMsg = stkData?.errorMessage || stkData?.ResponseDescription || (stkData?.fault?.faultstring ? `Safaricom Notice: ${stkData.fault.faultstring}` : `Safaricom rejected STK Push (HTTP ${stkRes.status})`);
       console.error(`[M-PESA STK REJECTED] ${errorMsg}`);
+      await store.discardMpesaCallbackIntent(callbackCapabilityHash, intent.paymentCapabilityHash).catch(() => {
+        console.warn('[M-PESA INTENT CLEANUP] Rejected payment intent will expire automatically.');
+      });
       return {
         success: false,
         error: errorMsg,
@@ -510,49 +557,33 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
 
 async function handleSuccessfulStkResponse(
   stkData: any,
-  params: InitiateStkPushParams,
-  formattedPhone: string,
-  amount: number,
-  shortcodeUsed: string,
   maskedPhone: string,
-  callbackCapability: string
+  intent: MpesaCallbackIntent,
+  paymentCapability: string
 ): Promise<StkPushResult> {
   const checkoutRequestId = stkData.CheckoutRequestID;
   const merchantRequestId = stkData.MerchantRequestID;
   if (typeof merchantRequestId !== 'string' || !merchantRequestId.trim()) {
     return { success: false, error: 'Safaricom accepted the request without a valid merchant correlation ID.' };
   }
-  const paymentCapability = generatePaymentCapability();
+  console.log(`[STK PUSH SUCCESSFUL] Provider correlation IDs received. CustomerPhone: ${maskedPhone}, Amount: KES ${intent.amount}`);
 
-  console.log(`[STK PUSH SUCCESSFUL] Provider correlation IDs received. CustomerPhone: ${maskedPhone}, Amount: KES ${amount}`);
-
-  const transaction: PaymentTransaction = {
-    id: `tx_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-    checkoutRequestId,
-    merchantRequestId,
-    articleId: params.articleId || (params.isTip ? 'general_tip' : 'custom'),
-    articleTitle: params.articleTitle || 'Ink & Witness Reader Access',
-    phoneNumber: formattedPhone,
-    amount,
-    currency: params.currency || 'KES',
-    originalAmount: params.originalAmount ? Number(params.originalAmount) : amount,
-    exchangeRate: params.exchangeRate ? Number(params.exchangeRate) : 1,
-    exchangeRateTimestamp: params.exchangeRateTimestamp || new Date().toISOString(),
-    paymentMethod: 'mpesa',
-    type: params.isTip ? 'TIP' : 'PURCHASE',
-    status: 'PENDING',
-    createdAt: new Date().toISOString(),
-    affiliateCode: params.affiliateCode || undefined,
-    campaignCode: params.campaignCode || undefined,
-    shortcodeUsed,
-    paymentCapabilityHash: hashPaymentCapability(paymentCapability),
-    callbackCapabilityHash: hashPaymentCapability(callbackCapability),
-    userId: params.userId,
-    userEmail: params.userEmail,
-  };
-
-  await store.saveTransaction(transaction);
-  console.log('[M-PESA TRANSACTION CREATED] Pending transaction stored with hashed payment and callback capabilities.');
+  let transaction: PaymentTransaction | undefined;
+  try {
+    transaction = await store.attachMpesaCallbackIntent(
+      intent.callbackCapabilityHash,
+      checkoutRequestId,
+      merchantRequestId
+    );
+  } catch {
+    // Daraja has already accepted the request. Return the provider IDs and the
+    // client polling capability; the durable pre-request intent lets the
+    // authenticated callback finish attachment and settlement safely.
+    console.error('[M-PESA TRANSACTION ATTACHMENT] Provider accepted; callback recovery is pending.');
+  }
+  if (transaction) {
+    console.log('[M-PESA TRANSACTION CREATED] Pending transaction attached to its durable payment intent.');
+  }
 
   return {
     success: true,
@@ -560,9 +591,9 @@ async function handleSuccessfulStkResponse(
     merchantRequestId,
     customerMessage: stkData.CustomerMessage || 'M-Pesa request accepted by Safaricom for processing.',
     message: 'M-Pesa request accepted by Safaricom. Waiting for handset delivery confirmation.',
-    amount,
-    phoneNumber: formattedPhone,
-    articleTitle: transaction.articleTitle,
+    amount: transaction?.amount || intent.amount,
+    phoneNumber: transaction?.phoneNumber || intent.phoneNumber,
+    articleTitle: transaction?.articleTitle || intent.articleTitle,
     paymentCapability
   };
 }
@@ -696,12 +727,21 @@ export async function handleDarajaCallback(
   }
 
   try {
-    const tx = await store.loadTransaction(parsed.checkoutRequestId);
+    const callbackCapabilityHash = hashPaymentCapability(callbackCapability);
+    let tx = await store.loadTransaction(parsed.checkoutRequestId);
     if (!tx) {
-      // The provider can beat the transaction write or Firestore visibility.
-      // Ask Daraja to retry instead of permanently acknowledging a paid event.
-      console.warn('[M-PESA CALLBACK RETRYABLE] Correlated transaction is not available yet.');
-      return { success: false, outcome: 'retryable_error', message: 'Callback could not be persisted.' };
+      // The provider can beat the response-side transaction attachment. The
+      // pre-Daraja, hash-bound intent is sufficient to reconstruct the pending
+      // transaction without trusting callback-supplied purchase details.
+      tx = await store.attachMpesaCallbackIntent(
+        callbackCapabilityHash,
+        parsed.checkoutRequestId,
+        parsed.merchantRequestId
+      );
+      if (!tx) {
+        console.warn('[M-PESA CALLBACK REJECTED] No correlated payment intent exists.');
+        return { success: false, outcome: 'rejected', message: 'Callback rejected.' };
+      }
     }
     if (
       tx.paymentMethod !== 'mpesa' ||
@@ -733,7 +773,7 @@ export async function handleDarajaCallback(
         phoneNumber: metadata.phoneNumber,
         resultDesc: parsed.resultDesc,
         transactionTimestamp: metadata.transactionDate,
-        expectedCallbackCapabilityHash: tx.callbackCapabilityHash
+          expectedCallbackCapabilityHash: callbackCapabilityHash
       });
       if (settlement.outcome === 'rejected') {
         console.warn('[M-PESA CALLBACK REJECTED] Atomic settlement validation failed.');

@@ -14,6 +14,12 @@ import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./sr
 import { sanitizeAffiliateForResponse } from "./src/server/affiliateStore.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
+  AFFILIATE_CLICK_DEDUP_COOKIE_NAME,
+  AFFILIATE_CLICK_DEDUP_MAX_AGE_MS,
+  createAffiliateClickDedupCookieValue,
+  isMatchingAffiliateClickDedupCookie
+} from "./src/server/affiliateClickDedupSecurity.js";
+import {
   generateAffiliateTemporaryPassword,
   hashAffiliatePassword,
   rehashVerifiedAffiliatePassword,
@@ -156,6 +162,25 @@ function clearAffiliateSessionCookie(res: Response) {
     secure: isProduction,
     sameSite: 'lax',
     path: '/'
+  });
+}
+
+function setAffiliateClickDedupCookie(res: Response, cookieValue: string) {
+  res.cookie(AFFILIATE_CLICK_DEDUP_COOKIE_NAME, cookieValue, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: AFFILIATE_CLICK_DEDUP_MAX_AGE_MS,
+    path: '/api/affiliate/click'
+  });
+}
+
+function clearAffiliateClickDedupCookie(res: Response) {
+  res.clearCookie(AFFILIATE_CLICK_DEDUP_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/api/affiliate/click'
   });
 }
 
@@ -678,6 +703,11 @@ export async function createApp() {
     // Check if authenticated reader owns this piece
     const user = (req as any).user;
     if (!isUnlocked && user) {
+      try {
+        await store.ensureReaderLicensesHydrated();
+      } catch {
+        return res.status(503).json({ error: "Reader access is temporarily unavailable. Please retry." });
+      }
       if (store.isArticlePurchasedByUser(article.id, user)) {
         isUnlocked = true;
       }
@@ -833,12 +863,18 @@ export async function createApp() {
           referrer
         );
 
+        const clickDedupCookie = createAffiliateClickDedupCookieValue({
+          ref: aff.affiliateCode,
+          articleId: articleId || undefined,
+          campaign: campaignCode || undefined
+        });
+        if (clickDedupCookie) {
+          setAffiliateClickDedupCookie(res, clickDedupCookie);
+        }
+
         // Build target redirect URL preserving ref, article, and campaign query parameters
         const params = new URLSearchParams();
         params.set("ref", aff.affiliateCode);
-        // The server already recorded this redirect. The landing page uses this
-        // marker to persist attribution without submitting a duplicate click.
-        params.set("iw_ref_tracked", "1");
         if (articleId) {
           params.set("article", articleId);
         }
@@ -1192,7 +1228,25 @@ export async function createApp() {
         return res.status(404).json({ error: "Transaction not found." });
       }
       const existing = await store.refreshTransaction(checkoutRequestId);
-      if (!existing || !verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
+      if (!existing) {
+        const intent = await store.loadMpesaCallbackIntentByPaymentHash(hashPaymentCapability(paymentCapability));
+        if (!intent || (intent.checkoutRequestId && intent.checkoutRequestId !== checkoutRequestId)) {
+          return res.status(404).json({ error: "Transaction not found." });
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({
+          checkoutRequestId,
+          articleId: intent.articleId,
+          articleTitle: intent.articleTitle,
+          amount: intent.amount,
+          currency: intent.currency,
+          paymentMethod: 'mpesa',
+          type: intent.type,
+          status: 'PENDING',
+          rawStatus: 'PENDING'
+        });
+      }
+      if (!verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
         return res.status(404).json({ error: "Transaction not found." });
       }
       const result = await queryPaymentStatus(checkoutRequestId);
@@ -1218,7 +1272,25 @@ export async function createApp() {
         return res.status(404).json({ error: "Transaction not found." });
       }
       const existing = await store.refreshTransaction(id);
-      if (!existing || !verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
+      if (!existing) {
+        const intent = await store.loadMpesaCallbackIntentByPaymentHash(hashPaymentCapability(paymentCapability));
+        if (!intent || (intent.checkoutRequestId && intent.checkoutRequestId !== id)) {
+          return res.status(404).json({ error: "Transaction not found." });
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({
+          checkoutRequestId: id,
+          articleId: intent.articleId,
+          articleTitle: intent.articleTitle,
+          amount: intent.amount,
+          currency: intent.currency,
+          paymentMethod: 'mpesa',
+          type: intent.type,
+          status: 'PENDING',
+          rawStatus: 'PENDING'
+        });
+      }
+      if (!verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
         return res.status(404).json({ error: "Transaction not found." });
       }
       const result = await queryPaymentStatus(id);
@@ -1520,12 +1592,17 @@ export async function createApp() {
   });
 
   // Reader Personal Library (Account-synced permanent web reading access)
-  app.get("/api/user/library", (req: Request, res: Response) => {
+  app.get("/api/user/library", async (req: Request, res: Response) => {
     const user = (req as any).user;
     if (!user) {
       return res.status(401).json({ success: false, error: "Please sign in to access your personal reader library." });
     }
 
+    try {
+      await store.ensureReaderLicensesHydrated();
+    } catch {
+      return res.status(503).json({ success: false, error: "Your reader library is temporarily unavailable. Please retry." });
+    }
     const purchases = store.getUserPurchases(user.id);
     const articles = store.getArticles(false);
 
@@ -1553,7 +1630,7 @@ export async function createApp() {
   });
 
   // Reader Account: Link a purchased token or receipt to active user account
-  app.post("/api/user/link-purchase", purchaseRecoveryLimiter, publicWriteValidators.linkPurchase, (req: Request, res: Response) => {
+  app.post("/api/user/link-purchase", purchaseRecoveryLimiter, publicWriteValidators.linkPurchase, async (req: Request, res: Response) => {
     const user = (req as any).user;
     if (!user) {
       return res.status(401).json({ success: false, error: "Please sign in to link purchases to your account." });
@@ -1564,6 +1641,11 @@ export async function createApp() {
       return res.status(400).json({ success: false, error: "Please provide a valid M-Pesa receipt number, phone number, or unlock token." });
     }
 
+    try {
+      await store.ensureReaderLicensesHydrated();
+    } catch {
+      return res.status(503).json({ success: false, error: "Purchase linking is temporarily unavailable. Please retry." });
+    }
     const result = store.linkUserPurchase(user.id, query.trim());
     return res.json(result);
   });
@@ -1985,8 +2067,9 @@ export async function createApp() {
   });
 
   // Writer: Readers & Access Licenses
-  app.get("/api/admin/readers", requireAdminAuth, (_req: Request, res: Response) => {
+  app.get("/api/admin/readers", requireAdminAuth, async (_req: Request, res: Response) => {
     try {
+      await store.ensureReaderLicensesHydrated();
       const licenses = store.getReaderLicenses();
       res.json({ count: licenses.length, licenses });
     } catch (err: any) {
@@ -2052,6 +2135,7 @@ export async function createApp() {
   app.delete("/api/admin/readers/:token", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { token } = req.params;
+      await store.ensureReaderLicensesHydrated();
       const revoked = store.revokeReaderLicense(token);
       if (!revoked) {
         return res.status(404).json({ error: "Access license not found." });
@@ -2094,6 +2178,7 @@ export async function createApp() {
       if (!grantId) {
         return res.status(400).json({ error: "grantId is required to revoke manual access." });
       }
+      await store.ensureReaderLicensesHydrated();
       const revoked = store.revokeManualAccess(grantId);
       if (!revoked) {
         return res.status(404).json({ error: "Manual access grant not found." });
@@ -2111,6 +2196,7 @@ export async function createApp() {
       if (!grantId) {
         return res.status(400).json({ error: "grantId is required to delete manual access." });
       }
+      await store.ensureReaderLicensesHydrated();
       const deleted = store.deleteManualAccess(grantId);
       if (!deleted) {
         return res.status(404).json({ error: "Manual access grant not found." });
@@ -2127,6 +2213,7 @@ export async function createApp() {
       if (!grantId) {
         return res.status(400).json({ error: "grantId is required to delete manual access." });
       }
+      await store.ensureReaderLicensesHydrated();
       const deleted = store.deleteManualAccess(grantId);
       if (!deleted) {
         return res.status(404).json({ error: "Manual access grant not found." });
@@ -2703,6 +2790,15 @@ ${currentDraft || prompt}
         return res.status(400).json({ error: "Referral code is required" });
       }
 
+      const dedupCookie = (req as any).cookies?.[AFFILIATE_CLICK_DEDUP_COOKIE_NAME];
+      if (dedupCookie) {
+        clearAffiliateClickDedupCookie(res);
+        if (isMatchingAffiliateClickDedupCookie(dedupCookie, { ref, articleId, campaign })) {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.json({ success: true, deduplicated: true });
+        }
+      }
+
       const ip = getRequestNetworkKey(req);
       const userAgent = String(req.headers['user-agent'] || '').substring(0, 150);
       const referrer = String(req.headers.referer || '').substring(0, 200);
@@ -2711,7 +2807,8 @@ ${currentDraft || prompt}
       const result = store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer);
       res.json({
         success: result.valid,
-        affiliateName: result.affiliate?.name
+        affiliateName: result.affiliate?.name,
+        deduplicated: false
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to register click" });

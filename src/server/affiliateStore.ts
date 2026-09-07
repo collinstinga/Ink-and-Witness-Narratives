@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { FieldValue } from 'firebase-admin/firestore';
 import { 
   getDb, 
   setFirestoreDoc,
@@ -718,14 +719,14 @@ export const affiliateStore = {
   },
 
   // RECONCILIATION OF PREVIOUS CONFIRMED TRANSACTIONS
-  reconcileTransactions(transactions: PaymentTransaction[]): number {
+  async reconcileTransactions(transactions: PaymentTransaction[]): Promise<number> {
     if (!Array.isArray(transactions) || transactions.length === 0) return 0;
     let reconciledCount = 0;
     for (const tx of transactions) {
       const isConfirmed = tx.status === 'CONFIRMED' || tx.status === 'SUCCESS' || tx.status === 'PAID';
       if (isConfirmed && tx.affiliateCode) {
         try {
-          const comm = this.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
+          const comm = await this.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
           if (comm) {
             reconciledCount++;
           }
@@ -769,7 +770,7 @@ export const affiliateStore = {
     return cachedSettings.defaultCommissionRate || 15;
   },
 
-  recordAffiliateSale(tx: PaymentTransaction, affiliateRefCode?: string, campaignCode?: string): AffiliateSaleCommission | null {
+  async recordAffiliateSale(tx: PaymentTransaction, affiliateRefCode?: string, campaignCode?: string): Promise<AffiliateSaleCommission | null> {
     if (!affiliateRefCode) return null;
 
     // Tips rule: Tips do not generate commission unless explicitly enabled by writer
@@ -824,15 +825,19 @@ export const affiliateStore = {
     const autoApprove = cachedSettings.autoApproveCommissions;
     const status: CommissionStatus = isSelfReferral ? 'REJECTED' : (autoApprove ? 'APPROVED' : 'PENDING');
     const effectiveCommissionAmount = isSelfReferral ? 0 : commissionAmountKes;
+    const commissionId = `com_tx_${crypto.createHash('sha256')
+      .update(tx.checkoutRequestId || tx.id)
+      .digest('hex')
+      .slice(0, 40)}`;
 
     const commission: AffiliateSaleCommission = {
-      id: `com_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      id: commissionId,
       affiliateId: affiliate.id,
       affiliateCode: affiliate.affiliateCode,
       affiliateName: affiliate.name,
       transactionId: tx.id,
       checkoutRequestId: tx.checkoutRequestId,
-      receiptNumber: tx.mpesaReceiptNumber || tx.bankReference || `REC-${Date.now().toString().slice(-6)}`,
+      receiptNumber: tx.mpesaReceiptNumber || tx.bankReference || `CHECKOUT-${tx.checkoutRequestId || tx.id}`,
       articleId: tx.articleId,
       articleTitle: tx.articleTitle || "Monograph",
       saleAmountKes,
@@ -854,9 +859,59 @@ export const affiliateStore = {
       approvedAt: (!isSelfReferral && autoApprove) ? now : undefined
     };
 
+    const commissionRef = getDb().collection('affiliate_commissions').doc(commission.id);
+    const affiliateRef = getDb().collection('affiliates').doc(affiliate.id);
+    const campaign = campaignCode
+      ? cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase())
+      : undefined;
+    const campaignRef = campaign
+      ? getDb().collection('affiliate_campaigns').doc(campaign.id)
+      : undefined;
+
+    const persisted = await getDb().runTransaction(async firestoreTransaction => {
+      const existingSnapshot = await firestoreTransaction.get(commissionRef);
+      if (existingSnapshot.exists) {
+        return {
+          created: false,
+          commission: existingSnapshot.data() as AffiliateSaleCommission
+        };
+      }
+
+      firestoreTransaction.create(commissionRef, commission);
+      const affiliateIncrement: Record<string, unknown> = {
+        totalSalesCount: FieldValue.increment(1),
+        totalRevenueKes: FieldValue.increment(saleAmountKes),
+        lastActivityAt: now
+      };
+      if (!isSelfReferral) {
+        affiliateIncrement.totalCommissionEarnedKes = FieldValue.increment(effectiveCommissionAmount);
+        if (status === 'APPROVED') {
+          affiliateIncrement.balanceAvailableKes = FieldValue.increment(effectiveCommissionAmount);
+        } else {
+          affiliateIncrement.balancePendingKes = FieldValue.increment(effectiveCommissionAmount);
+        }
+      }
+      firestoreTransaction.set(affiliateRef, affiliateIncrement, { merge: true });
+      if (campaignRef) {
+        firestoreTransaction.set(campaignRef, {
+          salesCount: FieldValue.increment(1),
+          revenueKes: FieldValue.increment(saleAmountKes),
+          commissionsKes: FieldValue.increment(effectiveCommissionAmount)
+        }, { merge: true });
+      }
+      return { created: true, commission };
+    });
+
+    if (!persisted.created) {
+      if (!cachedCommissions.some(item => item.id === persisted.commission.id)) {
+        cachedCommissions.unshift(persisted.commission);
+        writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
+      }
+      return persisted.commission;
+    }
+
     cachedCommissions.unshift(commission);
     writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
-    setFirestoreDoc('affiliate_commissions', commission.id, commission).catch(() => {});
 
     // Update Affiliate account balance & stats (only if not self-referral)
     affiliate.totalSalesCount = (affiliate.totalSalesCount || 0) + 1;
@@ -871,25 +926,13 @@ export const affiliateStore = {
     }
     affiliate.lastActivityAt = now;
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, {
-      totalSalesCount: affiliate.totalSalesCount,
-      totalRevenueKes: affiliate.totalRevenueKes,
-      totalCommissionEarnedKes: affiliate.totalCommissionEarnedKes,
-      balanceAvailableKes: affiliate.balanceAvailableKes,
-      balancePendingKes: affiliate.balancePendingKes,
-      lastActivityAt: affiliate.lastActivityAt
-    }).catch(() => {});
 
     // Update campaign stats if campaign attached
-    if (campaignCode) {
-      const camp = cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase());
-      if (camp) {
-        camp.salesCount = (camp.salesCount || 0) + 1;
-        camp.revenueKes = (camp.revenueKes || 0) + saleAmountKes;
-        camp.commissionsKes = (camp.commissionsKes || 0) + commissionAmountKes;
+    if (campaign) {
+        campaign.salesCount = (campaign.salesCount || 0) + 1;
+        campaign.revenueKes = (campaign.revenueKes || 0) + saleAmountKes;
+        campaign.commissionsKes = (campaign.commissionsKes || 0) + effectiveCommissionAmount;
         writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
-        setFirestoreDoc('affiliate_campaigns', camp.id, camp).catch(() => {});
-      }
     }
 
     this.recordAudit('System', 'commission_generated', 'commission', `Generated KES ${commissionAmountKes} commission (${commissionRate}%) for ${affiliate.name} on piece "${commission.articleTitle}" (Receipt: ${commission.receiptNumber})`, commission.id, null, commission);

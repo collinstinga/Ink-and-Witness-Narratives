@@ -118,7 +118,37 @@ type CachedReaderLicense = {
   accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
   token?: string;
 };
+
+export type MpesaCallbackIntent = {
+  version: 1;
+  callbackCapabilityHash: string;
+  paymentCapabilityHash: string;
+  articleId: string;
+  articleTitle: string;
+  phoneNumber: string;
+  amount: number;
+  currency: string;
+  originalAmount: number;
+  exchangeRate: number;
+  exchangeRateTimestamp: string;
+  type: 'PURCHASE' | 'TIP';
+  affiliateCode?: string;
+  campaignCode?: string;
+  userId?: string;
+  userEmail?: string;
+  shortcodeUsed: string;
+  createdAt: string;
+  expiresAt: string;
+  checkoutRequestId?: string;
+  merchantRequestId?: string;
+  status?: 'PREPARED' | 'ATTACHED' | 'SETTLED' | 'FAILED';
+};
 let cachedTokens: Map<string, CachedReaderLicense> = new Map();
+let cachedReaderLicenseVerifiedAt: Map<string, number> = new Map();
+let missingReaderLicenses: Map<string, number> = new Map();
+let readerLicenseLookupPromises: Map<string, Promise<CachedReaderLicense | undefined>> = new Map();
+let readerLicensesHydrated = false;
+let readerLicensesHydrationPromise: Promise<void> | null = null;
 let cachedManualAccess: Map<string, ManualAccessGrant> = new Map();
 let cachedRevisions: Map<string, ArticleRevision[]> = new Map();
 let cachedAuthor: AuthorProfile = { ...JAKE_PROFILE };
@@ -130,6 +160,9 @@ let cachedComments: PieceComment[] = [];
 const AUTH_SESSION_CACHE_TTL_MS = 60 * 1000;
 const MISSING_AUTH_SESSION_CACHE_TTL_MS = 30 * 1000;
 const MAX_MISSING_AUTH_SESSION_CACHE_ENTRIES = 1000;
+const READER_LICENSE_CACHE_TTL_MS = 60 * 1000;
+const MISSING_READER_LICENSE_CACHE_TTL_MS = 30 * 1000;
+const MAX_MISSING_READER_LICENSE_CACHE_ENTRIES = 1000;
 
 let cachedHomepageConfig: HomepageConfig = {
   welcomeBackground: {
@@ -339,6 +372,89 @@ function cacheTransaction(tx: PaymentTransaction): PaymentTransaction {
   return tx;
 }
 
+function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const intent = value as Partial<MpesaCallbackIntent>;
+  if (
+    intent.version !== 1 ||
+    typeof intent.callbackCapabilityHash !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(intent.callbackCapabilityHash) ||
+    typeof intent.paymentCapabilityHash !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(intent.paymentCapabilityHash) ||
+    typeof intent.articleId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(intent.articleId) ||
+    typeof intent.articleTitle !== 'string' ||
+    intent.articleTitle.length === 0 ||
+    intent.articleTitle.length > 300 ||
+    typeof intent.phoneNumber !== 'string' ||
+    !/^254[17]\d{8}$/.test(intent.phoneNumber) ||
+    typeof intent.amount !== 'number' ||
+    !Number.isFinite(intent.amount) ||
+    intent.amount <= 0 ||
+    intent.amount > 1_000_000 ||
+    typeof intent.currency !== 'string' ||
+    !/^[A-Z]{3,8}$/.test(intent.currency) ||
+    typeof intent.originalAmount !== 'number' ||
+    !Number.isFinite(intent.originalAmount) ||
+    intent.originalAmount <= 0 ||
+    typeof intent.exchangeRate !== 'number' ||
+    !Number.isFinite(intent.exchangeRate) ||
+    intent.exchangeRate <= 0 ||
+    typeof intent.exchangeRateTimestamp !== 'string' ||
+    !Number.isFinite(Date.parse(intent.exchangeRateTimestamp)) ||
+    (intent.type !== 'PURCHASE' && intent.type !== 'TIP') ||
+    typeof intent.shortcodeUsed !== 'string' ||
+    !/^\d{5,10}$/.test(intent.shortcodeUsed) ||
+    typeof intent.createdAt !== 'string' ||
+    !Number.isFinite(Date.parse(intent.createdAt)) ||
+    typeof intent.expiresAt !== 'string' ||
+    !Number.isFinite(Date.parse(intent.expiresAt))
+  ) {
+    return undefined;
+  }
+  if (intent.checkoutRequestId !== undefined && (
+    typeof intent.checkoutRequestId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(intent.checkoutRequestId)
+  )) return undefined;
+  if (intent.merchantRequestId !== undefined && (
+    typeof intent.merchantRequestId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(intent.merchantRequestId)
+  )) return undefined;
+
+  return intent as MpesaCallbackIntent;
+}
+
+function transactionFromMpesaIntent(
+  intent: MpesaCallbackIntent,
+  checkoutRequestId: string,
+  merchantRequestId: string
+): PaymentTransaction {
+  return {
+    id: `tx_mpesa_${crypto.createHash('sha256').update(checkoutRequestId).digest('hex').slice(0, 24)}`,
+    checkoutRequestId,
+    merchantRequestId,
+    articleId: intent.articleId,
+    articleTitle: intent.articleTitle,
+    phoneNumber: intent.phoneNumber,
+    amount: intent.amount,
+    currency: intent.currency,
+    originalAmount: intent.originalAmount,
+    exchangeRate: intent.exchangeRate,
+    exchangeRateTimestamp: intent.exchangeRateTimestamp,
+    paymentMethod: 'mpesa',
+    type: intent.type,
+    status: 'PENDING',
+    createdAt: intent.createdAt,
+    affiliateCode: intent.affiliateCode,
+    campaignCode: intent.campaignCode,
+    shortcodeUsed: intent.shortcodeUsed,
+    paymentCapabilityHash: intent.paymentCapabilityHash,
+    callbackCapabilityHash: intent.callbackCapabilityHash,
+    userId: intent.userId,
+    userEmail: intent.userEmail
+  };
+}
+
 function isSafeLegacyReaderLicenseToken(token: string): boolean {
   if (token.length > 160) return false;
   return [
@@ -382,6 +498,10 @@ function rememberMissingAuthSession(documentId: string, now = Date.now()) {
 
 function paymentReceiptLookupId(receiptNumber: string): string {
   return crypto.createHash('sha256').update(receiptNumber.trim().toUpperCase()).digest('hex');
+}
+
+function affiliateCommissionOutboxId(checkoutRequestId: string): string {
+  return crypto.createHash('sha256').update(checkoutRequestId).digest('hex');
 }
 
 type MpesaSettlementResult = {
@@ -449,6 +569,57 @@ async function hydrateTransactionsOnce(): Promise<void> {
   } finally {
     // A failed read remains retryable; success is tracked separately above.
     transactionsHydrationPromise = null;
+  }
+}
+
+async function hydrateReaderLicensesOnce(): Promise<void> {
+  if (readerLicensesHydrated) return;
+  if (readerLicensesHydrationPromise) return readerLicensesHydrationPromise;
+
+  readerLicensesHydrationPromise = (async () => {
+    const firestoreLicenses = await getAllFirestoreDocs<CachedReaderLicense>('reader_licenses');
+    const mergedLicenses = new Map<string, CachedReaderLicense>();
+    const verifiedAt = Date.now();
+
+    for (const value of firestoreLicenses || []) {
+      const token = typeof value?.token === 'string' ? value.token : '';
+      const license = token ? normalizeStoredReaderLicense(token, value) : undefined;
+      if (license) mergedLicenses.set(token, license);
+    }
+
+    // JSON is a local-development recovery path only. A bundled deployment
+    // file must never repopulate an intentionally empty production database.
+    if (!process.env.VERCEL && mergedLicenses.size === 0 && fs.existsSync(TOKENS_FILE)) {
+      const raw = fs.readFileSync(TOKENS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [token, value] of Object.entries(parsed)) {
+          const license = normalizeStoredReaderLicense(token, value as CachedReaderLicense);
+          if (!license) continue;
+          mergedLicenses.set(token, license);
+          setFirestoreDoc('reader_licenses', token, { token, ...license }).catch(() => {});
+        }
+      }
+    }
+
+    // Preserve a license written or directly loaded while the collection read
+    // was in flight. The live local value is always newer than the snapshot.
+    for (const [token, license] of cachedTokens) mergedLicenses.set(token, license);
+
+    cachedTokens = mergedLicenses;
+    cachedReaderLicenseVerifiedAt.clear();
+    for (const token of cachedTokens.keys()) cachedReaderLicenseVerifiedAt.set(token, verifiedAt);
+    missingReaderLicenses.clear();
+    writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
+    readerLicensesHydrated = true;
+    console.log(`[Data Store] Reader licenses hydrated on demand (${cachedTokens.size} licenses).`);
+  })();
+
+  try {
+    await readerLicensesHydrationPromise;
+  } finally {
+    // A failed read stays retryable.
+    readerLicensesHydrationPromise = null;
   }
 }
 
@@ -660,7 +831,6 @@ export const store = {
     const startupReads = {
       users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
       articles: captureStartupRead(getAllFirestoreDocs<Article>('articles')),
-      licenses: captureStartupRead(getAllFirestoreDocs<any>('reader_licenses')),
       manualAccess: captureStartupRead(getAllFirestoreDocs<ManualAccessGrant>('manual_access')),
       author: captureStartupRead((async () =>
         (await getFirestoreDoc<AuthorProfile>('site_configs', 'author')) ||
@@ -802,30 +972,25 @@ export const store = {
       console.log('[Data Store] Transaction ledger hydration deferred until a transaction-dependent request.');
     }
 
-    // 3. Load or Seed Reader Tokens / Licenses
-    try {
-      const fsLicenses = await useStartupRead(startupReads.licenses);
-      if (fsLicenses && fsLicenses.length > 0) {
-        cachedTokens.clear();
-        for (const lic of fsLicenses) {
-          if (lic.token) {
-            cachedTokens.set(lic.token, lic);
-          }
-        }
-        writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
-      } else if (fs.existsSync(TOKENS_FILE)) {
-        const raw = fs.readFileSync(TOKENS_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        cachedTokens.clear();
-        if (parsed && typeof parsed === 'object') {
-          for (const [key, val] of Object.entries(parsed)) {
-            cachedTokens.set(key, val as any);
-            setFirestoreDoc('reader_licenses', key, { token: key, ...(val as any) }).catch(() => {});
-          }
-        }
+    // 3. Reader licenses are bearer-addressable and are loaded by one-document
+    // lookup on public requests. Defer the full collection scan on Vercel so a
+    // cold start does not consume one read for every historical purchase.
+    cachedTokens.clear();
+    cachedReaderLicenseVerifiedAt.clear();
+    missingReaderLicenses.clear();
+    readerLicenseLookupPromises.clear();
+    readerLicensesHydrated = false;
+    readerLicensesHydrationPromise = null;
+    const eagerReaderLicenseBootstrap = !process.env.VERCEL ||
+      process.env.EAGER_READER_LICENSE_BOOTSTRAP?.trim().toLowerCase() === 'true';
+    if (eagerReaderLicenseBootstrap) {
+      try {
+        await hydrateReaderLicensesOnce();
+      } catch (err) {
+        console.warn('[Data Store] Error loading reader licenses from Firestore:', err);
       }
-    } catch (err) {
-      console.warn('[Data Store] Error loading tokens from Firestore:', err);
+    } else {
+      console.log('[Data Store] Reader-license collection hydration deferred until an authorized listing operation.');
     }
 
     // 3b. Load Revisions
@@ -1385,6 +1550,10 @@ export const store = {
     await hydrateTransactionsOnce();
   },
 
+  async ensureReaderLicensesHydrated(): Promise<void> {
+    await hydrateReaderLicensesOnce();
+  },
+
   getTransactions(filter?: { type?: string; status?: string; includeSeeds?: boolean }): PaymentTransaction[] {
     assertTransactionsHydrated();
     const list = Array.from(cachedTransactions.values()).reverse();
@@ -1425,6 +1594,102 @@ export const store = {
       return undefined;
     }
     return cacheTransaction(transaction);
+  },
+
+  async saveMpesaCallbackIntent(intentValue: MpesaCallbackIntent): Promise<MpesaCallbackIntent> {
+    const intent = normalizeMpesaCallbackIntent(intentValue);
+    if (!intent || Date.parse(intent.expiresAt) <= Date.now()) {
+      throw new Error('The secure payment intent is invalid.');
+    }
+    const batch = getDb().batch();
+    batch.create(getDb().collection('mpesa_callback_intents').doc(intent.callbackCapabilityHash), sanitizeForFirestore(intent));
+    batch.create(getDb().collection('mpesa_payment_intents').doc(intent.paymentCapabilityHash), sanitizeForFirestore(intent));
+    await batch.commit();
+    return intent;
+  },
+
+  async loadMpesaCallbackIntentByPaymentHash(paymentCapabilityHash: string): Promise<MpesaCallbackIntent | undefined> {
+    if (!/^[a-f0-9]{64}$/.test(paymentCapabilityHash)) return undefined;
+    const snapshot = await getDb().collection('mpesa_payment_intents').doc(paymentCapabilityHash).get();
+    const intent = normalizeMpesaCallbackIntent(snapshot.exists ? snapshot.data() : null);
+    if (
+      !intent ||
+      intent.paymentCapabilityHash !== paymentCapabilityHash ||
+      Date.parse(intent.expiresAt) <= Date.now()
+    ) {
+      return undefined;
+    }
+    return intent;
+  },
+
+  async attachMpesaCallbackIntent(
+    callbackCapabilityHash: string,
+    checkoutRequestId: string,
+    merchantRequestId: string
+  ): Promise<PaymentTransaction | undefined> {
+    if (
+      !/^[a-f0-9]{64}$/.test(callbackCapabilityHash) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(checkoutRequestId) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(merchantRequestId)
+    ) {
+      return undefined;
+    }
+
+    const intentRef = getDb().collection('mpesa_callback_intents').doc(callbackCapabilityHash);
+    const transactionRef = getDb().collection('transactions').doc(checkoutRequestId);
+    const transaction = await getDb().runTransaction(async firestoreTransaction => {
+      const [intentSnapshot, transactionSnapshot] = await Promise.all([
+        firestoreTransaction.get(intentRef),
+        firestoreTransaction.get(transactionRef)
+      ]);
+
+      if (transactionSnapshot.exists) {
+        const existing = transactionSnapshot.data() as PaymentTransaction;
+        if (
+          !isPersistentTransaction(existing) ||
+          existing.checkoutRequestId !== checkoutRequestId ||
+          existing.merchantRequestId !== merchantRequestId ||
+          existing.callbackCapabilityHash !== callbackCapabilityHash
+        ) {
+          throw new Error('The provider correlation IDs conflict with an existing transaction.');
+        }
+        return existing;
+      }
+
+      const intent = normalizeMpesaCallbackIntent(intentSnapshot.exists ? intentSnapshot.data() : null);
+      if (
+        !intent ||
+        intent.callbackCapabilityHash !== callbackCapabilityHash ||
+        Date.parse(intent.expiresAt) <= Date.now() ||
+        (intent.checkoutRequestId && intent.checkoutRequestId !== checkoutRequestId) ||
+        (intent.merchantRequestId && intent.merchantRequestId !== merchantRequestId)
+      ) {
+        return undefined;
+      }
+
+      const attached = transactionFromMpesaIntent(intent, checkoutRequestId, merchantRequestId);
+      firestoreTransaction.set(transactionRef, sanitizeForFirestore(attached), { merge: false });
+      firestoreTransaction.set(intentRef, {
+        checkoutRequestId,
+        merchantRequestId,
+        status: 'ATTACHED',
+        attachedAt: new Date().toISOString()
+      }, { merge: true });
+      return attached;
+    });
+
+    if (!transaction) return undefined;
+    cacheTransaction(transaction);
+    writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    return transaction;
+  },
+
+  async discardMpesaCallbackIntent(callbackCapabilityHash: string, paymentCapabilityHash: string): Promise<void> {
+    if (!/^[a-f0-9]{64}$/.test(callbackCapabilityHash) || !/^[a-f0-9]{64}$/.test(paymentCapabilityHash)) return;
+    const batch = getDb().batch();
+    batch.delete(getDb().collection('mpesa_callback_intents').doc(callbackCapabilityHash));
+    batch.delete(getDb().collection('mpesa_payment_intents').doc(paymentCapabilityHash));
+    await batch.commit();
   },
 
   async findTransactionByReceipt(receiptNumber: string): Promise<PaymentTransaction | undefined> {
@@ -1546,6 +1811,19 @@ export const store = {
         createdAt: now
       }, { merge: true });
 
+      if (current.affiliateCode) {
+        firestoreTransaction.set(
+          getDb().collection('affiliate_commission_outbox').doc(affiliateCommissionOutboxId(current.checkoutRequestId)),
+          {
+            checkoutRequestId: current.checkoutRequestId,
+            status: 'PENDING',
+            createdAt: now,
+            updatedAt: now
+          },
+          { merge: true }
+        );
+      }
+
       if (downloadToken) {
         firestoreTransaction.set(getDb().collection('reader_licenses').doc(downloadToken), sanitizeForFirestore({
           token: downloadToken,
@@ -1561,6 +1839,18 @@ export const store = {
         firestoreTransaction.set(getDb().collection('articles').doc(current.articleId), {
           downloadsCount: FieldValue.increment(1)
         }, { merge: true });
+      }
+
+
+      if (/^[a-f0-9]{64}$/.test(current.callbackCapabilityHash || '')) {
+        firestoreTransaction.delete(
+          getDb().collection('mpesa_callback_intents').doc(current.callbackCapabilityHash as string)
+        );
+      }
+      if (/^[a-f0-9]{64}$/.test(current.paymentCapabilityHash || '')) {
+        firestoreTransaction.delete(
+          getDb().collection('mpesa_payment_intents').doc(current.paymentCapabilityHash as string)
+        );
       }
 
       return { outcome: 'committed' as const, transaction: settled, downloadToken };
@@ -1583,6 +1873,8 @@ export const store = {
           email: result.transaction.userEmail,
           accessSource: 'MPESA_PURCHASE'
         });
+        cachedReaderLicenseVerifiedAt.set(result.downloadToken, Date.now());
+        missingReaderLicenses.delete(result.downloadToken);
         const localTokenRecords = Object.fromEntries(cachedTokens.entries());
         writeJsonFileSync(TOKENS_FILE, localTokenRecords);
 
@@ -1593,13 +1885,28 @@ export const store = {
         }
       }
 
-      if (result.transaction.affiliateCode) {
-        affiliateStore.recordAffiliateSale(
-          result.transaction,
-          result.transaction.affiliateCode,
-          result.transaction.campaignCode
-        );
-      }
+    }
+
+    if (
+      result.transaction?.affiliateCode &&
+      (result.outcome === 'committed' || result.outcome === 'duplicate')
+    ) {
+      const commission = await affiliateStore.recordAffiliateSale(
+        result.transaction,
+        result.transaction.affiliateCode,
+        result.transaction.campaignCode
+      );
+      await setFirestoreDoc(
+        'affiliate_commission_outbox',
+        affiliateCommissionOutboxId(result.transaction.checkoutRequestId),
+        {
+          checkoutRequestId: result.transaction.checkoutRequestId,
+          status: commission ? 'COMPLETE' : 'SKIPPED',
+          commissionId: commission?.id,
+          updatedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString()
+        }
+      );
     }
 
     return result;
@@ -1651,6 +1958,16 @@ export const store = {
         updatedAt: new Date().toISOString()
       };
       firestoreTransaction.set(transactionRef, sanitizeForFirestore(failed), { merge: true });
+      if (/^[a-f0-9]{64}$/.test(current.callbackCapabilityHash || '')) {
+        firestoreTransaction.delete(
+          getDb().collection('mpesa_callback_intents').doc(current.callbackCapabilityHash as string)
+        );
+      }
+      if (/^[a-f0-9]{64}$/.test(current.paymentCapabilityHash || '')) {
+        firestoreTransaction.delete(
+          getDb().collection('mpesa_payment_intents').doc(current.paymentCapabilityHash as string)
+        );
+      }
       return { outcome: 'committed' as const, transaction: failed };
     });
 
@@ -1720,7 +2037,7 @@ export const store = {
     if (alreadyConfirmed && (tx.type !== 'PURCHASE' && tx.type !== 'MANUAL' || tx.downloadToken)) {
       if (tx.affiliateCode) {
         try {
-          affiliateStore.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
+          await affiliateStore.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
         } catch (err) {
           console.warn('[Data Store] Error attributing affiliate commission on confirmed tx:', err);
         }
@@ -1767,7 +2084,7 @@ export const store = {
     // If transaction has an associated affiliate, record the commission once
     if (tx.affiliateCode) {
       try {
-        affiliateStore.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
+        await affiliateStore.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
       } catch (err) {
         console.warn('[Data Store] Error attributing affiliate commission:', err);
       }
@@ -1782,27 +2099,55 @@ export const store = {
   },
 
   async loadPurchasedToken(token: string): Promise<CachedReaderLicense | undefined> {
+    if (typeof token !== 'string' || !isSafeLegacyReaderLicenseToken(token)) return undefined;
+
+    const now = Date.now();
     const cached = cachedTokens.get(token);
-    if (cached) return cached;
-    if (!isSafeLegacyReaderLicenseToken(token)) return undefined;
+    const verifiedAt = cachedReaderLicenseVerifiedAt.get(token) || 0;
+    if (cached && now - verifiedAt < READER_LICENSE_CACHE_TTL_MS) return cached;
+
+    const missingUntil = missingReaderLicenses.get(token) || 0;
+    if (missingUntil > now) return undefined;
+    if (missingUntil) missingReaderLicenses.delete(token);
+
+    const inFlight = readerLicenseLookupPromises.get(token);
+    if (inFlight) return inFlight;
 
     // A successful payment can be settled on a different serverless instance.
-    // On a cache miss, look up exactly the bearer-named legacy document. The
-    // stored license remains the authority: no transaction scan or inferred
-    // payment state can unlock content.
-    let stored: CachedReaderLicense | null;
+    // Read exactly the bearer-named legacy document. Positive results are
+    // periodically revalidated so revocation propagates; negative results are
+    // briefly cached to cap repeated fake-token reads on one instance.
+    const lookup = (async (): Promise<CachedReaderLicense | undefined> => {
+      try {
+        const snapshot = await getDb().collection('reader_licenses').doc(token).get();
+        const stored = snapshot.exists ? snapshot.data() as CachedReaderLicense : null;
+        const license = normalizeStoredReaderLicense(token, stored);
+        if (!license) {
+          cachedTokens.delete(token);
+          cachedReaderLicenseVerifiedAt.delete(token);
+          if (missingReaderLicenses.size >= MAX_MISSING_READER_LICENSE_CACHE_ENTRIES) {
+            missingReaderLicenses.clear();
+          }
+          missingReaderLicenses.set(token, Date.now() + MISSING_READER_LICENSE_CACHE_TTL_MS);
+          return undefined;
+        }
+        cachedTokens.set(token, license);
+        cachedReaderLicenseVerifiedAt.set(token, Date.now());
+        missingReaderLicenses.delete(token);
+        return license;
+      } catch {
+        // Never include the legacy bearer (which is also the document ID) in a log.
+        console.error('[Data Store] Reader license lookup is temporarily unavailable.');
+        throw new Error('Reader access is temporarily unavailable.');
+      }
+    })();
+
+    readerLicenseLookupPromises.set(token, lookup);
     try {
-      const snapshot = await getDb().collection('reader_licenses').doc(token).get();
-      stored = snapshot.exists ? snapshot.data() as CachedReaderLicense : null;
-    } catch {
-      // Never include the legacy bearer (which is also the document ID) in a log.
-      console.error('[Data Store] Reader license lookup is temporarily unavailable.');
-      throw new Error('Reader access is temporarily unavailable.');
+      return await lookup;
+    } finally {
+      readerLicenseLookupPromises.delete(token);
     }
-    const license = normalizeStoredReaderLicense(token, stored);
-    if (!license) return undefined;
-    cachedTokens.set(token, license);
-    return license;
   },
 
   async savePurchasedToken(token: string, data: { articleId: string; phone: string; expiresAt: number; receipt?: string; createdAt?: string; userId?: string; email?: string; accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM' }) {
@@ -1813,6 +2158,8 @@ export const store = {
       createdAt: data.createdAt || new Date().toISOString()
     };
     cachedTokens.set(token, record);
+    cachedReaderLicenseVerifiedAt.set(token, Date.now());
+    missingReaderLicenses.delete(token);
     const obj: Record<string, any> = {};
     for (const [k, v] of cachedTokens.entries()) {
       obj[k] = v;
@@ -2038,6 +2385,8 @@ export const store = {
     if (cachedTokens.has(token)) {
       const data = cachedTokens.get(token);
       cachedTokens.delete(token);
+      cachedReaderLicenseVerifiedAt.delete(token);
+      missingReaderLicenses.set(token, Date.now() + MISSING_READER_LICENSE_CACHE_TTL_MS);
       const obj: Record<string, any> = {};
       for (const [k, v] of cachedTokens.entries()) {
         obj[k] = v;
@@ -2153,6 +2502,8 @@ export const store = {
         const tokenData = cachedTokens.get(grant.token);
         if (tokenData && tokenData.accessSource === 'MANUAL_GRANT') {
           cachedTokens.delete(grant.token);
+          cachedReaderLicenseVerifiedAt.delete(grant.token);
+          missingReaderLicenses.set(grant.token, Date.now() + MISSING_READER_LICENSE_CACHE_TTL_MS);
           writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
           deleteFirestoreDoc('reader_licenses', grant.token).catch(() => {});
         }
@@ -2190,6 +2541,8 @@ export const store = {
 
       if (isManualSource && isSamePiece && isSamePhone) {
         cachedTokens.delete(tKey);
+        cachedReaderLicenseVerifiedAt.delete(tKey);
+        missingReaderLicenses.set(tKey, Date.now() + MISSING_READER_LICENSE_CACHE_TTL_MS);
         deleteFirestoreDoc('reader_licenses', tKey).catch(() => {});
         tokensModified = true;
       }
@@ -4418,10 +4771,14 @@ export const store = {
 
     if (archive.tokens && typeof archive.tokens === 'object') {
       cachedTokens.clear();
+      cachedReaderLicenseVerifiedAt.clear();
+      missingReaderLicenses.clear();
       for (const [tokenKey, val] of Object.entries(archive.tokens)) {
         cachedTokens.set(tokenKey, val as any);
+        cachedReaderLicenseVerifiedAt.set(tokenKey, Date.now());
         setFirestoreDoc('reader_licenses', tokenKey, { token: tokenKey, ...(val as any) }).catch(() => {});
       }
+      readerLicensesHydrated = true;
       writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
     }
 

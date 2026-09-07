@@ -26,7 +26,6 @@ export function initReferralTracking(): StoredReferral | null {
     const urlParams = new URLSearchParams(window.location.search);
     const refCode = urlParams.get('ref') || urlParams.get('aff') || urlParams.get('referral');
     const campaign = urlParams.get('c') || urlParams.get('campaign');
-    const clickAlreadyTracked = urlParams.get('iw_ref_tracked') === '1';
 
     if (refCode && refCode.trim()) {
       const cleanCode = refCode.trim().toLowerCase();
@@ -43,10 +42,10 @@ export function initReferralTracking(): StoredReferral | null {
         sessionStorage.setItem(CAMPAIGN_STORAGE_KEY, cleanCampaign);
       }
 
-      // Fire beacon/click registration to backend asynchronously
-      if (!clickAlreadyTracked) {
-        registerClickOnBackend(cleanCode, campaign || undefined);
-      }
+      // The server deduplicates redirect-originated clicks with a short-lived,
+      // HttpOnly signed cookie. Query parameters are never trusted as proof that
+      // a click was already recorded.
+      registerClickOnBackend(cleanCode, campaign || undefined);
 
       return {
         code: cleanCode,
@@ -121,6 +120,7 @@ async function registerClickOnBackend(ref: string, campaign?: string) {
 
     await fetch('/api/affiliate/click', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ref,

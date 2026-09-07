@@ -53,7 +53,7 @@ describe('affiliate referral tracking', () => {
     vi.unstubAllGlobals();
   });
 
-  it('stores redirect attribution but does not submit a duplicate click for iw_ref_tracked=1', () => {
+  it('stores attribution and does not trust a forgeable iw_ref_tracked query marker', () => {
     location.search = '?ref=Partner_7&c=Launch_2026&iw_ref_tracked=1';
 
     const referral = initReferralTracking();
@@ -72,7 +72,17 @@ describe('affiliate referral tracking', () => {
       campaign: 'launch_2026',
       timestamp: 1_800_000_000_000
     });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/affiliate/click', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ref: 'partner_7',
+        articleId: undefined,
+        campaign: 'Launch_2026'
+      })
+    });
   });
 
   it('submits exactly one click for a direct ref link while storing its attribution', () => {
@@ -89,6 +99,7 @@ describe('affiliate referral tracking', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith('/api/affiliate/click', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ref: 'partner_7',
