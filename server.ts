@@ -648,7 +648,7 @@ export async function createApp() {
   });
 
   // Public Get Single Article (with server-side paywall & draft protection)
-  app.get("/api/articles/:id", (req: Request, res: Response) => {
+  app.get("/api/articles/:id", verifyAccessLimiter, async (req: Request, res: Response) => {
     const { id } = req.params;
     const isAdmin = (req as any).user?.role === 'admin';
 
@@ -662,7 +662,12 @@ export async function createApp() {
     let isUnlocked = !isPaid || isAdmin;
 
     if (!isUnlocked && token) {
-      const tokenData = store.getPurchasedToken(token);
+      let tokenData;
+      try {
+        tokenData = await store.loadPurchasedToken(token);
+      } catch {
+        return res.status(503).json({ error: "Reader access is temporarily unavailable. Please retry." });
+      }
       if (tokenData && tokenData.expiresAt > Date.now()) {
         if (tokenData.articleId === article.id || tokenData.articleId === 'all') {
           isUnlocked = true;
@@ -795,7 +800,7 @@ export async function createApp() {
   });
 
   // Affiliate / Referral Redirect Tracking Route
-  app.get("/r/:code", publicWriteLimiter, referralClickLimiter, (req: Request, res: Response) => {
+  app.get(["/r/:code", "/api/affiliate/redirect/:code"], publicWriteLimiter, referralClickLimiter, (req: Request, res: Response) => {
     try {
       const code = (req.params.code || "").trim();
       const rawArticleId = (req.query.article || req.query.articleId || req.query.id || req.query.monograph || "") as string;
@@ -831,6 +836,9 @@ export async function createApp() {
         // Build target redirect URL preserving ref, article, and campaign query parameters
         const params = new URLSearchParams();
         params.set("ref", aff.affiliateCode);
+        // The server already recorded this redirect. The landing page uses this
+        // marker to persist attribution without submitting a duplicate click.
+        params.set("iw_ref_tracked", "1");
         if (articleId) {
           params.set("article", articleId);
         }
@@ -855,7 +863,7 @@ export async function createApp() {
   });
 
   // Verify Download Token for reader access
-  app.get("/api/verify-access", verifyAccessLimiter, (req: Request, res: Response) => {
+  app.get("/api/verify-access", verifyAccessLimiter, async (req: Request, res: Response) => {
     const token = req.query.token as string;
     const articleId = req.query.articleId as string;
 
@@ -863,7 +871,12 @@ export async function createApp() {
       return res.status(401).json({ valid: false, message: "No access token provided." });
     }
 
-    const tokenData = store.getPurchasedToken(token);
+    let tokenData;
+    try {
+      tokenData = await store.loadPurchasedToken(token);
+    } catch {
+      return res.status(503).json({ valid: false, message: "Reader access is temporarily unavailable. Please retry." });
+    }
     if (!tokenData) {
       return res.status(401).json({ valid: false, message: "Invalid or expired access token." });
     }
@@ -965,15 +978,25 @@ export async function createApp() {
       let articleTitle = "Ink & Witness Reader Access";
       let chargeAmount = Number(amount) || 300;
       const type = isTip ? "TIP" : "PURCHASE";
+      let canonicalArticleId = articleId;
 
-      if (articleId && articleId !== "general_tip" && articleId !== "test_stk") {
-        const article = store.getArticleById(articleId, true);
+      if (!isTip) {
+        if (!isSafePublicIdentifier(articleId)) {
+          return res.status(400).json({ error: "A valid published piece is required for purchase." });
+        }
+        const article = store.getArticleById(articleId);
+        if (!article) {
+          return res.status(404).json({ error: "Piece not found or unavailable for purchase." });
+        }
+        canonicalArticleId = article.id;
+        articleTitle = article.title;
+        // Server enforces price for pay-to-read.
+        chargeAmount = article.priceKes || mpesaSettings.defaultPriceKes || 300;
+      } else if (articleId && articleId !== "general_tip") {
+        const article = store.getArticleById(articleId);
         if (article) {
+          canonicalArticleId = article.id;
           articleTitle = article.title;
-          if (!isTip) {
-            // Server enforces price for pay-to-read
-            chargeAmount = article.priceKes || mpesaSettings.defaultPriceKes || 300;
-          }
         }
       }
 
@@ -992,7 +1015,7 @@ export async function createApp() {
         phoneNumber: formattedPhone,
         amount: chargeAmount,
         accountReference: articleTitle,
-        articleId: articleId || (isTip ? "general_tip" : "custom"),
+        articleId: canonicalArticleId || "general_tip",
         articleTitle,
         type,
         currency: currency || "KES",
@@ -1158,39 +1181,70 @@ export async function createApp() {
 
   // Query transaction status (Universal: M-Pesa or Bank)
   app.get(["/api/mpesa/query/:checkoutRequestId", "/api/mpesa/status/:checkoutRequestId"], paymentStatusLimiter, async (req: Request, res: Response) => {
-    const { checkoutRequestId } = req.params;
-    const existing = await store.loadTransaction(checkoutRequestId);
-    if (!existing || !verifyPaymentCapability(getPaymentCapability(req), existing.paymentCapabilityHash)) {
-      return res.status(404).json({ error: "Transaction not found." });
+    try {
+      const { checkoutRequestId } = req.params;
+      const paymentCapability = getPaymentCapability(req);
+      if (
+        !isSafePublicIdentifier(checkoutRequestId, 256) ||
+        typeof paymentCapability !== 'string' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(paymentCapability)
+      ) {
+        return res.status(404).json({ error: "Transaction not found." });
+      }
+      const existing = await store.refreshTransaction(checkoutRequestId);
+      if (!existing || !verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
+        return res.status(404).json({ error: "Transaction not found." });
+      }
+      const result = await queryPaymentStatus(checkoutRequestId);
+      const tx = await store.loadTransaction(checkoutRequestId) || existing;
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(toPublicPaymentStatus(tx, result));
+    } catch {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(503).json({ error: "Payment confirmation is temporarily unavailable. Please retry." });
     }
-    const result = await queryPaymentStatus(checkoutRequestId);
-    const tx = await store.loadTransaction(checkoutRequestId) || existing;
-    res.setHeader('Cache-Control', 'no-store');
-    res.json(toPublicPaymentStatus(tx, result));
   });
 
   // Universal payment status endpoint
   app.get("/api/payments/status/:id", paymentStatusLimiter, async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const existing = await store.loadTransaction(id);
-    if (!existing || !verifyPaymentCapability(getPaymentCapability(req), existing.paymentCapabilityHash)) {
-      return res.status(404).json({ error: "Transaction not found." });
+    try {
+      const { id } = req.params;
+      const paymentCapability = getPaymentCapability(req);
+      if (
+        !isSafePublicIdentifier(id, 256) ||
+        typeof paymentCapability !== 'string' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(paymentCapability)
+      ) {
+        return res.status(404).json({ error: "Transaction not found." });
+      }
+      const existing = await store.refreshTransaction(id);
+      if (!existing || !verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
+        return res.status(404).json({ error: "Transaction not found." });
+      }
+      const result = await queryPaymentStatus(id);
+      const tx = await store.loadTransaction(id) || existing;
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(toPublicPaymentStatus(tx, result));
+    } catch {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(503).json({ error: "Payment confirmation is temporarily unavailable. Please retry." });
     }
-    const result = await queryPaymentStatus(id);
-    const tx = await store.loadTransaction(id) || existing;
-    res.setHeader('Cache-Control', 'no-store');
-    res.json(toPublicPaymentStatus(tx, result));
   });
 
   // Safaricom Webhook Callback (Authoritative source of truth for payments)
   app.post("/api/mpesa/callback", async (req: Request, res: Response) => {
-    const callbackCapability = req.query[PAYMENT_CALLBACK_QUERY_PARAMETER];
-    const responsePayload = await handleDarajaCallback(req.body, callbackCapability);
-    if (responsePayload.outcome === 'retryable_error') {
+    try {
+      const callbackCapability = req.query[PAYMENT_CALLBACK_QUERY_PARAMETER];
+      const responsePayload = await handleDarajaCallback(req.body, callbackCapability);
+      if (responsePayload.outcome === 'retryable_error') {
+        return res.status(503).json({ ResultCode: 1, ResultDesc: 'Retry' });
+      }
+      // Do not reveal transaction existence or validation details at the public edge.
+      return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    } catch {
+      // An unexpected application failure must not permanently discard a paid callback.
       return res.status(503).json({ ResultCode: 1, ResultDesc: 'Retry' });
     }
-    // Do not reveal transaction existence or validation details at the public edge.
-    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
   });
 
   // Public Interaction Analytics Tracking

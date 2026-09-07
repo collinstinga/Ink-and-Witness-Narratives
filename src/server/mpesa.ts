@@ -116,8 +116,19 @@ export function resolveDarajaCallbackUrl(value: string): string {
   if (callback.username || callback.password) {
     throw new Error('The M-Pesa callback URL must not contain credentials.');
   }
+  // The apex site redirects to www. Daraja callbacks must target the final
+  // application host directly because a redirect can discard the callback.
+  if (callback.hostname.toLowerCase() === 'inkandwitness-narratives.co.ke') {
+    callback.hostname = 'www.inkandwitness-narratives.co.ke';
+  }
   if (!callback.pathname || callback.pathname === '/') {
     callback.pathname = '/api/mpesa/callback';
+  }
+  if (callback.pathname !== '/api/mpesa/callback') {
+    throw new Error('The M-Pesa callback URL must use the /api/mpesa/callback endpoint.');
+  }
+  if (callback.search) {
+    throw new Error('The configured M-Pesa callback URL must not contain query parameters.');
   }
   callback.hash = '';
   return callback.toString();
@@ -686,8 +697,13 @@ export async function handleDarajaCallback(
 
   try {
     const tx = await store.loadTransaction(parsed.checkoutRequestId);
+    if (!tx) {
+      // The provider can beat the transaction write or Firestore visibility.
+      // Ask Daraja to retry instead of permanently acknowledging a paid event.
+      console.warn('[M-PESA CALLBACK RETRYABLE] Correlated transaction is not available yet.');
+      return { success: false, outcome: 'retryable_error', message: 'Callback could not be persisted.' };
+    }
     if (
-      !tx ||
       tx.paymentMethod !== 'mpesa' ||
       (tx.type !== 'PURCHASE' && tx.type !== 'TIP') ||
       !tx.merchantRequestId ||

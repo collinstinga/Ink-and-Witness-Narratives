@@ -41,6 +41,10 @@
   ],
   "rewrites": [
     {
+      "source": "/r/:code",
+      "destination": "/api/index?path=affiliate/redirect/:code"
+    },
+    {
       "source": "/api/:path*",
       "destination": "/api/index?path=:path*"
     },

@@ -45,9 +45,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   const [paymentCapability, setPaymentCapability] = useState('');
   const [mpesaReceipt, setMpesaReceipt] = useState('');
   const [downloadToken, setDownloadToken] = useState('');
-  const [copiedTill, setCopiedTill] = useState(false);
   const [isManualChecking, setIsManualChecking] = useState(false);
-  const [showManualTillGuide, setShowManualTillGuide] = useState(false);
 
   // Time remaining for prompt validity (45 seconds for Safaricom STK Push)
   const [secondsRemaining, setSecondsRemaining] = useState(45);
@@ -87,8 +85,6 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       setPaymentCapability('');
       setErrorMessage('');
       setLoading(false);
-      setCopiedTill(false);
-      setShowManualTillGuide(false);
       setSecondsRemaining(45);
       setManualReceiptInput('');
       setManualReceiptError('');
@@ -101,8 +97,6 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   }, [isOpen, article]);
 
   const basePriceKes = article?.priceKes || mpesaConfig.defaultPriceKes || 1050;
-  const currentTillNumber = mpesaConfig.tillNumber || '';
-  const currentTillName = mpesaConfig.tillName || 'Ink & Witness / Jake';
 
   const triggerSuccessNotification = () => {
     confetti({
@@ -205,13 +199,6 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   }, [step, checkoutRequestId, paymentCapability, article, phoneNumber, onClose, onPaymentSuccess]);
 
   if (!isOpen || !article) return null;
-
-  const handleCopyTillNumber = () => {
-    if (!currentTillNumber) return;
-    navigator.clipboard.writeText(currentTillNumber);
-    setCopiedTill(true);
-    setTimeout(() => setCopiedTill(false), 2000);
-  };
 
   // 1. Initiate Real STK Push via backend -> LIVE Daraja
   const handleInitiateSTK = async (e?: React.FormEvent) => {
@@ -452,39 +439,6 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
                 </div>
               </form>
 
-              {/* Manual Till Backup Info Toggle */}
-              <div className="pt-3 border-t border-slate-800/80">
-                <button
-                  type="button"
-                  onClick={() => setShowManualTillGuide(!showManualTillGuide)}
-                  className="w-full text-left text-[11px] font-mono text-slate-500 hover:text-slate-400 flex items-center justify-between cursor-pointer py-1"
-                >
-                  <span>Manual Buy Goods / Till fallback details</span>
-                  <span>{showManualTillGuide ? '▲ Hide' : '▼ View Till No'}</span>
-                </button>
-
-                {showManualTillGuide && (
-                  <div className="mt-2 p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Buy Goods Till:</span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-emerald-400 font-bold">{currentTillNumber}</span>
-                        <button
-                          type="button"
-                          onClick={handleCopyTillNumber}
-                          className="px-2 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white cursor-pointer"
-                        >
-                          {copiedTill ? 'Copied!' : 'Copy'}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-500">Till Name:</span>
-                      <span className="text-slate-300">{currentTillName}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
             </div>
           )}
 
@@ -721,30 +675,6 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
                   <p className="text-xs text-slate-300 mt-1">
                     {errorMessage || 'The payment prompt was cancelled or could not be completed.'}
                   </p>
-                </div>
-
-                <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 text-xs font-mono text-left space-y-2">
-                  <div className="text-slate-400 text-[11px]">
-                    Alternative: Pay manually via M-Pesa Buy Goods Till:
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-300">Till Number:</span>
-                    <div className="flex items-center gap-2">
-                        <span className="text-emerald-400 font-bold">{currentTillNumber || 'Not configured'}</span>
-                      <button
-                        type="button"
-                        onClick={handleCopyTillNumber}
-                          disabled={!currentTillNumber}
-                          className="px-2 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300 hover:text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {copiedTill ? 'Copied!' : 'Copy'}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-slate-500">Till Name:</span>
-                    <span className="text-slate-300">{currentTillName}</span>
-                  </div>
                 </div>
 
                 <div className="flex flex-col sm:flex-row gap-2">

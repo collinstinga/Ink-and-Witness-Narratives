@@ -107,7 +107,18 @@ let cachedTopics: Topic[] = [];
 let cachedTransactions: Map<string, PaymentTransaction> = new Map();
 let transactionsHydrated = false;
 let transactionsHydrationPromise: Promise<void> | null = null;
-let cachedTokens: Map<string, { articleId: string; phone: string; expiresAt: number; receipt?: string; createdAt?: string; userId?: string; email?: string; accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM' }> = new Map();
+type CachedReaderLicense = {
+  articleId: string;
+  phone: string;
+  expiresAt: number;
+  receipt?: string;
+  createdAt?: string;
+  userId?: string;
+  email?: string;
+  accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+  token?: string;
+};
+let cachedTokens: Map<string, CachedReaderLicense> = new Map();
 let cachedManualAccess: Map<string, ManualAccessGrant> = new Map();
 let cachedRevisions: Map<string, ArticleRevision[]> = new Map();
 let cachedAuthor: AuthorProfile = { ...JAKE_PROFILE };
@@ -326,6 +337,35 @@ function cacheTransaction(tx: PaymentTransaction): PaymentTransaction {
   const key = transactionCacheKey(tx);
   if (key && isPersistentTransaction(tx)) cachedTransactions.set(key, tx);
   return tx;
+}
+
+function isSafeLegacyReaderLicenseToken(token: string): boolean {
+  if (token.length > 160) return false;
+  return [
+    /^ink_[0-9]{10,16}_[a-f0-9]{64}$/,
+    /^ink_grant_[A-Za-z0-9._:-]{8,150}$/,
+    /^ink_manual_[A-Za-z0-9._:-]{8,128}$/,
+    /^ink_mpesa_[A-Za-z0-9._:-]{8,128}$/,
+    /^ink_seed_token_[0-9]{2}$/
+  ].some(pattern => pattern.test(token));
+}
+
+function normalizeStoredReaderLicense(
+  token: string,
+  value: CachedReaderLicense | null
+): CachedReaderLicense | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  if (value.token !== undefined && value.token !== token) return undefined;
+  if (typeof value.articleId !== 'string' || value.articleId.length === 0 || value.articleId.length > 128) {
+    return undefined;
+  }
+  if (!Number.isFinite(value.expiresAt) || value.expiresAt <= 0) return undefined;
+  if (value.phone !== undefined && typeof value.phone !== 'string') return undefined;
+
+  return {
+    ...value,
+    phone: value.phone || ''
+  };
 }
 
 function persistAuthSessionCache() {
@@ -1372,6 +1412,21 @@ export const store = {
     return cacheTransaction(transaction);
   },
 
+  async refreshTransaction(checkoutRequestId: string): Promise<PaymentTransaction | undefined> {
+    // Public payment polling must observe a callback committed by another
+    // serverless instance. Read only this checkout document; never hydrate the
+    // transaction collection or trust an indefinitely cached PENDING value.
+    const transaction = await getFirestoreDoc<PaymentTransaction>('transactions', checkoutRequestId);
+    if (
+      !transaction ||
+      !isPersistentTransaction(transaction) ||
+      transaction.checkoutRequestId !== checkoutRequestId
+    ) {
+      return undefined;
+    }
+    return cacheTransaction(transaction);
+  },
+
   async findTransactionByReceipt(receiptNumber: string): Promise<PaymentTransaction | undefined> {
     const cleanReceipt = receiptNumber.trim().toUpperCase();
     if (!cleanReceipt) return undefined;
@@ -1724,6 +1779,30 @@ export const store = {
   // PURCHASE TOKENS & READER LICENSES
   getPurchasedToken(token: string) {
     return cachedTokens.get(token);
+  },
+
+  async loadPurchasedToken(token: string): Promise<CachedReaderLicense | undefined> {
+    const cached = cachedTokens.get(token);
+    if (cached) return cached;
+    if (!isSafeLegacyReaderLicenseToken(token)) return undefined;
+
+    // A successful payment can be settled on a different serverless instance.
+    // On a cache miss, look up exactly the bearer-named legacy document. The
+    // stored license remains the authority: no transaction scan or inferred
+    // payment state can unlock content.
+    let stored: CachedReaderLicense | null;
+    try {
+      const snapshot = await getDb().collection('reader_licenses').doc(token).get();
+      stored = snapshot.exists ? snapshot.data() as CachedReaderLicense : null;
+    } catch {
+      // Never include the legacy bearer (which is also the document ID) in a log.
+      console.error('[Data Store] Reader license lookup is temporarily unavailable.');
+      throw new Error('Reader access is temporarily unavailable.');
+    }
+    const license = normalizeStoredReaderLicense(token, stored);
+    if (!license) return undefined;
+    cachedTokens.set(token, license);
+    return license;
   },
 
   async savePurchasedToken(token: string, data: { articleId: string; phone: string; expiresAt: number; receipt?: string; createdAt?: string; userId?: string; email?: string; accessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM' }) {

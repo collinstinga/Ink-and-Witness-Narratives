@@ -11,6 +11,8 @@ const storeMocks = vi.hoisted(() => {
   const known = {
     init: vi.fn(async () => undefined),
     loadTransaction: vi.fn(),
+    refreshTransaction: vi.fn(),
+    loadPurchasedToken: vi.fn(),
     findTransactionByReceipt: vi.fn(),
     confirmTransaction: vi.fn(),
     savePurchasedToken: vi.fn(async () => undefined),
@@ -110,6 +112,8 @@ describe('public payment route security', () => {
       passkey: ''
     }));
     storeMocks.loadTransaction.mockResolvedValue({ ...transaction });
+    storeMocks.refreshTransaction.mockResolvedValue({ ...transaction });
+    storeMocks.loadPurchasedToken.mockResolvedValue(undefined);
     storeMocks.findTransactionByReceipt.mockResolvedValue(undefined);
     mpesaMocks.queryPaymentStatus.mockResolvedValue({
       status: 'SUCCESS',
@@ -146,6 +150,72 @@ describe('public payment route security', () => {
     expect(body).not.toHaveProperty('callbackCapabilityHash');
   });
 
+  it('refreshes exactly one transaction before reporting a cross-instance payment confirmation', async () => {
+    const stalePending = {
+      ...transaction,
+      status: 'PENDING',
+      downloadToken: undefined,
+      mpesaReceiptNumber: undefined,
+      receiptNumber: undefined
+    };
+    storeMocks.loadTransaction.mockResolvedValueOnce(stalePending).mockResolvedValueOnce({ ...transaction });
+    storeMocks.refreshTransaction.mockResolvedValueOnce({ ...transaction });
+
+    const response = await fetch(`${baseUrl}/api/payments/status/checkout_123`, {
+      headers: { 'x-payment-capability': paymentCapability }
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ status: 'PAID', downloadToken: 'ink_test_token' });
+    expect(storeMocks.refreshTransaction).toHaveBeenCalledTimes(1);
+    expect(storeMocks.refreshTransaction).toHaveBeenCalledWith('checkout_123');
+    expect(storeMocks.refreshTransaction.mock.invocationCallOrder[0])
+      .toBeLessThan(mpesaMocks.queryPaymentStatus.mock.invocationCallOrder[0]);
+  });
+
+  it('returns a non-cacheable retry response when payment storage is unavailable', async () => {
+    storeMocks.refreshTransaction.mockRejectedValueOnce(new Error('private database detail'));
+
+    const response = await fetch(`${baseUrl}/api/payments/status/checkout_123`, {
+      headers: { 'x-payment-capability': paymentCapability }
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(JSON.stringify(body)).not.toContain('private database detail');
+  });
+
+  it('uses the stored reader license lookup and never unlocks a missing bearer', async () => {
+    const missing = await fetch(`${baseUrl}/api/verify-access?token=ink_missing_token&articleId=article_1`);
+
+    expect(missing.status).toBe(401);
+    expect(storeMocks.loadPurchasedToken).toHaveBeenCalledWith('ink_missing_token');
+
+    storeMocks.loadPurchasedToken.mockResolvedValueOnce({
+      token: 'ink_confirmed_token',
+      articleId: 'article_1',
+      phone: '254700000001',
+      expiresAt: Date.now() + 60_000,
+      receipt: 'SIA1234567'
+    });
+    const confirmed = await fetch(`${baseUrl}/api/verify-access?token=ink_confirmed_token&articleId=article_1`);
+
+    expect(confirmed.status).toBe(200);
+    expect(await confirmed.json()).toMatchObject({ valid: true, receipt: 'SIA1234567' });
+  });
+
+  it('fails closed without exposing storage errors during reader-license lookup', async () => {
+    storeMocks.loadPurchasedToken.mockRejectedValueOnce(new Error('private database detail'));
+
+    const response = await fetch(`${baseUrl}/api/verify-access?token=ink_missing_token&articleId=article_1`);
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(503);
+    expect(JSON.stringify(body)).not.toContain('private database detail');
+  });
+
   it('never self-confirms a pending checkout through receipt recovery', async () => {
     storeMocks.findTransactionByReceipt.mockResolvedValue({
       ...transaction,
@@ -163,6 +233,18 @@ describe('public payment route security', () => {
     expect(response.status).toBe(404);
     expect(storeMocks.confirmTransaction).not.toHaveBeenCalled();
     expect(storeMocks.savePurchasedToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown purchase target before contacting Safaricom', async () => {
+    storeMocks.getArticleById.mockReturnValueOnce(undefined);
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ articleId: 'missing-article', phoneNumber: '0712345678', amount: 300 })
+    });
+
+    expect(response.status).toBe(404);
+    expect(mpesaMocks.initiateStkPush).not.toHaveBeenCalled();
   });
 
   it('requires the paying phone as second proof for confirmed receipt recovery', async () => {

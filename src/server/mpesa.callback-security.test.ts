@@ -89,6 +89,14 @@ describe('Daraja callback security', () => {
     expect(storeMocks.settleMpesaTransaction).not.toHaveBeenCalled();
   });
 
+  it('requests a retry when the provider callback races transaction persistence', async () => {
+    storeMocks.loadTransaction.mockResolvedValueOnce(undefined);
+
+    await expect(handleDarajaCallback(successCallback(), callbackCapability))
+      .resolves.toMatchObject({ success: false, outcome: 'retryable_error' });
+    expect(storeMocks.settleMpesaTransaction).not.toHaveBeenCalled();
+  });
+
   it('rejects merchant, amount, phone, and payment-method mismatches without settlement', async () => {
     storeMocks.loadTransaction
       .mockResolvedValueOnce(pendingTransaction({ merchantRequestId: 'merchant_other' }))

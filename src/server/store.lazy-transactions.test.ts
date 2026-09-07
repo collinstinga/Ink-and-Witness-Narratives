@@ -40,6 +40,16 @@ const dbMocks = vi.hoisted(() => {
     status: 'PENDING',
     createdAt: '2026-01-03T00:00:00.000Z'
   };
+  const directTransactionState: { current: any } = { current: directTransaction };
+
+  const directReaderLicense = {
+    token: `ink_1788782400000_${'a'.repeat(64)}`,
+    articleId: 'article_direct',
+    phone: '254700000001',
+    expiresAt: Date.now() + 60_000,
+    receipt: 'SIA1234567',
+    accessSource: 'MPESA_PURCHASE' as const
+  };
 
   const recentTransaction = {
     id: 'tx_recent',
@@ -62,6 +72,8 @@ const dbMocks = vi.hoisted(() => {
   return {
     remoteTransaction,
     directTransaction,
+    directTransactionState,
+    directReaderLicense,
     recentTransaction,
     recentQueryGet,
     settingsState,
@@ -72,7 +84,10 @@ const dbMocks = vi.hoisted(() => {
     ),
     getFirestoreDoc: vi.fn(async (collectionName: string, docId: string) => {
       if (collectionName === 'transactions' && docId === directTransaction.checkoutRequestId) {
-        return directTransaction;
+        return structuredClone(directTransactionState.current);
+      }
+      if (collectionName === 'reader_licenses' && docId === directReaderLicense.token) {
+        return structuredClone(directReaderLicense);
       }
       if (collectionName === 'site_configs' && docId === 'mpesa_settings') {
         return settingsState.canonical;
@@ -93,8 +108,14 @@ vi.mock('./db.js', () => ({
       set: dbMocks.batchSet,
       commit: dbMocks.batchCommit
     })),
-    collection: vi.fn(() => ({
-      doc: vi.fn((id: string) => ({ id })),
+    collection: vi.fn((collectionName: string) => ({
+      doc: vi.fn((id: string) => ({
+        id,
+        get: vi.fn(async () => {
+          const value = await dbMocks.getFirestoreDoc(collectionName, id);
+          return { exists: Boolean(value), data: () => value };
+        })
+      })),
       where: vi.fn(() => ({
         orderBy: vi.fn(() => ({
           limit: vi.fn(() => ({ get: dbMocks.recentQueryGet }))
@@ -152,6 +173,67 @@ describe('lazy transaction hydration', () => {
     expect(dbMocks.getFirestoreDoc).toHaveBeenCalledWith('transactions', 'checkout_direct');
     expect(dbMocks.getAllFirestoreDocs.mock.calls
       .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
+  });
+
+  it('replaces a stale cached PENDING transaction with one bounded direct read', async () => {
+    const stale = await store.loadTransaction('checkout_direct');
+    expect(stale?.status).toBe('PENDING');
+
+    dbMocks.directTransactionState.current = {
+      ...dbMocks.directTransaction,
+      status: 'CONFIRMED',
+      mpesaReceiptNumber: 'SIA1234567',
+      downloadToken: dbMocks.directReaderLicense.token
+    };
+    const readsBefore = dbMocks.getFirestoreDoc.mock.calls
+      .filter(([collectionName, documentId]) =>
+        collectionName === 'transactions' && documentId === 'checkout_direct'
+      ).length;
+
+    // A normal cache load remains stale, matching a separate polling instance.
+    expect((await store.loadTransaction('checkout_direct'))?.status).toBe('PENDING');
+    const refreshed = await store.refreshTransaction('checkout_direct');
+
+    expect(refreshed).toMatchObject({
+      checkoutRequestId: 'checkout_direct',
+      status: 'CONFIRMED',
+      downloadToken: dbMocks.directReaderLicense.token
+    });
+    const readsAfter = dbMocks.getFirestoreDoc.mock.calls
+      .filter(([collectionName, documentId]) =>
+        collectionName === 'transactions' && documentId === 'checkout_direct'
+      ).length;
+    expect(readsAfter - readsBefore).toBe(1);
+    expect(dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'transactions')).toHaveLength(0);
+  });
+
+  it('direct-loads exactly one stored legacy license on cache miss without a collection scan', async () => {
+    const scansBefore = dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'reader_licenses').length;
+    const readsBefore = dbMocks.getFirestoreDoc.mock.calls
+      .filter(([collectionName]) => collectionName === 'reader_licenses').length;
+
+    const first = await store.loadPurchasedToken(dbMocks.directReaderLicense.token);
+    const second = await store.loadPurchasedToken(dbMocks.directReaderLicense.token);
+
+    expect(first).toMatchObject(dbMocks.directReaderLicense);
+    expect(second).toMatchObject(dbMocks.directReaderLicense);
+    const readsAfter = dbMocks.getFirestoreDoc.mock.calls
+      .filter(([collectionName]) => collectionName === 'reader_licenses').length;
+    const scansAfter = dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'reader_licenses').length;
+    expect(readsAfter - readsBefore).toBe(1);
+    expect(scansAfter).toBe(scansBefore);
+  });
+
+  it('rejects an unsafe or mismatched legacy license without unlocking', async () => {
+    const readsBefore = dbMocks.getFirestoreDoc.mock.calls.length;
+
+    await expect(store.loadPurchasedToken('invalid/token')).resolves.toBeUndefined();
+    await expect(store.loadPurchasedToken(`ink_1788782400001_${'b'.repeat(64)}`)).resolves.toBeUndefined();
+
+    expect(dbMocks.getFirestoreDoc.mock.calls.length - readsBefore).toBe(1);
   });
 
   it('checks only recent transaction documents for duplicate STK requests', async () => {

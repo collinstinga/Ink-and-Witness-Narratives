@@ -32,10 +32,16 @@ describe('M-Pesa request helpers', () => {
       .toBe('https://www.inkandwitness-narratives.co.ke/api/mpesa/callback');
     expect(resolveDarajaCallbackUrl('https://www.inkandwitness-narratives.co.ke/api/mpesa/callback'))
       .toBe('https://www.inkandwitness-narratives.co.ke/api/mpesa/callback');
+    expect(resolveDarajaCallbackUrl('https://inkandwitness-narratives.co.ke/api/mpesa/callback'))
+      .toBe('https://www.inkandwitness-narratives.co.ke/api/mpesa/callback');
   });
 
   it('rejects insecure callback URLs', () => {
     expect(() => resolveDarajaCallbackUrl('http://example.com/callback')).toThrow(/HTTPS/);
+    expect(() => resolveDarajaCallbackUrl('https://www.inkandwitness-narratives.co.ke/wrong-path'))
+      .toThrow(/\/api\/mpesa\/callback/);
+    expect(() => resolveDarajaCallbackUrl('https://www.inkandwitness-narratives.co.ke/api/mpesa/callback?source=dashboard'))
+      .toThrow(/query parameters/);
   });
 
   it('distinguishes terminal merchant configuration errors from temporary transaction lookup delays', () => {
