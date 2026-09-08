@@ -531,6 +531,8 @@ export interface PaymentTransaction {
   isSeed?: boolean; // Distinguish seed demo records from real earnings
   affiliateCode?: string;
   campaignCode?: string;
+  affiliateAttributionAt?: string;
+  affiliateAttributionExpiresAt?: string;
   shortcodeUsed?: string;
   paymentCapabilityHash?: string;
   callbackCapabilityHash?: string;

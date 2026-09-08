@@ -43,6 +43,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
   const [errorMessage, setErrorMessage] = useState('');
   const [checkoutRequestId, setCheckoutRequestId] = useState('');
   const [paymentCapability, setPaymentCapability] = useState('');
+  const [merchantRequestId, setMerchantRequestId] = useState('');
   const [mpesaReceipt, setMpesaReceipt] = useState('');
   const [downloadToken, setDownloadToken] = useState('');
   const [isManualChecking, setIsManualChecking] = useState(false);
@@ -83,6 +84,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       setStep('INPUT');
       setCheckoutRequestId('');
       setPaymentCapability('');
+      setMerchantRequestId('');
       setErrorMessage('');
       setLoading(false);
       setSecondsRemaining(45);
@@ -137,7 +139,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       if (!article || !isSubscribed || !checkoutRequestId) return;
 
       try {
-        const status = await api.getPaymentStatus(checkoutRequestId, paymentCapability);
+        const status = await api.getPaymentStatus(checkoutRequestId, paymentCapability, merchantRequestId || undefined);
         if (!isSubscribed) return;
 
         const isSuccess = status.status === 'SUCCESS' || status.status === 'CONFIRMED' || status.status === 'PAID';
@@ -196,7 +198,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     };
-  }, [step, checkoutRequestId, paymentCapability, article, phoneNumber, onClose, onPaymentSuccess]);
+  }, [step, checkoutRequestId, paymentCapability, merchantRequestId, article, phoneNumber, onClose, onPaymentSuccess]);
 
   if (!isOpen || !article) return null;
 
@@ -221,11 +223,13 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       }
       setCheckoutRequestId(res.checkoutRequestId);
       setPaymentCapability(res.paymentCapability);
+      setMerchantRequestId(res.merchantRequestId || '');
       setSecondsRemaining(45);
       setStep('AWAITING_PIN');
     } catch (err: any) {
       setCheckoutRequestId('');
       setPaymentCapability('');
+      setMerchantRequestId('');
       setErrorMessage(err.message || 'Failed to initiate M-Pesa STK Push. Please verify your phone number and try again.');
       setStep('INPUT');
     } finally {
@@ -239,7 +243,7 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
     try {
       setIsManualChecking(true);
       setErrorMessage('');
-      const status = await api.getPaymentStatus(checkoutRequestId, paymentCapability);
+      const status = await api.getPaymentStatus(checkoutRequestId, paymentCapability, merchantRequestId || undefined);
       const isSuccess = status.status === 'SUCCESS' || status.status === 'CONFIRMED' || status.status === 'PAID';
       
       if (isSuccess) {

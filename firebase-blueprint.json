@@ -121,6 +121,8 @@
         "bankOrderReference": { "type": "string" },
         "affiliateCode": { "type": "string" },
         "campaignCode": { "type": "string" },
+        "affiliateAttributionAt": { "type": "string", "description": "Signed referral issuance time copied into the checkout ledger" },
+        "affiliateAttributionExpiresAt": { "type": "string", "description": "Signed referral expiry copied into the checkout ledger" },
         "shortcodeUsed": { "type": "string" },
         "paymentCapabilityHash": { "type": "string", "description": "Server-only SHA-256 hash of the browser payment-status capability" },
         "callbackCapabilityHash": { "type": "string", "description": "Server-only SHA-256 hash of the per-request Daraja callback URL capability" },
@@ -131,6 +133,70 @@
         "downloadToken": { "type": "string" }
       },
       "required": ["id", "checkoutRequestId", "articleId", "amount", "type", "status", "createdAt"]
+    },
+    "MpesaCallbackIntent": {
+      "title": "MpesaCallbackIntent",
+      "description": "Short-lived, server-only pre-Daraja recovery record containing only hashed browser and callback capabilities",
+      "type": "object",
+      "properties": {
+        "version": { "type": "number", "enum": [1] },
+        "callbackCapabilityHash": { "type": "string" },
+        "paymentCapabilityHash": { "type": "string" },
+        "requestLockId": { "type": "string" },
+        "articleId": { "type": "string" },
+        "articleTitle": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "originalAmount": { "type": "number" },
+        "exchangeRate": { "type": "number" },
+        "exchangeRateTimestamp": { "type": "string" },
+        "type": { "type": "string", "enum": ["PURCHASE", "TIP"] },
+        "affiliateCode": { "type": "string" },
+        "campaignCode": { "type": "string" },
+        "affiliateAttributionAt": { "type": "string" },
+        "affiliateAttributionExpiresAt": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "shortcodeUsed": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" },
+        "checkoutRequestId": { "type": "string" },
+        "merchantRequestId": { "type": "string" },
+        "status": { "type": "string", "enum": ["PREPARED", "ATTACHED"] },
+        "attachedAt": { "type": "string" }
+      },
+      "required": ["version", "callbackCapabilityHash", "paymentCapabilityHash", "requestLockId", "articleId", "phoneNumber", "amount", "type", "createdAt", "expiresAt", "status"]
+    },
+    "MpesaRequestLock": {
+      "title": "MpesaRequestLock",
+      "description": "Short duplicate-suppression lock keyed by a one-way hash of piece and phone",
+      "type": "object",
+      "properties": {
+        "version": { "type": "number", "enum": [1] },
+        "requestLockId": { "type": "string" },
+        "callbackCapabilityHash": { "type": "string" },
+        "paymentCapabilityHash": { "type": "string" },
+        "articleId": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["version", "requestLockId", "callbackCapabilityHash", "paymentCapabilityHash", "articleId", "phoneNumber", "createdAt", "expiresAt"]
+    },
+    "AffiliateCommissionOutboxEntry": {
+      "title": "AffiliateCommissionOutboxEntry",
+      "description": "Durable retry marker coupling a confirmed checkout to one deterministic affiliate commission",
+      "type": "object",
+      "properties": {
+        "checkoutRequestId": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "COMPLETE", "SKIPPED"] },
+        "commissionId": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "completedAt": { "type": "string" }
+      },
+      "required": ["checkoutRequestId", "status", "updatedAt"]
     },
     "ReaderLicense": {
       "title": "ReaderLicense",
@@ -143,7 +209,10 @@
         "receipt": { "type": "string" },
         "createdAt": { "type": "string" },
         "expiresAt": { "type": "number" },
-        "verified": { "type": "boolean" }
+        "verified": { "type": "boolean" },
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "accessSource": { "type": "string", "enum": ["MPESA_PURCHASE", "MANUAL_GRANT", "SYSTEM"] }
       },
       "required": ["token", "articleId", "phone"]
     },
@@ -336,6 +405,22 @@
     "/transactions/{transactionId}": {
       "schema": "PaymentTransaction",
       "description": "M-Pesa payment transactions and receipts"
+    },
+    "/mpesa_callback_intents/{callbackCapabilityHash}": {
+      "schema": "MpesaCallbackIntent",
+      "description": "Pre-provider recovery intent keyed by a callback capability hash"
+    },
+    "/mpesa_payment_intents/{paymentCapabilityHash}": {
+      "schema": "MpesaCallbackIntent",
+      "description": "Mirrored recovery intent keyed by a browser payment capability hash"
+    },
+    "/mpesa_request_locks/{requestLockId}": {
+      "schema": "MpesaRequestLock",
+      "description": "Two-minute duplicate M-Pesa request lock"
+    },
+    "/affiliate_commission_outbox/{checkoutRequestHash}": {
+      "schema": "AffiliateCommissionOutboxEntry",
+      "description": "Durable commission reconciliation marker keyed by a checkout hash"
     },
     "/reader_licenses/{token}": {
       "schema": "ReaderLicense",

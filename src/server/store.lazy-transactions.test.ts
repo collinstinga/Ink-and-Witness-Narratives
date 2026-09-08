@@ -237,6 +237,9 @@ describe('lazy transaction hydration', () => {
   });
 
   it('checks only recent transaction documents for duplicate STK requests', async () => {
+    // Keep this fixture fresh even when parallel test imports take longer than
+    // the 45-second duplicate-payment window.
+    dbMocks.recentTransaction.createdAt = new Date().toISOString();
     const transaction = await store.findRecentPendingTransaction(
       dbMocks.recentTransaction.articleId,
       dbMocks.recentTransaction.phoneNumber,

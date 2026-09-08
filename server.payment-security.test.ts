@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 vi.hoisted(() => {
   process.env.VERCEL = '1';
   process.env.NODE_ENV = 'test';
+  process.env.SESSION_SIGNING_SECRET = 'payment-attribution-test-secret-with-32-plus-characters';
 });
 
 const storeMocks = vi.hoisted(() => {
@@ -55,6 +56,7 @@ const mpesaMocks = vi.hoisted(() => ({
 vi.mock('./src/server/mpesa.js', () => mpesaMocks);
 
 import { createApp } from './server.js';
+import { createAffiliateAttributionCookieValue } from './src/server/affiliateAttributionSecurity.js';
 import { generatePaymentCapability, hashPaymentCapability } from './src/server/paymentSecurity.js';
 
 describe('public payment route security', () => {
@@ -122,6 +124,12 @@ describe('public payment route security', () => {
       downloadToken: 'ink_test_token'
     });
     mpesaMocks.handleDarajaCallback.mockResolvedValue({ success: false, outcome: 'rejected', message: 'rejected' });
+    mpesaMocks.initiateStkPush.mockResolvedValue({
+      success: true,
+      checkoutRequestId: 'checkout_new',
+      merchantRequestId: 'merchant_new',
+      paymentCapability
+    });
   });
 
   it('does not expose payment status or download tokens without the capability', async () => {
@@ -245,6 +253,107 @@ describe('public payment route security', () => {
 
     expect(response.status).toBe(404);
     expect(mpesaMocks.initiateStkPush).not.toHaveBeenCalled();
+  });
+
+  it('ignores client-supplied affiliate codes when starting M-Pesa', async () => {
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        articleId: 'article_1',
+        phoneNumber: '0712345678',
+        amount: 300,
+        affiliateCode: 'FORGED_PARTNER',
+        campaignCode: 'FORGED_CAMPAIGN'
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      articleId: 'article_1',
+      affiliateCode: undefined,
+      campaignCode: undefined
+    }));
+  });
+
+  it('uses only a server-signed, piece-matched affiliate attribution for M-Pesa', async () => {
+    const signed = createAffiliateAttributionCookieValue({
+      ref: 'PARTNER_7',
+      campaign: 'LAUNCH_2026',
+      articleId: 'article_1'
+    });
+    expect(signed).toBeTruthy();
+
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({
+        articleId: 'article_1',
+        phoneNumber: '0712345678',
+        amount: 300,
+        affiliateCode: 'FORGED_PARTNER'
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      affiliateCode: 'partner_7',
+      campaignCode: 'launch_2026'
+    }));
+  });
+
+  it('does not reuse a piece-scoped attribution for another piece', async () => {
+    const signed = createAffiliateAttributionCookieValue({
+      ref: 'PARTNER_7',
+      articleId: 'another_piece'
+    });
+
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({ articleId: 'article_1', phoneNumber: '0712345678', amount: 300 })
+    });
+
+    expect(response.status).toBe(200);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      affiliateCode: undefined,
+      campaignCode: undefined
+    }));
+  });
+
+  it('uses signed attribution and ignores forged affiliate fields for bank orders', async () => {
+    const signed = createAffiliateAttributionCookieValue({
+      ref: 'PARTNER_7',
+      campaign: 'LAUNCH_2026',
+      articleId: 'article_1'
+    });
+
+    const response = await fetch(`${baseUrl}/api/payments/bank-order`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({
+        articleId: 'article_1',
+        amount: 300,
+        affiliateCode: 'FORGED_PARTNER',
+        campaignCode: 'FORGED_CAMPAIGN'
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.saveTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      articleId: 'article_1',
+      affiliateCode: 'partner_7',
+      campaignCode: 'launch_2026'
+    }));
   });
 
   it('requires the paying phone as second proof for confirmed receipt recovery', async () => {

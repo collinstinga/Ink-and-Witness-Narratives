@@ -20,6 +20,13 @@ import {
   isMatchingAffiliateClickDedupCookie
 } from "./src/server/affiliateClickDedupSecurity.js";
 import {
+  AFFILIATE_ATTRIBUTION_COOKIE_NAME,
+  AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS,
+  AFFILIATE_ATTRIBUTION_MAX_AGE_MS,
+  createAffiliateAttributionCookieValue,
+  verifyAffiliateAttributionCookie
+} from "./src/server/affiliateAttributionSecurity.js";
+import {
   generateAffiliateTemporaryPassword,
   hashAffiliatePassword,
   rehashVerifiedAffiliatePassword,
@@ -102,6 +109,43 @@ function getPaymentCapability(req: Request): unknown {
   return req.headers['x-payment-capability'];
 }
 
+function getMerchantRequestId(req: Request): string | undefined {
+  const value = req.headers['x-merchant-request-id'];
+  return isSafePublicIdentifier(value, 160) ? value : undefined;
+}
+
+async function resolvePaymentStatusSubject(
+  identifier: string,
+  paymentCapability: string,
+  merchantRequestId?: string
+): Promise<{
+  transaction?: PaymentTransaction;
+  intent?: Awaited<ReturnType<typeof store.loadMpesaCallbackIntentByPaymentHash>>;
+}> {
+  const existing = await store.refreshTransaction(identifier);
+  if (existing) {
+    return verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)
+      ? { transaction: existing }
+      : {};
+  }
+
+  const intent = await store.loadMpesaCallbackIntentByPaymentHash(hashPaymentCapability(paymentCapability));
+  if (!intent || (intent.checkoutRequestId && intent.checkoutRequestId !== identifier)) return {};
+
+  const correlatedMerchantId = intent.merchantRequestId || merchantRequestId;
+  if (correlatedMerchantId && isSafePublicIdentifier(correlatedMerchantId, 160)) {
+    const recovered = await store.attachMpesaCallbackIntent(
+      intent.callbackCapabilityHash,
+      identifier,
+      correlatedMerchantId
+    );
+    if (recovered && verifyPaymentCapability(paymentCapability, recovered.paymentCapabilityHash)) {
+      return { transaction: recovered, intent };
+    }
+  }
+  return { intent };
+}
+
 function toPublicPaymentStatus(
   transaction: PaymentTransaction,
   result: Awaited<ReturnType<typeof queryPaymentStatus>>
@@ -182,6 +226,25 @@ function clearAffiliateClickDedupCookie(res: Response) {
     sameSite: 'lax',
     path: '/api/affiliate/click'
   });
+}
+
+function setAffiliateAttributionCookie(res: Response, cookieValue: string, maxAgeMs: number) {
+  res.cookie(AFFILIATE_ATTRIBUTION_COOKIE_NAME, cookieValue, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: Math.max(1, Math.min(AFFILIATE_ATTRIBUTION_MAX_AGE_MS, maxAgeMs)),
+    path: '/'
+  });
+}
+
+function setVerifiedAffiliateAttribution(
+  res: Response,
+  attribution: { ref: string; articleId?: string; campaign?: string },
+  maxAgeMs = AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS
+) {
+  const cookieValue = createAffiliateAttributionCookieValue(attribution, { maxAgeMs });
+  if (cookieValue) setAffiliateAttributionCookie(res, cookieValue, maxAgeMs);
 }
 
 // Cookie-authenticated state changes must come from this same site. Combined
@@ -704,12 +767,11 @@ export async function createApp() {
     const user = (req as any).user;
     if (!isUnlocked && user) {
       try {
-        await store.ensureReaderLicensesHydrated();
+        if (await store.isArticlePurchasedByUser(article.id, user)) {
+          isUnlocked = true;
+        }
       } catch {
         return res.status(503).json({ error: "Reader access is temporarily unavailable. Please retry." });
-      }
-      if (store.isArticlePurchasedByUser(article.id, user)) {
-        isUnlocked = true;
       }
     }
 
@@ -830,7 +892,13 @@ export async function createApp() {
   });
 
   // Affiliate / Referral Redirect Tracking Route
-  app.get(["/r/:code", "/api/affiliate/redirect/:code"], publicWriteLimiter, referralClickLimiter, (req: Request, res: Response) => {
+  app.get(["/r/:code", "/api/affiliate/redirect/:code"], publicWriteLimiter, referralClickLimiter, async (req: Request, res: Response) => {
+    const fallbackArticleId = isSafePublicIdentifier(
+      req.query.article || req.query.articleId || req.query.id || req.query.monograph || ''
+    ) ? String(req.query.article || req.query.articleId || req.query.id || req.query.monograph) : '';
+    const fallbackLocation = fallbackArticleId
+      ? `/?${new URLSearchParams({ article: fallbackArticleId }).toString()}`
+      : '/';
     try {
       const code = (req.params.code || "").trim();
       const rawArticleId = (req.query.article || req.query.articleId || req.query.id || req.query.monograph || "") as string;
@@ -849,52 +917,45 @@ export async function createApp() {
       const referrer = (req.headers["referer"] || req.headers["referrer"] || "") as string;
       const ipHash = crypto.createHash("sha256").update(ip + userAgent).digest("hex").substring(0, 16);
 
-      // Validate affiliate code
-      const aff = store.affiliates.getAffiliateByCode(code);
+      // The durable click transaction performs the authoritative, fresh affiliate
+      // status check. This remains correct even when the runtime cache is cold.
+      const clickResult = await store.affiliates.registerClick(
+        code,
+        articleId || undefined,
+        campaignCode || undefined,
+        ipHash,
+        userAgent,
+        referrer
+      );
 
-      if (aff && aff.status === "active" && !aff.linksDisabled) {
-        // Record server-side click event and update stats
-        store.affiliates.registerClick(
-          aff.affiliateCode,
-          articleId || undefined,
-          campaignCode || undefined,
-          ipHash,
-          userAgent,
-          referrer
-        );
-
-        const clickDedupCookie = createAffiliateClickDedupCookieValue({
-          ref: aff.affiliateCode,
-          articleId: articleId || undefined,
-          campaign: campaignCode || undefined
-        });
-        if (clickDedupCookie) {
-          setAffiliateClickDedupCookie(res, clickDedupCookie);
-        }
-
-        // Build target redirect URL preserving ref, article, and campaign query parameters
-        const params = new URLSearchParams();
-        params.set("ref", aff.affiliateCode);
-        if (articleId) {
-          params.set("article", articleId);
-        }
-        if (campaignCode) {
-          params.set("c", campaignCode);
-        }
-
-        return res.redirect(302, `/?${params.toString()}`);
+      if (!clickResult.valid || !clickResult.affiliate) {
+        return res.redirect(302, fallbackLocation);
       }
 
-      // If affiliate is invalid, suspended, or links are disabled, gracefully redirect reader to piece or home
-      const fallbackParams = new URLSearchParams();
-      if (articleId) {
-        fallbackParams.set("article", articleId);
-      }
-      const qs = fallbackParams.toString();
-      return res.redirect(302, `/${qs ? `?${qs}` : ""}`);
+      const canonicalAffiliateCode = clickResult.affiliate.affiliateCode || code;
+      const canonicalCampaignCode = clickResult.campaign?.code;
+      const attribution = {
+        ref: canonicalAffiliateCode,
+        articleId: articleId || undefined,
+        campaign: canonicalCampaignCode
+      };
+      const clickDedupCookie = createAffiliateClickDedupCookieValue(attribution);
+      if (clickDedupCookie) setAffiliateClickDedupCookie(res, clickDedupCookie);
+      setVerifiedAffiliateAttribution(
+        res,
+        attribution,
+        clickResult.attributionMaxAgeMs
+      );
+
+      // Build target redirect URL preserving ref, article, and campaign query parameters.
+      const params = new URLSearchParams();
+      params.set("ref", canonicalAffiliateCode);
+      if (articleId) params.set("article", articleId);
+      if (canonicalCampaignCode) params.set("c", canonicalCampaignCode);
+      return res.redirect(302, `/?${params.toString()}`);
     } catch (err) {
       console.warn("[Affiliate Link Route] Error during redirect:", err);
-      return res.redirect(302, "/");
+      return res.redirect(302, fallbackLocation);
     }
   });
 
@@ -995,9 +1056,7 @@ export async function createApp() {
         currency,
         originalAmount,
         exchangeRate,
-        exchangeRateTimestamp,
-        affiliateCode,
-        campaignCode
+        exchangeRateTimestamp
       } = req.body || {};
 
       const rawPhone = phoneNumber || phone || tel || msisdn || phone_number || senderPhone;
@@ -1046,6 +1105,10 @@ export async function createApp() {
       }
 
       const formattedPhone = formatKenyanPhone(rawPhone);
+      const trustedAttribution = verifyAffiliateAttributionCookie(
+        (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
+        canonicalArticleId || "general_tip"
+      );
 
       const stkResult = await initiateStkPush({
         phoneNumber: formattedPhone,
@@ -1058,8 +1121,14 @@ export async function createApp() {
         originalAmount: originalAmount ? Number(originalAmount) : chargeAmount,
         exchangeRate: exchangeRate ? Number(exchangeRate) : (currency === "KES" || !currency ? 1 : undefined),
         exchangeRateTimestamp: exchangeRateTimestamp || new Date().toISOString(),
-        affiliateCode: affiliateCode || undefined,
-        campaignCode: campaignCode || undefined,
+        affiliateCode: trustedAttribution?.ref,
+        campaignCode: trustedAttribution?.campaign,
+        affiliateAttributionAt: trustedAttribution
+          ? new Date(trustedAttribution.issuedAt).toISOString()
+          : undefined,
+        affiliateAttributionExpiresAt: trustedAttribution
+          ? new Date(trustedAttribution.expiresAt).toISOString()
+          : undefined,
         userId: (req as any).user?.id,
         userEmail: (req as any).user?.email,
       });
@@ -1100,22 +1169,24 @@ export async function createApp() {
         email, 
         phoneNumber, 
         currency, 
-        amount,
-        affiliateCode,
-        campaignCode
+        amount
       } = req.body;
       const mpesaSettings = store.getMpesaSettings();
 
-      let articleTitle = "Ink & Witness Monograph Access";
-      let chargeAmount = Number(amount) || mpesaSettings.defaultPriceKes || 300;
-
-      if (articleId && articleId !== "general_tip") {
-        const article = store.getArticleById(articleId, true);
-        if (article) {
-          articleTitle = article.title;
-          chargeAmount = article.priceKes || mpesaSettings.defaultPriceKes || 300;
-        }
+      if (!isSafePublicIdentifier(articleId)) {
+        return res.status(400).json({ error: "A valid published piece is required for purchase." });
       }
+      const article = store.getArticleById(articleId);
+      if (!article) {
+        return res.status(404).json({ error: "Piece not found or unavailable for purchase." });
+      }
+      const canonicalArticleId = article.id;
+      const articleTitle = article.title;
+      const chargeAmount = article.priceKes || mpesaSettings.defaultPriceKes || 300;
+      const trustedAttribution = verifyAffiliateAttributionCookie(
+        (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
+        canonicalArticleId
+      );
 
       const randomSuffix = Math.floor(100000 + Math.random() * 900000).toString();
       const bankRef = `BW-${randomSuffix}`;
@@ -1125,7 +1196,7 @@ export async function createApp() {
       const tx: PaymentTransaction = {
         id: `tx_bank_${Date.now()}`,
         checkoutRequestId,
-        articleId: articleId || "custom",
+        articleId: canonicalArticleId,
         articleTitle,
         phoneNumber: phoneNumber ? maskPhone(phoneNumber) : undefined,
         amount: chargeAmount,
@@ -1139,14 +1210,20 @@ export async function createApp() {
         bankAccountRef: `NCBA Bank Kenya | Acc: 729104819 | Till: ${mpesaSettings.tillNumber || '1618656'}`,
         createdAt: new Date().toISOString(),
         paymentCapabilityHash: hashPaymentCapability(paymentCapability),
-        affiliateCode: affiliateCode || undefined,
-        campaignCode: campaignCode || undefined,
+        affiliateCode: trustedAttribution?.ref,
+        campaignCode: trustedAttribution?.campaign,
+        affiliateAttributionAt: trustedAttribution
+          ? new Date(trustedAttribution.issuedAt).toISOString()
+          : undefined,
+        affiliateAttributionExpiresAt: trustedAttribution
+          ? new Date(trustedAttribution.expiresAt).toISOString()
+          : undefined,
       };
 
       await store.saveTransaction(tx);
 
-      if (affiliateCode) {
-        console.log(`[Attributed Checkout Initiated] Method: Bank Order, Tx ID: ${tx.id}, BankRef: ${bankRef}, Affiliate: ${affiliateCode}, Campaign: ${campaignCode || 'none'}, Amount: KES ${chargeAmount}`);
+      if (trustedAttribution) {
+        console.log(`[Attributed Checkout Initiated] Method: Bank Order, Tx ID: ${tx.id}, BankRef: ${bankRef}, Affiliate: ${trustedAttribution.ref}, Campaign: ${trustedAttribution.campaign || 'none'}, Amount: KES ${chargeAmount}`);
       }
 
       res.setHeader('Cache-Control', 'no-store');
@@ -1227,12 +1304,13 @@ export async function createApp() {
       ) {
         return res.status(404).json({ error: "Transaction not found." });
       }
-      const existing = await store.refreshTransaction(checkoutRequestId);
-      if (!existing) {
-        const intent = await store.loadMpesaCallbackIntentByPaymentHash(hashPaymentCapability(paymentCapability));
-        if (!intent || (intent.checkoutRequestId && intent.checkoutRequestId !== checkoutRequestId)) {
-          return res.status(404).json({ error: "Transaction not found." });
-        }
+      const resolved = await resolvePaymentStatusSubject(
+        checkoutRequestId,
+        paymentCapability,
+        getMerchantRequestId(req)
+      );
+      if (!resolved.transaction && resolved.intent) {
+        const { intent } = resolved;
         res.setHeader('Cache-Control', 'no-store');
         return res.json({
           checkoutRequestId,
@@ -1246,11 +1324,16 @@ export async function createApp() {
           rawStatus: 'PENDING'
         });
       }
-      if (!verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
+      if (!resolved.transaction) {
         return res.status(404).json({ error: "Transaction not found." });
       }
       const result = await queryPaymentStatus(checkoutRequestId);
-      const tx = await store.loadTransaction(checkoutRequestId) || existing;
+      const tx = await store.loadTransaction(checkoutRequestId) || resolved.transaction;
+      try {
+        await store.ensureAffiliateCommissionForTransaction(tx);
+      } catch {
+        console.warn('[Affiliate Commission Outbox] Payment confirmed; commission retry remains pending.');
+      }
       res.setHeader('Cache-Control', 'no-store');
       return res.json(toPublicPaymentStatus(tx, result));
     } catch {
@@ -1271,12 +1354,13 @@ export async function createApp() {
       ) {
         return res.status(404).json({ error: "Transaction not found." });
       }
-      const existing = await store.refreshTransaction(id);
-      if (!existing) {
-        const intent = await store.loadMpesaCallbackIntentByPaymentHash(hashPaymentCapability(paymentCapability));
-        if (!intent || (intent.checkoutRequestId && intent.checkoutRequestId !== id)) {
-          return res.status(404).json({ error: "Transaction not found." });
-        }
+      const resolved = await resolvePaymentStatusSubject(
+        id,
+        paymentCapability,
+        getMerchantRequestId(req)
+      );
+      if (!resolved.transaction && resolved.intent) {
+        const { intent } = resolved;
         res.setHeader('Cache-Control', 'no-store');
         return res.json({
           checkoutRequestId: id,
@@ -1290,11 +1374,16 @@ export async function createApp() {
           rawStatus: 'PENDING'
         });
       }
-      if (!verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)) {
+      if (!resolved.transaction) {
         return res.status(404).json({ error: "Transaction not found." });
       }
       const result = await queryPaymentStatus(id);
-      const tx = await store.loadTransaction(id) || existing;
+      const tx = await store.loadTransaction(id) || resolved.transaction;
+      try {
+        await store.ensureAffiliateCommissionForTransaction(tx);
+      } catch {
+        console.warn('[Affiliate Commission Outbox] Payment confirmed; commission retry remains pending.');
+      }
       res.setHeader('Cache-Control', 'no-store');
       return res.json(toPublicPaymentStatus(tx, result));
     } catch {
@@ -1598,12 +1687,12 @@ export async function createApp() {
       return res.status(401).json({ success: false, error: "Please sign in to access your personal reader library." });
     }
 
+    let purchases;
     try {
-      await store.ensureReaderLicensesHydrated();
+      purchases = await store.getUserPurchases(user.id);
     } catch {
       return res.status(503).json({ success: false, error: "Your reader library is temporarily unavailable. Please retry." });
     }
-    const purchases = store.getUserPurchases(user.id);
     const articles = store.getArticles(false);
 
     const library = purchases.map(p => {
@@ -1638,16 +1727,15 @@ export async function createApp() {
 
     const { query } = req.body;
     if (!query || typeof query !== 'string' || !query.trim()) {
-      return res.status(400).json({ success: false, error: "Please provide a valid M-Pesa receipt number, phone number, or unlock token." });
+      return res.status(400).json({ success: false, error: "Please provide the complete unlock token issued after payment." });
     }
 
     try {
-      await store.ensureReaderLicensesHydrated();
+      const result = await store.linkUserPurchase(user.id, query.trim());
+      return res.status(result.success ? 200 : 400).json(result);
     } catch {
       return res.status(503).json({ success: false, error: "Purchase linking is temporarily unavailable. Please retry." });
     }
-    const result = store.linkUserPurchase(user.id, query.trim());
-    return res.json(result);
   });
 
   // ==========================================
@@ -2136,7 +2224,7 @@ export async function createApp() {
     try {
       const { token } = req.params;
       await store.ensureReaderLicensesHydrated();
-      const revoked = store.revokeReaderLicense(token);
+      const revoked = await store.revokeReaderLicense(token);
       if (!revoked) {
         return res.status(404).json({ error: "Access license not found." });
       }
@@ -2179,7 +2267,7 @@ export async function createApp() {
         return res.status(400).json({ error: "grantId is required to revoke manual access." });
       }
       await store.ensureReaderLicensesHydrated();
-      const revoked = store.revokeManualAccess(grantId);
+      const revoked = await store.revokeManualAccess(grantId);
       if (!revoked) {
         return res.status(404).json({ error: "Manual access grant not found." });
       }
@@ -2197,7 +2285,7 @@ export async function createApp() {
         return res.status(400).json({ error: "grantId is required to delete manual access." });
       }
       await store.ensureReaderLicensesHydrated();
-      const deleted = store.deleteManualAccess(grantId);
+      const deleted = await store.deleteManualAccess(grantId);
       if (!deleted) {
         return res.status(404).json({ error: "Manual access grant not found." });
       }
@@ -2214,7 +2302,7 @@ export async function createApp() {
         return res.status(400).json({ error: "grantId is required to delete manual access." });
       }
       await store.ensureReaderLicensesHydrated();
-      const deleted = store.deleteManualAccess(grantId);
+      const deleted = await store.deleteManualAccess(grantId);
       if (!deleted) {
         return res.status(404).json({ error: "Manual access grant not found." });
       }
@@ -2277,6 +2365,11 @@ export async function createApp() {
   app.get("/api/admin/transactions", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       await store.ensureTransactionsHydrated();
+      try {
+        await store.drainAffiliateCommissionOutbox(25);
+      } catch {
+        console.warn('[Affiliate Commission Outbox] Writer-led reconciliation will retry later.');
+      }
       const type = req.query.type as string;
       const status = req.query.status as string;
       const txList = store.getTransactions({ type, status });
@@ -2783,7 +2876,7 @@ ${currentDraft || prompt}
   // ==========================================
 
   // Public: Register Referral Click (Attribution)
-  app.post("/api/affiliate/click", publicWriteLimiter, referralClickLimiter, publicWriteValidators.affiliateClick, (req: Request, res: Response) => {
+  app.post("/api/affiliate/click", publicWriteLimiter, referralClickLimiter, publicWriteValidators.affiliateClick, async (req: Request, res: Response) => {
     try {
       const { ref, articleId, campaign } = req.body;
       if (!ref) {
@@ -2804,7 +2897,14 @@ ${currentDraft || prompt}
       const referrer = String(req.headers.referer || '').substring(0, 200);
       const ipHash = crypto.createHash('sha256').update(ip + userAgent).digest('hex').substring(0, 16);
 
-      const result = store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer);
+      const result = await store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer);
+      if (result.valid && result.affiliate) {
+        setVerifiedAffiliateAttribution(res, {
+          ref: result.affiliate.affiliateCode || ref,
+          articleId,
+          campaign: result.campaign?.code
+        }, result.attributionMaxAgeMs);
+      }
       res.json({
         success: result.valid,
         affiliateName: result.affiliate?.name,
@@ -3046,8 +3146,13 @@ ${currentDraft || prompt}
   };
 
   // Affiliate: Get My Dashboard / Overview (Supports /me, /dashboard, /stats, /overview)
-  const handleGetAffiliateDashboard = (req: Request, res: Response) => {
+  const handleGetAffiliateDashboard = async (req: Request, res: Response) => {
     try {
+      try {
+        await store.drainAffiliateCommissionOutbox(25);
+      } catch {
+        console.warn('[Affiliate Commission Outbox] Affiliate-led reconciliation will retry later.');
+      }
       const affiliate = (req as any).affiliate;
       const dashboard = store.affiliates.getAffiliateDashboard(affiliate.id);
       if (!dashboard) {
@@ -3200,8 +3305,13 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/campaigns", requireAffiliateAuth, handleGetLinks);
 
   // Affiliate: Sales Ledger / Commissions
-  const handleGetSales = (req: Request, res: Response) => {
+  const handleGetSales = async (req: Request, res: Response) => {
     try {
+      try {
+        await store.drainAffiliateCommissionOutbox(25);
+      } catch {
+        console.warn('[Affiliate Commission Outbox] Affiliate-led reconciliation will retry later.');
+      }
       const affiliate = (req as any).affiliate;
       const sales = store.affiliates.getCommissions({ affiliateId: affiliate.id });
       res.json({

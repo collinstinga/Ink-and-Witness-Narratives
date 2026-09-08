@@ -50,13 +50,7 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'affiliate_settings.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'affiliate_audit.json');
 const AFFILIATE_SESSIONS_FILE = path.join(DATA_DIR, 'affiliate_sessions.v2.json');
 
-// In-Memory state
-let cachedAffiliates: AffiliateAccount[] = [];
-let cachedCommissions: AffiliateSaleCommission[] = [];
-let cachedClicks: AffiliateClickEvent[] = [];
-let cachedPayouts: AffiliatePayoutRequest[] = [];
-let cachedCampaigns: AffiliateCampaign[] = [];
-let cachedSettings: AffiliateSettings = {
+const DEFAULT_AFFILIATE_SETTINGS: AffiliateSettings = {
   defaultCommissionRate: 15,
   minPayoutThresholdKes: 1000,
   defaultAttributionDays: 30,
@@ -67,6 +61,135 @@ let cachedSettings: AffiliateSettings = {
   allowSelfRegistration: true,
   pieceCommissionOverrides: {}
 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_ATTRIBUTION_DAYS = 90;
+
+function finiteNumberInRange(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+function normalizeAttributionDays(value: unknown, fallback = DEFAULT_AFFILIATE_SETTINGS.defaultAttributionDays): number {
+  return Math.round(finiteNumberInRange(value, fallback, 1, MAX_ATTRIBUTION_DAYS));
+}
+
+function normalizeAffiliateSettings(value: unknown): AffiliateSettings {
+  const settings = value && typeof value === 'object'
+    ? value as Partial<AffiliateSettings>
+    : {};
+  const pieceCommissionOverrides = Object.fromEntries(
+    Object.entries(settings.pieceCommissionOverrides || {}).flatMap(([articleId, rate]) => {
+      const normalizedRate = Number(rate);
+      return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(articleId) &&
+        Number.isFinite(normalizedRate) && normalizedRate > 0 && normalizedRate <= 100
+        ? [[articleId, normalizedRate]]
+        : [];
+    })
+  );
+  return {
+    defaultCommissionRate: finiteNumberInRange(
+      settings.defaultCommissionRate,
+      DEFAULT_AFFILIATE_SETTINGS.defaultCommissionRate,
+      0.01,
+      100
+    ),
+    minPayoutThresholdKes: finiteNumberInRange(
+      settings.minPayoutThresholdKes,
+      DEFAULT_AFFILIATE_SETTINGS.minPayoutThresholdKes,
+      1,
+      10_000_000
+    ),
+    defaultAttributionDays: normalizeAttributionDays(settings.defaultAttributionDays),
+    allowTipsCommission: typeof settings.allowTipsCommission === 'boolean'
+      ? settings.allowTipsCommission
+      : DEFAULT_AFFILIATE_SETTINGS.allowTipsCommission,
+    autoApproveCommissions: typeof settings.autoApproveCommissions === 'boolean'
+      ? settings.autoApproveCommissions
+      : DEFAULT_AFFILIATE_SETTINGS.autoApproveCommissions,
+    autoApproveDelayHours: finiteNumberInRange(
+      settings.autoApproveDelayHours,
+      DEFAULT_AFFILIATE_SETTINGS.autoApproveDelayHours,
+      0,
+      24 * 365
+    ),
+    enablePublicLeaderboard: typeof settings.enablePublicLeaderboard === 'boolean'
+      ? settings.enablePublicLeaderboard
+      : DEFAULT_AFFILIATE_SETTINGS.enablePublicLeaderboard,
+    allowSelfRegistration: typeof settings.allowSelfRegistration === 'boolean'
+      ? settings.allowSelfRegistration
+      : DEFAULT_AFFILIATE_SETTINGS.allowSelfRegistration,
+    pieceCommissionOverrides
+  };
+}
+
+function isCampaignValidAttribution(
+  campaign: AffiliateCampaign,
+  articleId: string | undefined,
+  attributedAtMs: number
+): boolean {
+  const startMs = Date.parse(campaign.startDate);
+  const endMs = Date.parse(campaign.endDate);
+  return campaign.isActive === true &&
+    Number.isFinite(startMs) &&
+    Number.isFinite(endMs) &&
+    startMs <= attributedAtMs &&
+    attributedAtMs <= endMs &&
+    (!articleId || !campaign.eligiblePieceIds?.length || campaign.eligiblePieceIds.includes(articleId));
+}
+
+function transactionHasValidAffiliateAttribution(transaction: PaymentTransaction): boolean {
+  const hasIssuedAt = typeof transaction.affiliateAttributionAt === 'string';
+  const hasExpiresAt = typeof transaction.affiliateAttributionExpiresAt === 'string';
+  // Historical confirmed transactions predate signed attribution metadata.
+  if (!hasIssuedAt && !hasExpiresAt) return true;
+  if (!hasIssuedAt || !hasExpiresAt) return false;
+
+  const issuedAt = Date.parse(transaction.affiliateAttributionAt!);
+  const expiresAt = Date.parse(transaction.affiliateAttributionExpiresAt!);
+  const checkoutAt = Date.parse(transaction.createdAt);
+  return Number.isFinite(issuedAt) &&
+    Number.isFinite(expiresAt) &&
+    Number.isFinite(checkoutAt) &&
+    expiresAt > issuedAt &&
+    expiresAt - issuedAt <= MAX_ATTRIBUTION_DAYS * DAY_MS &&
+    checkoutAt >= issuedAt - 30 * 1000 &&
+    checkoutAt <= expiresAt;
+}
+
+function calculateCommissionRateFromRecords(
+  affiliate: AffiliateAccount,
+  articleId: string,
+  settings: AffiliateSettings,
+  campaign?: AffiliateCampaign
+): number {
+  if (campaign?.isActive && campaign.commissionRate > 0 && campaign.commissionRate <= 100) {
+    if (!campaign.eligiblePieceIds || campaign.eligiblePieceIds.length === 0 || campaign.eligiblePieceIds.includes(articleId)) {
+      return campaign.commissionRate;
+    }
+  }
+
+  if (settings.pieceCommissionOverrides?.[articleId] !== undefined) {
+    const pieceRate = Number(settings.pieceCommissionOverrides[articleId]);
+    if (Number.isFinite(pieceRate) && pieceRate > 0 && pieceRate <= 100) {
+      return pieceRate;
+    }
+  }
+
+  if (affiliate.customCommissionRate !== null && affiliate.customCommissionRate !== undefined && affiliate.customCommissionRate > 0 && affiliate.customCommissionRate <= 100) {
+    return affiliate.customCommissionRate;
+  }
+
+  return settings.defaultCommissionRate || DEFAULT_AFFILIATE_SETTINGS.defaultCommissionRate;
+}
+
+// In-Memory state
+let cachedAffiliates: AffiliateAccount[] = [];
+let cachedCommissions: AffiliateSaleCommission[] = [];
+let cachedClicks: AffiliateClickEvent[] = [];
+let cachedPayouts: AffiliatePayoutRequest[] = [];
+let cachedCampaigns: AffiliateCampaign[] = [];
+let cachedSettings: AffiliateSettings = normalizeAffiliateSettings(undefined);
 let cachedAuditLogs: AffiliateAuditLogEntry[] = [];
 let cachedSessions: Map<string, AffiliateSession> = new Map();
 let cachedSessionVerifiedAt: Map<string, number> = new Map();
@@ -643,79 +766,199 @@ export const affiliateStore = {
   },
 
   // CLICKS & FUNNEL TRACKING
-  registerClick(code: string, articleId?: string, campaignCode?: string, ipHash?: string, userAgent?: string, referrer?: string): { valid: boolean; affiliate?: AffiliateAccount } {
-    const affiliate = this.getAffiliateByCode(code);
-    if (!affiliate || affiliate.status !== 'active' || affiliate.linksDisabled) {
+  async registerClick(code: string, articleId?: string, campaignCode?: string, ipHash?: string, userAgent?: string, referrer?: string): Promise<{
+    valid: boolean;
+    affiliate?: AffiliateAccount;
+    campaign?: AffiliateCampaign;
+    attributionMaxAgeMs?: number;
+  }> {
+    const cleanCode = String(code || '').trim().toUpperCase();
+    if (!cleanCode) {
       return { valid: false };
     }
 
     const nowMs = Date.now();
     const retentionCutoff = nowMs - 90 * 24 * 60 * 60 * 1000;
-    cachedClicks = cachedClicks.filter(click => {
+    const retainedClicks = cachedClicks.filter(click => {
       const timestamp = new Date(click.timestamp).getTime();
       return Number.isFinite(timestamp) && timestamp >= retentionCutoff;
     });
 
-    const duplicate = cachedClicks.some(click =>
-      click.affiliateCode === affiliate.affiliateCode &&
+    const duplicate = retainedClicks.some(click =>
+      click.affiliateCode.toUpperCase() === cleanCode &&
       click.articleId === articleId &&
       click.campaignCode === campaignCode &&
       click.ipHash === ipHash &&
       nowMs - new Date(click.timestamp).getTime() < 30 * 60 * 1000
     );
-    if (duplicate) {
-      return { valid: true, affiliate };
+    const now = new Date(nowMs).toISOString();
+    const uniqueVisitor = !retainedClicks.some(click =>
+      click.affiliateCode.toUpperCase() === cleanCode && click.ipHash === ipHash
+    );
+    const db = getDb();
+
+    const persisted = await db.runTransaction(async firestoreTransaction => {
+      const affiliateQuery = db.collection('affiliates')
+        .where('affiliateCode', '==', cleanCode)
+        .limit(2);
+      const affiliateQuerySnapshot = await firestoreTransaction.get(affiliateQuery) as any;
+      const affiliateDocuments = affiliateQuerySnapshot.docs || [];
+      if (affiliateDocuments.length > 1) {
+        throw new Error('Affiliate code ownership is temporarily unavailable.');
+      }
+      const affiliateSnapshot = affiliateDocuments[0];
+      if (!affiliateSnapshot) {
+        return { valid: false, affiliateId: undefined, freshAffiliate: undefined };
+      }
+      const affiliateReference = affiliateSnapshot.ref;
+
+      if (!affiliateSnapshot.exists) {
+        return {
+          valid: false,
+          affiliateId: undefined,
+          freshAffiliate: undefined
+        };
+      }
+
+      const freshAffiliate: AffiliateAccount = {
+        ...(affiliateSnapshot.data() as AffiliateAccount),
+        id: affiliateSnapshot.id || affiliateReference.id
+      };
+      if (
+        freshAffiliate.affiliateCode?.trim().toUpperCase() !== cleanCode ||
+        freshAffiliate.status !== 'active' ||
+        freshAffiliate.linksDisabled
+      ) {
+        return {
+          valid: false,
+          affiliateId: freshAffiliate.id,
+          freshAffiliate
+        };
+      }
+
+      let freshCampaign: AffiliateCampaign | undefined;
+      let campaignReference: any;
+      if (campaignCode) {
+        const campaignQuery = db.collection('affiliate_campaigns')
+          .where('code', '==', campaignCode.trim().toUpperCase())
+          .limit(2);
+        const campaignQuerySnapshot = await firestoreTransaction.get(campaignQuery) as any;
+        const campaignDocuments = campaignQuerySnapshot.docs || [];
+        const campaignSnapshot = campaignDocuments.length === 1 ? campaignDocuments[0] : undefined;
+        campaignReference = campaignSnapshot?.ref;
+        if (campaignSnapshot?.exists) {
+          const candidate: AffiliateCampaign = {
+            ...(campaignSnapshot.data() as AffiliateCampaign),
+            id: campaignSnapshot.id || campaignReference.id
+          };
+          if (
+            candidate.code?.trim().toUpperCase() === campaignCode?.trim().toUpperCase() &&
+            isCampaignValidAttribution(candidate, articleId, nowMs)
+          ) {
+            freshCampaign = candidate;
+          }
+        }
+      }
+
+      const settingsRef = db.collection('site_configs').doc('affiliate_settings');
+      const settingsSnapshot = await firestoreTransaction.get(settingsRef) as any;
+      const freshSettings = normalizeAffiliateSettings(
+        settingsSnapshot.exists ? settingsSnapshot.data() : undefined
+      );
+      const attributionDays = normalizeAttributionDays(
+        freshCampaign?.attributionDays ?? freshAffiliate.attributionDays,
+        freshSettings.defaultAttributionDays
+      );
+
+      if (!duplicate) {
+        firestoreTransaction.set(affiliateReference, {
+          totalClicks: FieldValue.increment(1),
+          ...(uniqueVisitor ? { uniqueVisitors: FieldValue.increment(1) } : {}),
+          lastActivityAt: now
+        }, { merge: true });
+        if (freshCampaign && campaignReference) {
+          firestoreTransaction.set(campaignReference, {
+            clicksCount: FieldValue.increment(1)
+          }, { merge: true });
+        }
+      }
+
+      return {
+        valid: true,
+        duplicate,
+        affiliateId: freshAffiliate.id,
+        freshAffiliate: duplicate
+          ? freshAffiliate
+          : {
+              ...freshAffiliate,
+              totalClicks: (Number(freshAffiliate.totalClicks) || 0) + 1,
+              uniqueVisitors: (Number(freshAffiliate.uniqueVisitors) || 0) + (uniqueVisitor ? 1 : 0),
+              lastActivityAt: now
+            },
+        freshCampaign: freshCampaign
+          ? {
+              ...freshCampaign,
+              clicksCount: (Number(freshCampaign.clicksCount) || 0) + 1
+            }
+          : undefined,
+        freshSettings,
+        attributionMaxAgeMs: attributionDays * DAY_MS
+      };
+    });
+
+    if (!persisted.valid || !persisted.freshAffiliate) {
+      if (persisted.affiliateId) {
+        cacheFreshAffiliateRecord(persisted.affiliateId, persisted.freshAffiliate || null);
+      }
+      return { valid: false };
     }
 
-    const now = new Date(nowMs).toISOString();
+    const affiliate = cacheFreshAffiliateRecord(persisted.freshAffiliate.id, persisted.freshAffiliate)
+      || persisted.freshAffiliate;
+    if (persisted.freshSettings) {
+      cachedSettings = persisted.freshSettings;
+      writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+    }
+    if (persisted.duplicate) {
+      return {
+        valid: true,
+        affiliate,
+        campaign: persisted.freshCampaign,
+        attributionMaxAgeMs: persisted.attributionMaxAgeMs
+      };
+    }
+
     const clickEvent: AffiliateClickEvent = {
       id: `clk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       affiliateCode: affiliate.affiliateCode,
       affiliateId: affiliate.id,
       articleId,
-      campaignCode,
+      campaignCode: persisted.freshCampaign?.code,
       ipHash,
       userAgent: (userAgent || '').substring(0, 150),
       referrer: (referrer || '').substring(0, 200),
       timestamp: now
     };
-
-    cachedClicks.push(clickEvent);
-    // Keep max 5000 click events in memory/disk
-    if (cachedClicks.length > 5000) {
-      cachedClicks = cachedClicks.slice(-5000);
-    }
+    cachedClicks = [...retainedClicks, clickEvent].slice(-5000);
     writeJsonFileSync(CLICKS_FILE, cachedClicks);
-    // Raw click documents are intentionally not persisted to Firestore. Only
-    // bounded aggregate counters are stored, protecting the Spark write quota.
 
-    affiliate.totalClicks = (affiliate.totalClicks || 0) + 1;
-    // Estimate unique visitor if new IP hash
-    const pastClicksWithIp = cachedClicks.filter(c => c.affiliateCode === affiliate.affiliateCode && c.ipHash === ipHash);
-    if (pastClicksWithIp.length <= 1) {
-      affiliate.uniqueVisitors = (affiliate.uniqueVisitors || 0) + 1;
-    }
-    affiliate.lastActivityAt = now;
-    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, {
-      totalClicks: affiliate.totalClicks,
-      uniqueVisitors: affiliate.uniqueVisitors,
-      lastActivityAt: affiliate.lastActivityAt
-    }).catch(() => {});
-
-    // Update campaign stats if campaign attached
-    if (campaignCode) {
-      const camp = cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase());
-      if (camp) {
-        camp.clicksCount = (camp.clicksCount || 0) + 1;
-        writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
-        setFirestoreDoc('affiliate_campaigns', camp.id, camp).catch(() => {});
+    if (persisted.freshCampaign) {
+      const campaignIndex = cachedCampaigns.findIndex(campaign => campaign.id === persisted.freshCampaign!.id);
+      if (campaignIndex >= 0) {
+        cachedCampaigns[campaignIndex] = persisted.freshCampaign;
+      } else {
+        cachedCampaigns.unshift(persisted.freshCampaign);
       }
+      writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
     }
 
     console.log(`[Referral Click] Affiliate: ${affiliate.affiliateCode}, Article: ${articleId || 'all'}, Campaign: ${campaignCode || 'none'}`);
-
-    return { valid: true, affiliate };
+    return {
+      valid: true,
+      affiliate,
+      campaign: persisted.freshCampaign,
+      attributionMaxAgeMs: persisted.attributionMaxAgeMs
+    };
   },
 
   // RECONCILIATION OF PREVIOUS CONFIRMED TRANSACTIONS
@@ -743,139 +986,203 @@ export const affiliateStore = {
 
   // COMMISSION CALCULATION & SALES RECORDING
   calculateCommissionRate(affiliate: AffiliateAccount, articleId: string, campaignCode?: string): number {
-    // 1. Campaign rate override if valid active campaign
-    if (campaignCode) {
-      const camp = cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase() && c.isActive);
-      if (camp && camp.commissionRate > 0) {
-        if (!camp.eligiblePieceIds || camp.eligiblePieceIds.length === 0 || camp.eligiblePieceIds.includes(articleId)) {
-          return camp.commissionRate;
-        }
-      }
-    }
-
-    // 2. Piece-specific commission override in Settings
-    if (cachedSettings.pieceCommissionOverrides && cachedSettings.pieceCommissionOverrides[articleId] !== undefined) {
-      const pieceRate = Number(cachedSettings.pieceCommissionOverrides[articleId]);
-      if (!isNaN(pieceRate) && pieceRate > 0) {
-        return pieceRate;
-      }
-    }
-
-    // 3. Individual affiliate custom commission rate
-    if (affiliate.customCommissionRate !== null && affiliate.customCommissionRate !== undefined && affiliate.customCommissionRate > 0) {
-      return affiliate.customCommissionRate;
-    }
-
-    // 4. Global default rate
-    return cachedSettings.defaultCommissionRate || 15;
+    const campaign = campaignCode
+      ? cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase())
+      : undefined;
+    return calculateCommissionRateFromRecords(affiliate, articleId, cachedSettings, campaign);
   },
 
   async recordAffiliateSale(tx: PaymentTransaction, affiliateRefCode?: string, campaignCode?: string): Promise<AffiliateSaleCommission | null> {
     if (!affiliateRefCode) return null;
-
-    // Tips rule: Tips do not generate commission unless explicitly enabled by writer
-    if (tx.type === 'TIP' && !cachedSettings.allowTipsCommission) {
-      return null;
-    }
-
-    const affiliate = this.getAffiliateByCode(affiliateRefCode);
-    if (!affiliate || affiliate.status !== 'active' || affiliate.linksDisabled) {
-      return null;
-    }
-
-    // Check piece eligibility if affiliate is restricted to specific pieces
-    if (affiliate.allowedPieceIds && affiliate.allowedPieceIds.length > 0) {
-      if (!affiliate.allowedPieceIds.includes(tx.articleId)) {
-        return null;
-      }
-    }
-
-    // Idempotency: Avoid double-crediting if same transaction is confirmed multiple times
-    const existing = cachedCommissions.find(c => 
-      c.transactionId === tx.id || 
-      (c.receiptNumber && tx.mpesaReceiptNumber && c.receiptNumber === tx.mpesaReceiptNumber)
-    );
-    if (existing) {
-      console.log(`[Affiliate Commission Duplicate Prevention] Commission already exists for Transaction ID: ${tx.id}, Receipt: ${tx.mpesaReceiptNumber || tx.receiptNumber}. Skipping duplicate.`);
-      return existing;
-    }
-
-    // Determine purchase amount in KES
-    const saleAmountKes = Number(tx.amount) || 1500;
-    const commissionRate = this.calculateCommissionRate(affiliate, tx.articleId, campaignCode);
-    const commissionAmountKes = Math.round(saleAmountKes * (commissionRate / 100));
-    const grossCreatorRevenueKes = saleAmountKes - commissionAmountKes;
-
-    // Detect self-referral (buyer phone or email matches affiliate)
-    let isSelfReferral = false;
-    if (tx.phoneNumber && affiliate.phone) {
-      const cleanBuyerPhone = tx.phoneNumber.replace(/[^0-9]/g, '').slice(-9);
-      const cleanAffPhone = affiliate.phone.replace(/[^0-9]/g, '').slice(-9);
-      if (cleanBuyerPhone && cleanAffPhone && cleanBuyerPhone === cleanAffPhone) {
-        isSelfReferral = true;
-      }
-    }
-    if (tx.userEmail && affiliate.email) {
-      if (tx.userEmail.trim().toLowerCase() === affiliate.email.trim().toLowerCase()) {
-        isSelfReferral = true;
-      }
-    }
-
+    const cleanAffiliateCode = affiliateRefCode.trim().toUpperCase();
+    if (!cleanAffiliateCode) return null;
+    if (!['CONFIRMED', 'SUCCESS', 'PAID'].includes(tx.status)) return null;
+    if (!transactionHasValidAffiliateAttribution(tx)) return null;
+    const saleAmountKes = Number(tx.amount);
+    if (!Number.isFinite(saleAmountKes) || saleAmountKes <= 0 || saleAmountKes > 1_000_000) return null;
+    const attributedAtMs = tx.affiliateAttributionAt
+      ? Date.parse(tx.affiliateAttributionAt)
+      : Date.parse(tx.createdAt);
     const now = new Date().toISOString();
-    const autoApprove = cachedSettings.autoApproveCommissions;
-    const status: CommissionStatus = isSelfReferral ? 'REJECTED' : (autoApprove ? 'APPROVED' : 'PENDING');
-    const effectiveCommissionAmount = isSelfReferral ? 0 : commissionAmountKes;
     const commissionId = `com_tx_${crypto.createHash('sha256')
       .update(tx.checkoutRequestId || tx.id)
       .digest('hex')
       .slice(0, 40)}`;
+    const db = getDb();
+    const commissionRef = db.collection('affiliate_commissions').doc(commissionId);
 
-    const commission: AffiliateSaleCommission = {
-      id: commissionId,
-      affiliateId: affiliate.id,
-      affiliateCode: affiliate.affiliateCode,
-      affiliateName: affiliate.name,
-      transactionId: tx.id,
-      checkoutRequestId: tx.checkoutRequestId,
-      receiptNumber: tx.mpesaReceiptNumber || tx.bankReference || `CHECKOUT-${tx.checkoutRequestId || tx.id}`,
-      articleId: tx.articleId,
-      articleTitle: tx.articleTitle || "Monograph",
-      saleAmountKes,
-      currency: tx.currency || "KES",
-      originalAmount: tx.originalAmount || saleAmountKes,
-      commissionRate: isSelfReferral ? 0 : commissionRate,
-      commissionAmountKes: effectiveCommissionAmount,
-      grossCreatorRevenueKes: isSelfReferral ? saleAmountKes : grossCreatorRevenueKes,
-      paymentMethod: tx.paymentMethod || 'mpesa',
-      status,
-      campaignCode,
-      fraudFlag: isSelfReferral ? {
-        flagged: true,
-        reason: "Self-referral prohibited: Buyer contact matches affiliate profile.",
-        severity: 'high',
-        reviewed: true
-      } : undefined,
-      createdAt: now,
-      approvedAt: (!isSelfReferral && autoApprove) ? now : undefined
-    };
-
-    const commissionRef = getDb().collection('affiliate_commissions').doc(commission.id);
-    const affiliateRef = getDb().collection('affiliates').doc(affiliate.id);
-    const campaign = campaignCode
-      ? cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase())
-      : undefined;
-    const campaignRef = campaign
-      ? getDb().collection('affiliate_campaigns').doc(campaign.id)
-      : undefined;
-
-    const persisted = await getDb().runTransaction(async firestoreTransaction => {
+    const persisted = await db.runTransaction(async firestoreTransaction => {
       const existingSnapshot = await firestoreTransaction.get(commissionRef);
       if (existingSnapshot.exists) {
         return {
           created: false,
-          commission: existingSnapshot.data() as AffiliateSaleCommission
+          commission: existingSnapshot.data() as AffiliateSaleCommission,
+          affiliateId: undefined,
+          freshAffiliate: undefined,
+          freshCampaign: undefined,
+          freshSettings: undefined
         };
       }
+
+      const affiliateQuery = db.collection('affiliates')
+        .where('affiliateCode', '==', cleanAffiliateCode)
+        .limit(2);
+      const affiliateQuerySnapshot = await firestoreTransaction.get(affiliateQuery) as any;
+      const affiliateDocuments = affiliateQuerySnapshot.docs || [];
+      if (affiliateDocuments.length > 1) {
+        throw new Error('Affiliate code ownership requires administrator reconciliation.');
+      }
+      const affiliateSnapshot = affiliateDocuments[0];
+      if (!affiliateSnapshot) {
+        return {
+          created: false,
+          commission: null,
+          affiliateId: undefined,
+          freshAffiliate: undefined,
+          freshCampaign: undefined,
+          freshSettings: undefined
+        };
+      }
+      const affiliateRef = affiliateSnapshot.ref;
+
+      if (!affiliateSnapshot.exists) {
+        return {
+          created: false,
+          commission: null,
+          affiliateId: undefined,
+          freshAffiliate: undefined,
+          freshCampaign: undefined,
+          freshSettings: undefined
+        };
+      }
+
+      const freshAffiliate: AffiliateAccount = {
+        ...(affiliateSnapshot.data() as AffiliateAccount),
+        id: affiliateSnapshot.id || affiliateRef.id
+      };
+      if (
+        freshAffiliate.affiliateCode?.trim().toUpperCase() !== cleanAffiliateCode ||
+        freshAffiliate.status !== 'active' ||
+        freshAffiliate.linksDisabled
+      ) {
+        return {
+          created: false,
+          commission: null,
+          affiliateId: freshAffiliate.id,
+          freshAffiliate,
+          freshCampaign: undefined,
+          freshSettings: undefined
+        };
+      }
+
+      const settingsRef = db.collection('site_configs').doc('affiliate_settings');
+      const settingsSnapshot = await firestoreTransaction.get(settingsRef);
+      const freshSettings = normalizeAffiliateSettings(
+        settingsSnapshot.exists ? settingsSnapshot.data() : undefined
+      );
+
+      let freshCampaign: AffiliateCampaign | undefined;
+      let campaignRef: any;
+      if (campaignCode) {
+        const campaignQuery = db.collection('affiliate_campaigns')
+          .where('code', '==', campaignCode.trim().toUpperCase())
+          .limit(2);
+        const campaignQuerySnapshot = await firestoreTransaction.get(campaignQuery) as any;
+        const campaignDocuments = campaignQuerySnapshot.docs || [];
+        const campaignSnapshot = campaignDocuments.length === 1 ? campaignDocuments[0] : undefined;
+        campaignRef = campaignSnapshot?.ref;
+        if (campaignSnapshot?.exists) {
+          const candidate: AffiliateCampaign = {
+            ...(campaignSnapshot.data() as AffiliateCampaign),
+            id: campaignSnapshot.id || campaignRef.id
+          };
+          if (
+            candidate.code?.trim().toUpperCase() === campaignCode?.trim().toUpperCase() &&
+            isCampaignValidAttribution(candidate, tx.articleId, attributedAtMs)
+          ) {
+            freshCampaign = candidate;
+          }
+        }
+      }
+
+      // These are intentional business-rule denials. Firestore failures reject
+      // the transaction instead, allowing callers to distinguish unavailable
+      // persistence from an ineligible referral.
+      if (tx.type === 'TIP' && !freshSettings.allowTipsCommission) {
+        return {
+          created: false,
+          commission: null,
+          affiliateId: freshAffiliate.id,
+          freshAffiliate,
+          freshCampaign,
+          freshSettings
+        };
+      }
+      if (freshAffiliate.allowedPieceIds?.length && !freshAffiliate.allowedPieceIds.includes(tx.articleId)) {
+        return {
+          created: false,
+          commission: null,
+          affiliateId: freshAffiliate.id,
+          freshAffiliate,
+          freshCampaign,
+          freshSettings
+        };
+      }
+
+      const commissionRate = calculateCommissionRateFromRecords(
+        freshAffiliate,
+        tx.articleId,
+        freshSettings,
+        freshCampaign
+      );
+      const commissionAmountKes = Math.round(saleAmountKes * (commissionRate / 100));
+      const grossCreatorRevenueKes = saleAmountKes - commissionAmountKes;
+
+      let isSelfReferral = false;
+      if (tx.phoneNumber && freshAffiliate.phone) {
+        const cleanBuyerPhone = tx.phoneNumber.replace(/[^0-9]/g, '').slice(-9);
+        const cleanAffPhone = freshAffiliate.phone.replace(/[^0-9]/g, '').slice(-9);
+        if (cleanBuyerPhone && cleanAffPhone && cleanBuyerPhone === cleanAffPhone) {
+          isSelfReferral = true;
+        }
+      }
+      if (tx.userEmail && freshAffiliate.email) {
+        if (tx.userEmail.trim().toLowerCase() === freshAffiliate.email.trim().toLowerCase()) {
+          isSelfReferral = true;
+        }
+      }
+
+      const autoApprove = freshSettings.autoApproveCommissions;
+      const status: CommissionStatus = isSelfReferral ? 'REJECTED' : (autoApprove ? 'APPROVED' : 'PENDING');
+      const effectiveCommissionAmount = isSelfReferral ? 0 : commissionAmountKes;
+      const commission: AffiliateSaleCommission = {
+        id: commissionId,
+        affiliateId: freshAffiliate.id,
+        affiliateCode: freshAffiliate.affiliateCode,
+        affiliateName: freshAffiliate.name,
+        transactionId: tx.id,
+        checkoutRequestId: tx.checkoutRequestId,
+        receiptNumber: tx.mpesaReceiptNumber || tx.bankReference || `CHECKOUT-${tx.checkoutRequestId || tx.id}`,
+        articleId: tx.articleId,
+        articleTitle: tx.articleTitle || 'Monograph',
+        saleAmountKes,
+        currency: tx.currency || 'KES',
+        originalAmount: tx.originalAmount || saleAmountKes,
+        commissionRate: isSelfReferral ? 0 : commissionRate,
+        commissionAmountKes: effectiveCommissionAmount,
+        grossCreatorRevenueKes: isSelfReferral ? saleAmountKes : grossCreatorRevenueKes,
+        paymentMethod: tx.paymentMethod || 'mpesa',
+        status,
+        campaignCode: freshCampaign?.code,
+        fraudFlag: isSelfReferral ? {
+          flagged: true,
+          reason: 'Self-referral prohibited: Buyer contact matches affiliate profile.',
+          severity: 'high',
+          reviewed: true
+        } : undefined,
+        createdAt: now,
+        approvedAt: (!isSelfReferral && autoApprove) ? now : undefined
+      };
 
       firestoreTransaction.create(commissionRef, commission);
       const affiliateIncrement: Record<string, unknown> = {
@@ -892,16 +1199,61 @@ export const affiliateStore = {
         }
       }
       firestoreTransaction.set(affiliateRef, affiliateIncrement, { merge: true });
-      if (campaignRef) {
+      if (freshCampaign && campaignRef) {
         firestoreTransaction.set(campaignRef, {
           salesCount: FieldValue.increment(1),
           revenueKes: FieldValue.increment(saleAmountKes),
           commissionsKes: FieldValue.increment(effectiveCommissionAmount)
         }, { merge: true });
       }
-      return { created: true, commission };
+      return {
+        created: true,
+        commission,
+        affiliateId: freshAffiliate.id,
+        freshAffiliate: {
+          ...freshAffiliate,
+          totalSalesCount: (Number(freshAffiliate.totalSalesCount) || 0) + 1,
+          totalRevenueKes: (Number(freshAffiliate.totalRevenueKes) || 0) + saleAmountKes,
+          totalCommissionEarnedKes: (Number(freshAffiliate.totalCommissionEarnedKes) || 0) + (isSelfReferral ? 0 : commissionAmountKes),
+          balanceAvailableKes: (Number(freshAffiliate.balanceAvailableKes) || 0) + (!isSelfReferral && status === 'APPROVED' ? commissionAmountKes : 0),
+          balancePendingKes: (Number(freshAffiliate.balancePendingKes) || 0) + (!isSelfReferral && status === 'PENDING' ? commissionAmountKes : 0),
+          lastActivityAt: now
+        },
+        freshCampaign: freshCampaign
+          ? {
+              ...freshCampaign,
+              salesCount: (Number(freshCampaign.salesCount) || 0) + 1,
+              revenueKes: (Number(freshCampaign.revenueKes) || 0) + saleAmountKes,
+              commissionsKes: (Number(freshCampaign.commissionsKes) || 0) + effectiveCommissionAmount
+            }
+          : undefined,
+        freshSettings
+      };
     });
 
+    if (persisted.freshSettings) {
+      cachedSettings = persisted.freshSettings;
+      writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+    }
+    if (persisted.affiliateId) {
+      cacheFreshAffiliateRecord(
+        persisted.affiliateId,
+        persisted.freshAffiliate || null
+      );
+    }
+    if (persisted.freshCampaign) {
+      const campaignIndex = cachedCampaigns.findIndex(campaign => campaign.id === persisted.freshCampaign!.id);
+      if (campaignIndex >= 0) {
+        cachedCampaigns[campaignIndex] = persisted.freshCampaign;
+      } else {
+        cachedCampaigns.unshift(persisted.freshCampaign);
+      }
+      writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
+    }
+
+    if (!persisted.commission) {
+      return null;
+    }
     if (!persisted.created) {
       if (!cachedCommissions.some(item => item.id === persisted.commission.id)) {
         cachedCommissions.unshift(persisted.commission);
@@ -910,34 +1262,12 @@ export const affiliateStore = {
       return persisted.commission;
     }
 
+    const commission = persisted.commission;
     cachedCommissions.unshift(commission);
     writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
+    this.recordAudit('System', 'commission_generated', 'commission', `Generated KES ${commission.commissionAmountKes} commission (${commission.commissionRate}%) for ${commission.affiliateName} on piece "${commission.articleTitle}" (Receipt: ${commission.receiptNumber})`, commission.id, null, commission);
 
-    // Update Affiliate account balance & stats (only if not self-referral)
-    affiliate.totalSalesCount = (affiliate.totalSalesCount || 0) + 1;
-    affiliate.totalRevenueKes = (affiliate.totalRevenueKes || 0) + saleAmountKes;
-    if (!isSelfReferral) {
-      affiliate.totalCommissionEarnedKes = (affiliate.totalCommissionEarnedKes || 0) + commissionAmountKes;
-      if (status === 'APPROVED') {
-        affiliate.balanceAvailableKes = (affiliate.balanceAvailableKes || 0) + commissionAmountKes;
-      } else {
-        affiliate.balancePendingKes = (affiliate.balancePendingKes || 0) + commissionAmountKes;
-      }
-    }
-    affiliate.lastActivityAt = now;
-    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-
-    // Update campaign stats if campaign attached
-    if (campaign) {
-        campaign.salesCount = (campaign.salesCount || 0) + 1;
-        campaign.revenueKes = (campaign.revenueKes || 0) + saleAmountKes;
-        campaign.commissionsKes = (campaign.commissionsKes || 0) + effectiveCommissionAmount;
-        writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
-    }
-
-    this.recordAudit('System', 'commission_generated', 'commission', `Generated KES ${commissionAmountKes} commission (${commissionRate}%) for ${affiliate.name} on piece "${commission.articleTitle}" (Receipt: ${commission.receiptNumber})`, commission.id, null, commission);
-
-    console.log(`[Affiliate Commission Created] Commission ID: ${commission.id}, Affiliate: ${affiliate.affiliateCode} (${affiliate.name}), Article: "${commission.articleTitle}", Sale: KES ${saleAmountKes}, Rate: ${commissionRate}%, Commission Earned: KES ${commissionAmountKes}, Status: ${status}, Tx ID: ${tx.id}, Receipt: ${commission.receiptNumber}`);
+    console.log(`[Affiliate Commission Created] Commission ID: ${commission.id}, Affiliate: ${commission.affiliateCode} (${commission.affiliateName}), Article: "${commission.articleTitle}", Sale: KES ${commission.saleAmountKes}, Rate: ${commission.commissionRate}%, Commission Earned: KES ${commission.commissionAmountKes}, Status: ${commission.status}, Tx ID: ${tx.id}, Receipt: ${commission.receiptNumber}`);
 
     return commission;
   },

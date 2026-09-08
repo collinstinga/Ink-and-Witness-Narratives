@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type FakeRef = { collectionName: string; id: string; key: string };
@@ -21,18 +22,30 @@ const firestoreMock = vi.hoisted(() => {
     queue = new Promise<void>(resolve => { release = resolve; });
     await previous;
     try {
-      const writes: Array<{ ref: FakeRef; data: any; merge: boolean }> = [];
+      const writes: Array<
+        | { operation: 'set' | 'create'; ref: FakeRef; data: any; merge: boolean }
+        | { operation: 'delete'; ref: FakeRef }
+      > = [];
       const result = await callback({
         get: async (ref: FakeRef) => snapshot(ref),
         set: (ref: FakeRef, data: any, options?: { merge?: boolean }) => {
-          writes.push({ ref, data: clone(data), merge: Boolean(options?.merge) });
-        }
+          writes.push({ operation: 'set', ref, data: clone(data), merge: Boolean(options?.merge) });
+        },
+        create: (ref: FakeRef, data: any) => {
+          if (documents.has(ref.key)) throw new Error('document already exists');
+          writes.push({ operation: 'create', ref, data: clone(data), merge: false });
+        },
+        delete: (ref: FakeRef) => writes.push({ operation: 'delete', ref })
       });
       if (failNextCommit) {
         failNextCommit = false;
         throw new Error('injected commit failure');
       }
       for (const write of writes) {
+        if (write.operation === 'delete') {
+          documents.delete(write.ref.key);
+          continue;
+        }
         const current = write.merge ? (documents.get(write.ref.key) || {}) : {};
         documents.set(write.ref.key, { ...current, ...write.data });
       }
@@ -78,6 +91,8 @@ vi.mock('./affiliateStore.js', () => ({
   }
 }));
 
+import { setFirestoreDoc } from './db.js';
+
 function pendingTransaction(id: string, overrides: Record<string, unknown> = {}) {
   return {
     id: `tx_${id}`,
@@ -107,7 +122,8 @@ describe('atomic M-Pesa settlement', () => {
 
   beforeEach(() => {
     firestoreMock.reset();
-    affiliateMocks.recordAffiliateSale.mockClear();
+    affiliateMocks.recordAffiliateSale.mockReset();
+    vi.mocked(setFirestoreDoc).mockClear();
   });
 
   const settlement = (id: string, receiptNumber = 'SIA1234567') => ({
@@ -168,6 +184,131 @@ describe('atomic M-Pesa settlement', () => {
     expect(firestoreMock.documents.get('transactions/checkout_1').status).toBe('PENDING');
     expect(Array.from(firestoreMock.documents.keys()).some(key => key.startsWith('reader_licenses/'))).toBe(false);
     expect(Array.from(firestoreMock.documents.keys()).some(key => key.startsWith('payment_receipts/'))).toBe(false);
+  });
+
+  it('writes a pending affiliate outbox checkpoint atomically and completes it after commission persistence', async () => {
+    firestoreMock.documents.set('transactions/checkout_affiliate', pendingTransaction('checkout_affiliate', {
+      affiliateCode: 'AFFILIATE1',
+      campaignCode: 'LAUNCH'
+    }));
+    affiliateMocks.recordAffiliateSale.mockResolvedValueOnce({ id: 'commission_1' });
+
+    const result = await store.settleMpesaTransaction(
+      'checkout_affiliate',
+      settlement('checkout_affiliate', 'SIAAFFILIATE1')
+    );
+
+    const outboxId = crypto.createHash('sha256').update('checkout_affiliate').digest('hex');
+    expect(result.outcome).toBe('committed');
+    expect(affiliateMocks.recordAffiliateSale).toHaveBeenCalledWith(
+      expect.objectContaining({
+        checkoutRequestId: 'checkout_affiliate',
+        status: 'CONFIRMED',
+        mpesaReceiptNumber: 'SIAAFFILIATE1'
+      }),
+      'AFFILIATE1',
+      'LAUNCH'
+    );
+    expect(vi.mocked(setFirestoreDoc)).toHaveBeenCalledWith(
+      'affiliate_commission_outbox',
+      outboxId,
+      expect.objectContaining({
+        checkoutRequestId: 'checkout_affiliate',
+        status: 'COMPLETE',
+        commissionId: 'commission_1'
+      })
+    );
+    expect(firestoreMock.documents.get(`affiliate_commission_outbox/${outboxId}`)).toMatchObject({
+      checkoutRequestId: 'checkout_affiliate',
+      status: 'COMPLETE',
+      commissionId: 'commission_1',
+      createdAt: expect.any(String),
+      completedAt: expect.any(String)
+    });
+  });
+
+  it('leaves a pending outbox checkpoint when commission persistence fails and completes it on callback retry', async () => {
+    firestoreMock.documents.set('transactions/checkout_retry', pendingTransaction('checkout_retry', {
+      affiliateCode: 'AFFILIATE1',
+      campaignCode: 'LAUNCH'
+    }));
+    affiliateMocks.recordAffiliateSale
+      .mockRejectedValueOnce(new Error('commission persistence unavailable'))
+      .mockResolvedValueOnce({ id: 'commission_retry' });
+
+    await expect(store.settleMpesaTransaction(
+      'checkout_retry',
+      settlement('checkout_retry', 'SIARETRY001')
+    )).rejects.toThrow('commission persistence unavailable');
+
+    const outboxId = crypto.createHash('sha256').update('checkout_retry').digest('hex');
+    expect(firestoreMock.documents.get('transactions/checkout_retry')).toMatchObject({
+      status: 'CONFIRMED',
+      mpesaReceiptNumber: 'SIARETRY001'
+    });
+    expect(firestoreMock.documents.get(`affiliate_commission_outbox/${outboxId}`)).toMatchObject({
+      checkoutRequestId: 'checkout_retry',
+      status: 'PENDING'
+    });
+    expect(vi.mocked(setFirestoreDoc)).not.toHaveBeenCalled();
+
+    const retry = await store.settleMpesaTransaction(
+      'checkout_retry',
+      settlement('checkout_retry', 'SIARETRY001')
+    );
+
+    expect(retry.outcome).toBe('duplicate');
+    expect(affiliateMocks.recordAffiliateSale).toHaveBeenCalledTimes(2);
+    expect(firestoreMock.documents.get(`affiliate_commission_outbox/${outboxId}`)).toMatchObject({
+      checkoutRequestId: 'checkout_retry',
+      status: 'COMPLETE',
+      commissionId: 'commission_retry',
+      completedAt: expect.any(String)
+    });
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('reader_licenses/')
+    )).toHaveLength(1);
+  });
+
+  it('retries an outbox completion write without duplicating the settled payment', async () => {
+    firestoreMock.documents.set('transactions/checkout_outbox_retry', pendingTransaction('checkout_outbox_retry', {
+      affiliateCode: 'AFFILIATE1'
+    }));
+    affiliateMocks.recordAffiliateSale.mockResolvedValue({ id: 'commission_outbox_retry' });
+    vi.mocked(setFirestoreDoc).mockRejectedValueOnce(new Error('outbox completion unavailable'));
+
+    await expect(store.settleMpesaTransaction(
+      'checkout_outbox_retry',
+      settlement('checkout_outbox_retry', 'SIAOUTBOX01')
+    )).rejects.toThrow('outbox completion unavailable');
+
+    const outboxId = crypto.createHash('sha256').update('checkout_outbox_retry').digest('hex');
+    expect(firestoreMock.documents.get('transactions/checkout_outbox_retry')).toMatchObject({
+      status: 'CONFIRMED',
+      mpesaReceiptNumber: 'SIAOUTBOX01'
+    });
+    expect(firestoreMock.documents.get(`affiliate_commission_outbox/${outboxId}`)).toMatchObject({
+      status: 'PENDING'
+    });
+
+    const retry = await store.settleMpesaTransaction(
+      'checkout_outbox_retry',
+      settlement('checkout_outbox_retry', 'SIAOUTBOX01')
+    );
+
+    expect(retry.outcome).toBe('duplicate');
+    expect(affiliateMocks.recordAffiliateSale).toHaveBeenCalledTimes(2);
+    expect(firestoreMock.documents.get(`affiliate_commission_outbox/${outboxId}`)).toMatchObject({
+      status: 'COMPLETE',
+      commissionId: 'commission_outbox_retry',
+      completedAt: expect.any(String)
+    });
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('payment_receipts/')
+    )).toHaveLength(1);
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('reader_licenses/')
+    )).toHaveLength(1);
   });
 
   it('prevents a later failure callback from regressing a confirmed payment', async () => {

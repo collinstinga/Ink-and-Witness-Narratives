@@ -82,7 +82,7 @@ describe('affiliate redirect route', () => {
     });
     affiliateMocks.registerClick.mockReturnValue({
       valid: true,
-      affiliate: { name: 'Test Partner' }
+      affiliate: { affiliateCode: 'PARTNER_7', name: 'Test Partner' }
     });
   });
 
@@ -112,10 +112,13 @@ describe('affiliate redirect route', () => {
     expect(Object.fromEntries(target.searchParams)).toEqual({
       ref: 'PARTNER_7'
     });
-    expect(response.headers.get('set-cookie')).toContain('iw_affiliate_click_dedup=');
-    expect(response.headers.get('set-cookie')).toContain('HttpOnly');
-    expect(response.headers.get('set-cookie')).toContain('SameSite=Lax');
-    expect(response.headers.get('set-cookie')).toContain('Path=/api/affiliate/click');
+    const cookies = response.headers.get('set-cookie');
+    expect(cookies).toContain('iw_affiliate_click_dedup=');
+    expect(cookies).toContain('iw_affiliate_attribution=');
+    expect(cookies).toContain('HttpOnly');
+    expect(cookies).toContain('SameSite=Lax');
+    expect(cookies).toContain('Path=/api/affiliate/click');
+    expect(cookies).toContain('Path=/');
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
     expect(affiliateMocks.registerClick).toHaveBeenCalledWith(
       'PARTNER_7',

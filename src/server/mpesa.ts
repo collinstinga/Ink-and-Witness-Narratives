@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { store, type MpesaCallbackIntent } from './store.js';
+import { getMpesaRequestLockId, store, type MpesaCallbackIntent } from './store.js';
 import { MpesaConfig, PaymentTransaction } from '../types.js';
 import {
   attachCallbackCapability,
@@ -180,6 +180,20 @@ export function isDarajaMerchantConfigurationError(message: unknown): boolean {
     normalized.includes('invalid business');
 }
 
+export function isDefinitiveDarajaStkRejection(status: number, payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object' || status === 429 || status >= 500) return false;
+  const data = payload as Record<string, unknown>;
+  const responseCode = data.ResponseCode;
+  if ((typeof responseCode === 'string' || typeof responseCode === 'number') && String(responseCode) !== '0') {
+    return status >= 200 && status < 500;
+  }
+  return status >= 400 && status < 500 && (
+    typeof data.errorCode === 'string' ||
+    typeof data.errorMessage === 'string' ||
+    typeof (data.fault as Record<string, unknown> | undefined)?.faultstring === 'string'
+  );
+}
+
 /**
  * 1. Safaricom Daraja OAuth Token Generator
  * Secure server-side basic authentication with token caching
@@ -290,6 +304,8 @@ export interface InitiateStkPushParams {
   exchangeRateTimestamp?: string;
   affiliateCode?: string;
   campaignCode?: string;
+  affiliateAttributionAt?: string;
+  affiliateAttributionExpiresAt?: string;
   userId?: string;
   userEmail?: string;
   originUrl?: string;
@@ -326,6 +342,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     exchangeRateTimestamp,
     affiliateCode,
     campaignCode,
+    affiliateAttributionAt,
+    affiliateAttributionExpiresAt,
     userId,
     userEmail,
     originUrl
@@ -430,6 +448,10 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     version: 1,
     callbackCapabilityHash,
     paymentCapabilityHash: hashPaymentCapability(paymentCapability),
+    requestLockId: getMpesaRequestLockId(
+      articleId || (paymentType === 'TIP' ? 'general_tip' : 'custom'),
+      formattedPhone
+    ),
     articleId: articleId || (paymentType === 'TIP' ? 'general_tip' : 'custom'),
     articleTitle,
     phoneNumber: formattedPhone,
@@ -445,6 +467,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     type: paymentType,
     affiliateCode: affiliateCode || undefined,
     campaignCode: campaignCode || undefined,
+    affiliateAttributionAt: affiliateAttributionAt || undefined,
+    affiliateAttributionExpiresAt: affiliateAttributionExpiresAt || undefined,
     userId: userId || undefined,
     userEmail: userEmail || undefined,
     shortcodeUsed: businessShortCode,
@@ -458,8 +482,14 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     // If the provider accepts while the response-side transaction write fails,
     // the authenticated callback can reconstruct the pending transaction.
     await store.saveMpesaCallbackIntent(intent);
-  } catch {
+  } catch (error: any) {
     console.error('[M-PESA INTENT ERROR] Secure payment intent could not be persisted.');
+    if (error?.code === 'ACTIVE_MPESA_INTENT') {
+      return {
+        success: false,
+        error: 'Safaricom is already processing an M-Pesa request for this phone and piece. Wait briefly before trying again.'
+      };
+    }
     return { success: false, error: 'Payment could not be prepared safely. Please retry in a moment.' };
   }
 
@@ -534,23 +564,31 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     } else {
       const errorMsg = stkData?.errorMessage || stkData?.ResponseDescription || (stkData?.fault?.faultstring ? `Safaricom Notice: ${stkData.fault.faultstring}` : `Safaricom rejected STK Push (HTTP ${stkRes.status})`);
       console.error(`[M-PESA STK REJECTED] ${errorMsg}`);
-      await store.discardMpesaCallbackIntent(callbackCapabilityHash, intent.paymentCapabilityHash).catch(() => {
-        console.warn('[M-PESA INTENT CLEANUP] Rejected payment intent will expire automatically.');
-      });
+      const definitiveRejection = isDefinitiveDarajaStkRejection(stkRes.status, stkData);
+      if (definitiveRejection) {
+        await store.discardMpesaCallbackIntent(
+          callbackCapabilityHash,
+          intent.paymentCapabilityHash,
+          intent.requestLockId
+        ).catch(() => {
+          console.warn('[M-PESA INTENT CLEANUP] Rejected payment intent remains available for reconciliation.');
+        });
+      } else {
+        console.warn('[M-PESA STK AMBIGUOUS] Recovery intent retained because provider acceptance could not be ruled out.');
+      }
       return {
         success: false,
-        error: errorMsg,
+        error: definitiveRejection
+          ? errorMsg
+          : 'Safaricom returned an uncertain response. Do not retry immediately; wait two minutes while payment status is reconciled.',
         checkoutRequestId: undefined
       };
     }
   } catch (error: any) {
     console.error('[M-PESA STK NETWORK ERROR]:', error);
-    const isTimeout = error?.name === 'AbortError' || error?.message?.includes('timeout') || error?.message?.includes('fetch failed');
     return {
       success: false,
-      error: isTimeout
-        ? 'Safaricom M-Pesa gateway connection timed out. Please try again in a few seconds.'
-        : `Network error connecting to Safaricom Daraja: ${error.message}`
+      error: 'Safaricom returned an uncertain network outcome. Do not retry immediately; wait two minutes while any accepted payment is reconciled.'
     };
   }
 }
@@ -564,7 +602,17 @@ async function handleSuccessfulStkResponse(
   const checkoutRequestId = stkData.CheckoutRequestID;
   const merchantRequestId = stkData.MerchantRequestID;
   if (typeof merchantRequestId !== 'string' || !merchantRequestId.trim()) {
-    return { success: false, error: 'Safaricom accepted the request without a valid merchant correlation ID.' };
+    console.error('[M-PESA TRANSACTION ATTACHMENT] Provider accepted without returning a merchant correlation ID; callback recovery is pending.');
+    return {
+      success: true,
+      checkoutRequestId,
+      customerMessage: stkData.CustomerMessage || 'M-Pesa request accepted by Safaricom for processing.',
+      message: 'M-Pesa request accepted. Waiting for Safaricom payment confirmation.',
+      amount: intent.amount,
+      phoneNumber: intent.phoneNumber,
+      articleTitle: intent.articleTitle,
+      paymentCapability
+    };
   }
   console.log(`[STK PUSH SUCCESSFUL] Provider correlation IDs received. CustomerPhone: ${maskedPhone}, Amount: KES ${intent.amount}`);
 
