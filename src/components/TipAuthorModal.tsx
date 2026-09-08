@@ -77,7 +77,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [checkoutRequestId, setCheckoutRequestId] = useState<string>('');
   const [paymentCapability, setPaymentCapability] = useState<string>('');
-  const [merchantRequestId, setMerchantRequestId] = useState<string>('');
+  const [reconciliationPending, setReconciliationPending] = useState<boolean>(false);
   const [verifiedReceipt, setVerifiedReceipt] = useState<string>('');
   const [isCheckingStatus, setIsCheckingStatus] = useState<boolean>(false);
 
@@ -128,7 +128,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
       setErrorMessage('');
       setCheckoutRequestId('');
       setPaymentCapability('');
-      setMerchantRequestId('');
+      setReconciliationPending(false);
       setVerifiedReceipt('');
       
       // Default to 500 KES or $5 USD
@@ -187,12 +187,12 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
   };
 
   // Poll transaction status to verify real backend payment
-  const startStatusPolling = (reqId: string, capability: string, merchantId?: string) => {
+  const startStatusPolling = (reqId: string, capability: string) => {
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
 
     pollIntervalRef.current = setInterval(async () => {
       try {
-        const tx = await api.getPaymentStatus(reqId, capability, merchantId);
+        const tx = await api.getPaymentStatus(reqId, capability);
         if (tx && (tx.status === 'SUCCESS' || tx.status === 'CONFIRMED' || tx.status === 'PAID')) {
           const receipt = (tx.mpesaReceiptNumber || tx.receiptNumber || '').trim();
           if (receipt) {
@@ -232,7 +232,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
     try {
       setIsCheckingStatus(true);
       setErrorMessage('');
-      const tx = await api.getPaymentStatus(checkoutRequestId, paymentCapability, merchantRequestId || undefined);
+      const tx = await api.getPaymentStatus(checkoutRequestId, paymentCapability);
       if (tx && (tx.status === 'SUCCESS' || tx.status === 'CONFIRMED' || tx.status === 'PAID')) {
         const receipt = (tx.mpesaReceiptNumber || tx.receiptNumber || '').trim();
         if (receipt) {
@@ -301,16 +301,16 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
       if (res && res.checkoutRequestId && res.paymentCapability) {
         setCheckoutRequestId(res.checkoutRequestId);
         setPaymentCapability(res.paymentCapability);
-        setMerchantRequestId(res.merchantRequestId || '');
+        setReconciliationPending(res.reconciliationPending === true);
         setStep('AWAITING_PIN');
-        startStatusPolling(res.checkoutRequestId, res.paymentCapability, res.merchantRequestId || undefined);
+        startStatusPolling(res.checkoutRequestId, res.paymentCapability);
       } else {
         throw new Error('Failed to dispatch M-Pesa push transaction. No CheckoutRequestID returned.');
       }
     } catch (err: any) {
       setCheckoutRequestId('');
       setPaymentCapability('');
-      setMerchantRequestId('');
+      setReconciliationPending(false);
       setErrorMessage(err.message || 'Could not initiate M-Pesa tip. Please try again or use direct Till 1618656.');
       setStep('ERROR');
     } finally {
@@ -801,10 +801,16 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
 
               <div>
                 <h4 className="font-serif font-bold text-lg text-white">
-                  STK Push sent. Check your phone for the official M-PESA prompt.
+                  {reconciliationPending
+                    ? 'Waiting for Safaricom to confirm the request.'
+                    : 'STK Push sent. Check your phone for the official M-PESA prompt.'}
                 </h4>
                 <p className="text-xs text-slate-300 font-sans mt-1">
-                  A prompt was dispatched to <strong className="text-rose-300 font-mono">{phoneNumber}</strong> for <strong className="text-emerald-300 font-mono">KSh {effectiveKesAmount.toLocaleString()}</strong>.
+                  {reconciliationPending ? (
+                    <>Do not retry yet. If an official prompt appears on <strong className="text-rose-300 font-mono">{phoneNumber}</strong>, complete it there while this page verifies the result.</>
+                  ) : (
+                    <>A prompt was dispatched to <strong className="text-rose-300 font-mono">{phoneNumber}</strong> for <strong className="text-emerald-300 font-mono">KSh {effectiveKesAmount.toLocaleString()}</strong>.</>
+                  )}
                 </p>
               </div>
 
@@ -815,7 +821,9 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
                 </div>
 
                 <p className="text-[11px] text-slate-400 font-sans leading-relaxed">
-                  Enter your private 4-digit M-Pesa PIN <strong>on your phone</strong> to authorize this tip.
+                  {reconciliationPending
+                    ? 'No payment will be treated as complete until Safaricom provides a verified receipt.'
+                    : <>Enter your private 4-digit M-Pesa PIN <strong>on your phone</strong> to authorize this tip.</>}
                 </p>
 
                 <div className="pt-2 border-t border-slate-800 flex items-center justify-between">

@@ -1,5 +1,6 @@
 import http, { Server } from 'http';
 import { AddressInfo } from 'net';
+import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
@@ -36,10 +37,13 @@ const affiliateMocks = vi.hoisted(() => ({
   invalidateAffiliateSession: vi.fn(),
   getAffiliateByEmail: vi.fn(),
   getAffiliateByCode: vi.fn(),
+  getAffiliateById: vi.fn(),
   getAffiliateByIdFresh: vi.fn(),
   createAffiliate: vi.fn(),
   updateAffiliate: vi.fn(),
   updateAffiliateCredential: vi.fn(),
+  setAffiliateStatus: vi.fn(),
+  toggleAffiliateLinks: vi.fn(),
   getAffiliateDashboard: vi.fn(),
   getSettings: vi.fn()
 }));
@@ -47,6 +51,7 @@ const affiliateMocks = vi.hoisted(() => ({
 const storeMocks = vi.hoisted(() => {
   const known = {
     init: vi.fn(async () => undefined),
+    getAuthSession: vi.fn(),
     affiliates: affiliateMocks
   };
   const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>();
@@ -95,6 +100,7 @@ describe('affiliate session route boundaries', () => {
   let server: Server;
   let baseUrl: string;
   const validCookie = `iw_affiliate_session=aff_sess_v2_${'b'.repeat(64)}_${'c'.repeat(64)}`;
+  const adminSessionToken = `sess_${'a'.repeat(64)}`;
 
   beforeAll(async () => {
     const app = await createApp();
@@ -110,14 +116,34 @@ describe('affiliate session route boundaries', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    storeMocks.getAuthSession.mockResolvedValue({
+      sessionId: adminSessionToken,
+      userId: 'admin_1',
+      email: 'admin@example.test',
+      name: 'Test Admin',
+      role: 'admin',
+      expiresAt: Date.now() + 60_000
+    });
     affiliateMocks.verifyAffiliateSession.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.createAffiliateSession.mockResolvedValue(`aff_sess_v2_${'d'.repeat(64)}_${'e'.repeat(64)}`);
     affiliateMocks.invalidateAffiliateSession.mockResolvedValue(undefined);
     affiliateMocks.getAffiliateByEmail.mockReturnValue({ ...privateAffiliate });
     affiliateMocks.getAffiliateByCode.mockReturnValue(undefined);
+    affiliateMocks.getAffiliateById.mockReturnValue({ ...privateAffiliate });
     affiliateMocks.getAffiliateByIdFresh.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.createAffiliate.mockResolvedValue({ ...privateAffiliate });
-    affiliateMocks.updateAffiliate.mockReturnValue({ ...privateAffiliate });
+    affiliateMocks.updateAffiliate.mockImplementation((_id, patch) => ({
+      ...privateAffiliate,
+      ...patch
+    }));
+    affiliateMocks.setAffiliateStatus.mockImplementation(async (_id, status) => ({
+      ...privateAffiliate,
+      status
+    }));
+    affiliateMocks.toggleAffiliateLinks.mockImplementation(async (_id, linksDisabled) => ({
+      ...privateAffiliate,
+      linksDisabled
+    }));
     affiliateMocks.updateAffiliateCredential.mockResolvedValue({
       ...privateAffiliate,
       passwordHash: '$argon2id$new-hash',
@@ -276,5 +302,81 @@ describe('affiliate session route boundaries', () => {
 
     expect(response.status).toBe(503);
     expect(response.headers.get('set-cookie')).toContain('iw_affiliate_session=;');
+  });
+
+  it('rejects a differing admin-submitted affiliate email before any profile update', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        name: 'Should Not Be Applied',
+        email: 'replacement@example.test'
+      })
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringMatching(/email cannot be changed/i)
+    });
+    expect(affiliateMocks.updateAffiliate).not.toHaveBeenCalled();
+    expect(affiliateMocks.setAffiliateStatus).not.toHaveBeenCalled();
+    expect(affiliateMocks.toggleAffiliateLinks).not.toHaveBeenCalled();
+  });
+
+  it('accepts an unchanged normalized email without forwarding identity mutation', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        name: 'Updated Affiliate Name',
+        email: '  AFFILIATE@EXAMPLE.TEST  '
+      })
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      success: true,
+      affiliate: {
+        name: 'Updated Affiliate Name',
+        email: privateAffiliate.email,
+        affiliateCode: privateAffiliate.affiliateCode
+      }
+    });
+    expect(affiliateMocks.updateAffiliate).toHaveBeenCalledWith(
+      privateAffiliate.id,
+      { name: 'Updated Affiliate Name' },
+      'Admin (Jake)'
+    );
+  });
+
+  it('keeps the general affiliate editor email visibly locked and out of its update payload', () => {
+    const editorSource = readFileSync(
+      new URL('./src/components/writer/AffiliatesAdminTab.tsx', import.meta.url),
+      'utf8'
+    );
+    const saveHandler = editorSource.slice(
+      editorSource.indexOf('const handleSaveEditAffiliate'),
+      editorSource.indexOf('const handleToggleStatus')
+    );
+    const emailField = editorSource.slice(
+      editorSource.indexOf('Login Email (identity locked)'),
+      editorSource.indexOf('Phone Number (M-Pesa)')
+    );
+
+    expect(saveHandler).not.toMatch(/\bemail\s*:/);
+    expect(emailField).toContain('readOnly');
+    expect(emailField).toContain('aria-readonly="true"');
+    expect(emailField).not.toContain('onChange=');
   });
 });

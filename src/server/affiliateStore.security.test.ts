@@ -260,7 +260,7 @@ describe('affiliate store credential boundaries', () => {
     expect(affiliateStore.getAffiliateByEmail('security-concurrent-create@example.test')?.passwordHash).toBe(TEST_HASH);
   });
 
-  it('ignores credential fields sent through the general profile updater', async () => {
+  it('ignores credential and reserved identity fields sent through the general profile updater', async () => {
     const created = await affiliateStore.createAffiliate({
       name: 'Patch Test Affiliate',
       email: 'security-patch@example.test',
@@ -270,18 +270,29 @@ describe('affiliate store credential boundaries', () => {
 
     const updated = affiliateStore.updateAffiliate(created.id, {
       name: 'Patch Test Affiliate Updated',
+      email: 'security-patch-reassigned@example.test',
+      affiliateCode: 'REASSIGNED03',
       passwordHash: '$argon2id$attacker-controlled',
       sessionVersion: 'a'.repeat(64)
     });
 
     expect(updated.name).toBe('Patch Test Affiliate Updated');
+    expect(updated.email).toBe(created.email);
+    expect(updated.affiliateCode).toBe(created.affiliateCode);
     expect(updated.passwordHash).toBe(TEST_HASH);
     expect(updated.sessionVersion).toBe(created.sessionVersion);
     const profileWrite = firestore.setDoc.mock.calls.find(call =>
       call[0] === 'affiliates' && call[1] === created.id && call[2]?.name === updated.name
     );
+    expect(profileWrite?.[2]).not.toHaveProperty('email');
+    expect(profileWrite?.[2]).not.toHaveProperty('affiliateCode');
     expect(profileWrite?.[2]).not.toHaveProperty('passwordHash');
     expect(profileWrite?.[2]).not.toHaveProperty('sessionVersion');
+    expect(firestore.documents.get(`affiliates/${created.id}`)).toMatchObject({
+      name: 'Patch Test Affiliate Updated',
+      email: created.email,
+      affiliateCode: created.affiliateCode
+    });
   });
 
   it('invalidates only the selected affiliate sessions on the current instance', async () => {

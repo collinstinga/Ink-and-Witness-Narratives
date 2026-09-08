@@ -2108,7 +2108,16 @@ export const store = {
           : { outcome: 'rejected' as const, error: 'A conflicting terminal payment result already exists.' };
       }
 
-      if (current.status !== 'PENDING' && current.status !== 'INITIATED' && current.status !== 'STK_SENT') {
+      const canReceiveStrongerSuccessEvidence =
+        current.status === 'PENDING' ||
+        current.status === 'INITIATED' ||
+        current.status === 'STK_SENT' ||
+        current.status === 'FAILED' ||
+        current.status === 'CANCELLED' ||
+        current.status === 'TIMEOUT' ||
+        current.status === 'TIMED_OUT' ||
+        current.status === 'EXPIRED';
+      if (!canReceiveStrongerSuccessEvidence) {
         return { outcome: 'rejected' as const, error: 'A conflicting terminal payment result already exists.' };
       }
 
@@ -2132,7 +2141,7 @@ export const store = {
         receiptNumber: cleanReceipt,
         transactionTimestamp: settlement.transactionTimestamp,
         confirmedAt: current.confirmedAt || now,
-        completedAt: current.completedAt || now,
+        completedAt: now,
         updatedAt: now,
         downloadToken
       };

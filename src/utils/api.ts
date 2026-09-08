@@ -531,11 +531,9 @@ export const api = {
     return data;
   },
 
-  async queryPayment(checkoutRequestId: string, paymentCapability: string, merchantRequestId?: string): Promise<PaymentTransaction> {
-    const headers: Record<string, string> = { 'x-payment-capability': paymentCapability };
-    if (merchantRequestId) headers['x-merchant-request-id'] = merchantRequestId;
+  async queryPayment(checkoutRequestId: string, paymentCapability: string): Promise<PaymentTransaction> {
     const res = await fetch(`/api/mpesa/query/${encodeURIComponent(checkoutRequestId)}`, {
-      headers
+      headers: { 'x-payment-capability': paymentCapability }
     });
     if (!res.ok) throw new Error('Transaction query failed');
     return res.json();
@@ -601,11 +599,9 @@ export const api = {
     return res.json();
   },
 
-  async getPaymentStatus(id: string, paymentCapability: string, merchantRequestId?: string): Promise<PaymentTransaction> {
-    const headers: Record<string, string> = { 'x-payment-capability': paymentCapability };
-    if (merchantRequestId) headers['x-merchant-request-id'] = merchantRequestId;
+  async getPaymentStatus(id: string, paymentCapability: string): Promise<PaymentTransaction> {
     const res = await fetch(`/api/payments/status/${encodeURIComponent(id)}`, {
-      headers
+      headers: { 'x-payment-capability': paymentCapability }
     });
     if (!res.ok) throw new Error('Payment status check failed');
     return res.json();

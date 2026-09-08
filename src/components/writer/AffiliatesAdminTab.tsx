@@ -194,8 +194,8 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     e.preventDefault();
     if (!showEditAffiliateModal) return;
 
-    if (!editAffName.trim() || !editAffEmail.trim()) {
-      alert("Name and email are required.");
+    if (!editAffName.trim()) {
+      alert("Name is required.");
       return;
     }
 
@@ -204,7 +204,6 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       const finalRate = editAffIsCustomRate ? Number(editAffRate) : null;
       await api.updateAdminAffiliate(showEditAffiliateModal.id, {
         name: editAffName.trim(),
-        email: editAffEmail.trim().toLowerCase(),
         phone: editAffPhone.trim() || undefined,
         customCommissionRate: finalRate,
         status: editAffStatus,
@@ -1556,13 +1555,14 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-mono text-slate-300 mb-1">Email Address</label>
+                    <label className="block text-xs font-mono text-slate-300 mb-1">Login Email (identity locked)</label>
                     <input
                       type="email"
-                      required
                       value={editAffEmail}
-                      onChange={(e) => setEditAffEmail(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-sans focus:outline-none focus:border-cyan-500"
+                      readOnly
+                      aria-readonly="true"
+                      title="Login email changes require an audited identity migration."
+                      className="w-full bg-slate-900/70 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-400 font-sans cursor-not-allowed"
                     />
                   </div>
 

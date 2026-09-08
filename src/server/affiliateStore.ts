@@ -682,6 +682,11 @@ export const affiliateStore = {
     const {
       passwordHash: _ignoredPasswordHash,
       sessionVersion: _ignoredSessionVersion,
+      // Identity keys are bound to permanent reservation documents when an
+      // affiliate is created. Keep them immutable until a future update path
+      // can move those reservations atomically.
+      email: _ignoredEmail,
+      affiliateCode: _ignoredAffiliateCode,
       ...safePatch
     } = patch;
     const updated: AffiliateAccount = {

@@ -113,7 +113,7 @@
       "properties": {
         "id": { "type": "string" },
         "checkoutRequestId": { "type": "string" },
-        "paymentAttemptId": { "type": "string", "description": "Random browser-visible correlation ID used only when the immediate Daraja response is ambiguous" },
+        "paymentAttemptId": { "type": "string", "description": "Stable random correlation ID generated for each STK request and exposed to the browser only while provider correlation is incomplete" },
         "merchantRequestId": { "type": "string" },
         "mpesaReceiptNumber": { "type": "string" },
         "receiptNumber": { "type": "string" },
@@ -156,7 +156,7 @@
         "version": { "type": "number", "enum": [1] },
         "callbackCapabilityHash": { "type": "string" },
         "paymentCapabilityHash": { "type": "string" },
-        "paymentAttemptId": { "type": "string" },
+        "paymentAttemptId": { "type": "string", "description": "Stable random correlation ID; optional only for legacy in-flight intents created before this field existed" },
         "requestLockId": { "type": "string" },
         "articleId": { "type": "string" },
         "articleTitle": { "type": "string" },
@@ -181,7 +181,7 @@
         "status": { "type": "string", "enum": ["PREPARED", "ATTACHED"] },
         "attachedAt": { "type": "string" }
       },
-      "required": ["version", "callbackCapabilityHash", "paymentCapabilityHash", "paymentAttemptId", "requestLockId", "articleId", "phoneNumber", "amount", "type", "createdAt", "expiresAt", "status"]
+      "required": ["version", "callbackCapabilityHash", "paymentCapabilityHash", "requestLockId", "articleId", "phoneNumber", "amount", "type", "createdAt", "expiresAt", "status"]
     },
     "MpesaRequestLock": {
       "title": "MpesaRequestLock",

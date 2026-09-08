@@ -86,7 +86,7 @@ describe('M-Pesa initiation durability', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/mpesa/stkpush/'))).toHaveLength(0);
   });
 
-  it('stores only capability hashes and remains recoverable if attachment fails after provider acceptance', async () => {
+  it('returns the stored attempt handle when response-side attachment throws after provider acceptance', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))
       .mockResolvedValueOnce(acceptedStkResponse());
@@ -100,20 +100,20 @@ describe('M-Pesa initiation durability', () => {
       articleTitle: 'Test article'
     });
 
+    const intent = storeMocks.saveMpesaCallbackIntent.mock.calls[0][0];
     expect(result).toMatchObject({
       success: true,
-      checkoutRequestId: 'ws_CO_123456789',
-      merchantRequestId: 'merchant_123456789'
+      checkoutRequestId: intent.paymentAttemptId
     });
+    expect(result).not.toHaveProperty('merchantRequestId');
     expect(result.paymentCapability).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
 
-    const intent = storeMocks.saveMpesaCallbackIntent.mock.calls[0][0];
     const stkRequest = fetchMock.mock.calls.find(([url]) => String(url).includes('/mpesa/stkpush/'));
     const stkBody = JSON.parse(String(stkRequest?.[1]?.body));
     const callbackCapability = new URL(stkBody.CallBackURL).searchParams.get('cb_auth');
 
     expect(intent.paymentAttemptId).toMatch(/^attempt_[A-Za-z0-9_-]{16,}$/);
-    expect(intent.paymentAttemptId).not.toBe(result.checkoutRequestId);
+    expect(intent.paymentAttemptId).not.toBe('ws_CO_123456789');
     expect(intent.paymentCapabilityHash).toBe(
       crypto.createHash('sha256').update(result.paymentCapability).digest('hex')
     );
@@ -122,6 +122,58 @@ describe('M-Pesa initiation durability', () => {
     );
     expect(JSON.stringify(intent)).not.toContain(result.paymentCapability);
     expect(JSON.stringify(intent)).not.toContain(callbackCapability);
+  });
+
+  it('returns the stored attempt handle when response-side attachment returns no transaction', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))
+      .mockResolvedValueOnce(acceptedStkResponse());
+    storeMocks.attachMpesaCallbackIntent.mockResolvedValueOnce(undefined);
+    const initiateStkPush = await loadInitiator();
+
+    const result = await initiateStkPush({
+      phoneNumber: '0712345678',
+      amount: 300,
+      articleId: 'article_1',
+      articleTitle: 'Test article'
+    });
+
+    const intent = storeMocks.saveMpesaCallbackIntent.mock.calls[0][0];
+    expect(result).toMatchObject({
+      success: true,
+      checkoutRequestId: intent.paymentAttemptId,
+      paymentCapability: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)
+    });
+    expect(result).not.toHaveProperty('merchantRequestId');
+    expect(intent).not.toHaveProperty('checkoutRequestId');
+  });
+
+  it('returns the stored attempt handle when Safaricom omits MerchantRequestID', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ResponseCode: '0',
+        CheckoutRequestID: 'ws_CO_123456789',
+        CustomerMessage: 'Request accepted for processing'
+      }));
+    const initiateStkPush = await loadInitiator();
+
+    const result = await initiateStkPush({
+      phoneNumber: '0712345678',
+      amount: 300,
+      articleId: 'article_1',
+      articleTitle: 'Test article'
+    });
+
+    const intent = storeMocks.saveMpesaCallbackIntent.mock.calls[0][0];
+    expect(result).toMatchObject({
+      success: true,
+      checkoutRequestId: intent.paymentAttemptId,
+      paymentCapability: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)
+    });
+    expect(result.checkoutRequestId).not.toBe('ws_CO_123456789');
+    expect(result).not.toHaveProperty('merchantRequestId');
+    expect(storeMocks.attachMpesaCallbackIntent).not.toHaveBeenCalled();
   });
 
   it('discards an intent after an explicit provider rejection', async () => {

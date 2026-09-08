@@ -322,6 +322,7 @@ export interface StkPushResult {
   phoneNumber?: string;
   articleTitle?: string;
   paymentCapability?: string;
+  reconciliationPending?: boolean;
   error?: string;
 }
 
@@ -363,20 +364,6 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   }
 
   console.log(`[M-PESA PAYMENT START] Phone: ${masked}, Amount: KES ${cleanAmount}, Piece ID: ${articleId || 'N/A'}`);
-
-  // Idempotency & Duplicate Protection:
-  // If an active STK Push is already pending for the same (articleId, phoneNumber) in the last 45 seconds, return active request
-  if (articleId && articleId !== 'test_stk') {
-    const duplicate = await store.findRecentPendingTransaction(articleId, formattedPhone, 45000);
-
-    if (duplicate && duplicate.checkoutRequestId) {
-      console.log('[M-PESA DUPLICATE PROTECTION] An active pending transaction already exists.');
-      return {
-        success: false,
-        error: 'Safaricom is already processing an M-Pesa request for this phone and piece. Continue in the original payment window or wait briefly before retrying.'
-      };
-    }
-  }
 
   // Load Credentials
   const mpesaSettings = store.getMpesaSettings();
@@ -592,7 +579,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
 
 function ambiguousStkResponse(
   intent: MpesaCallbackIntent,
-  paymentCapability: string
+  paymentCapability: string,
+  providerAccepted = false
 ): StkPushResult {
   if (!intent.paymentAttemptId) {
     return {
@@ -603,12 +591,17 @@ function ambiguousStkResponse(
   return {
     success: true,
     checkoutRequestId: intent.paymentAttemptId,
-    customerMessage: 'Safaricom is still confirming whether the request was accepted.',
-    message: 'The immediate Safaricom response was interrupted. Payment status will be reconciled automatically; do not retry yet.',
+    customerMessage: providerAccepted
+      ? 'Safaricom accepted the request and payment confirmation is being reconciled.'
+      : 'Safaricom is still confirming whether the request was accepted.',
+    message: providerAccepted
+      ? 'Safaricom accepted the request, but its payment record is still being reconciled. Do not retry yet.'
+      : 'The immediate Safaricom response was interrupted. Payment status will be reconciled automatically; do not retry yet.',
     amount: intent.amount,
     phoneNumber: intent.phoneNumber,
     articleTitle: intent.articleTitle,
-    paymentCapability
+    paymentCapability,
+    reconciliationPending: true
   };
 }
 
@@ -622,16 +615,7 @@ async function handleSuccessfulStkResponse(
   const merchantRequestId = stkData.MerchantRequestID;
   if (typeof merchantRequestId !== 'string' || !merchantRequestId.trim()) {
     console.error('[M-PESA TRANSACTION ATTACHMENT] Provider accepted without returning a merchant correlation ID; callback recovery is pending.');
-    return {
-      success: true,
-      checkoutRequestId,
-      customerMessage: stkData.CustomerMessage || 'M-Pesa request accepted by Safaricom for processing.',
-      message: 'M-Pesa request accepted. Waiting for Safaricom payment confirmation.',
-      amount: intent.amount,
-      phoneNumber: intent.phoneNumber,
-      articleTitle: intent.articleTitle,
-      paymentCapability
-    };
+    return ambiguousStkResponse(intent, paymentCapability, true);
   }
   console.log(`[STK PUSH SUCCESSFUL] Provider correlation IDs received. CustomerPhone: ${maskedPhone}, Amount: KES ${intent.amount}`);
 
@@ -650,6 +634,8 @@ async function handleSuccessfulStkResponse(
   }
   if (transaction) {
     console.log('[M-PESA TRANSACTION CREATED] Pending transaction attached to its durable payment intent.');
+  } else {
+    return ambiguousStkResponse(intent, paymentCapability, true);
   }
 
   return {
@@ -1155,18 +1141,10 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
         qResultDesc.toLowerCase().includes('processing')
       ) {
         console.log(`[M-PESA QUERY IN-FLIGHT] Safaricom returned in-progress code ${qResultCode}.`);
-        if (txAgeMs > 120000) {
-          resolvedResult = await recordQueryTerminalResult(
-            'TIMEOUT',
-            1037,
-            'Payment prompt timed out on phone.'
-          );
-        } else {
-          resolvedResult = {
-            status: 'PENDING',
-            resultDesc: 'Safaricom is processing the request. Check your handset for the M-Pesa prompt.'
-          };
-        }
+        resolvedResult = {
+          status: 'PENDING',
+          resultDesc: 'Safaricom is still processing the request. Keep this window open and do not retry while payment remains unconfirmed.'
+        };
       } else if (qResultCode === 1) {
         // Insufficient funds
         resolvedResult = await recordQueryTerminalResult(
@@ -1182,16 +1160,12 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
           'Incorrect M-Pesa PIN entered on your phone.'
         );
       } else {
-        // Only fail for actual terminal non-zero codes after grace period
-        if (txAgeMs > 30000) {
-          resolvedResult = await recordQueryTerminalResult(
-            'FAILED',
-            qResultCode,
-            qResultDesc || 'Payment failed.'
-          );
-        } else {
-          resolvedResult = { status: 'PENDING', resultDesc: 'Waiting for PIN on phone…' };
-        }
+        // Unclassified provider codes are not proof of terminal failure. A
+        // later authenticated callback may still carry the final receipt.
+        resolvedResult = {
+          status: 'PENDING',
+          resultDesc: qResultDesc || 'Payment status is awaiting final Safaricom confirmation.'
+        };
       }
     } else {
       const errCode = String(queryData?.errorCode || '');

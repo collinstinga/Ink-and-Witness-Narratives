@@ -17,6 +17,7 @@ const storeMocks = vi.hoisted(() => {
     loadMpesaCallbackIntentByPaymentHash: vi.fn(),
     attachMpesaCallbackIntent: vi.fn(),
     ensureAffiliateCommissionForTransaction: vi.fn(async () => undefined),
+    getAuthSession: vi.fn(),
     getArticles: vi.fn(() => [])
   };
   const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>();
@@ -54,6 +55,7 @@ describe('ambiguous M-Pesa initiation recovery', () => {
   let server: Server;
   let baseUrl: string;
   const paymentAttemptId = 'attempt_0123456789abcdef0123456789abcdef0123';
+  const adminSessionToken = `sess_${'a'.repeat(64)}`;
   const checkoutRequestId = 'ws_CO_987654321';
   const paymentCapability = generatePaymentCapability();
   const paymentCapabilityHash = hashPaymentCapability(paymentCapability);
@@ -120,6 +122,14 @@ describe('ambiguous M-Pesa initiation recovery', () => {
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     });
+    storeMocks.getAuthSession.mockResolvedValue({
+      sessionId: adminSessionToken,
+      userId: 'admin_1',
+      email: 'admin@example.test',
+      name: 'Test Admin',
+      role: 'admin',
+      expiresAt: Date.now() + 60_000
+    });
     mpesaMocks.queryPaymentStatus.mockResolvedValue({ status: 'PENDING' });
   });
 
@@ -153,7 +163,51 @@ describe('ambiguous M-Pesa initiation recovery', () => {
     expect(mpesaMocks.queryPaymentStatus).not.toHaveBeenCalled();
   });
 
-  it('stops an uncorrelated attempt after the safe reconciliation window without claiming payment', async () => {
+  it('never attaches or queries client-supplied provider correlation IDs', async () => {
+    const response = await fetch(`${baseUrl}/api/payments/status/ws_CO_client_supplied`, {
+      headers: {
+        'x-payment-capability': paymentCapability,
+        'x-merchant-request-id': 'merchant_client_supplied'
+      }
+    });
+
+    expect(response.status).toBe(404);
+    expect(storeMocks.attachMpesaCallbackIntent).not.toHaveBeenCalled();
+    expect(mpesaMocks.queryPaymentStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not tell an administrator that Safaricom accepted an ambiguous test STK result', async () => {
+    mpesaMocks.initiateStkPush.mockResolvedValueOnce({
+      success: true,
+      reconciliationPending: true,
+      checkoutRequestId: paymentAttemptId,
+      paymentCapability,
+      message: 'The immediate Safaricom response was interrupted. Payment status will be reconciled automatically; do not retry yet.'
+    });
+
+    const response = await fetch(`${baseUrl}/api/admin/mpesa/test-stk`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ phone: '0712345678', amount: 1 })
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect([200, 202]).toContain(response.status);
+    expect(body).toMatchObject({
+      success: false,
+      status: 'PENDING',
+      checkoutRequestId: paymentAttemptId
+    });
+    expect(String(body.message || body.error || '')).toMatch(/uncertain|inconclusive|reconcil/i);
+    expect(String(body.message || body.error || '')).not.toMatch(/Safaricom accepted/i);
+  });
+
+  it('keeps an uncorrelated synthetic attempt non-terminal after the reconciliation window', async () => {
     storeMocks.loadMpesaCallbackIntentByPaymentHash.mockResolvedValueOnce({
       ...pendingIntent,
       createdAt: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
@@ -166,7 +220,7 @@ describe('ambiguous M-Pesa initiation recovery', () => {
     const body = await response.json() as Record<string, unknown>;
 
     expect(response.status).toBe(200);
-    expect(body).toMatchObject({ status: 'TIMEOUT', rawStatus: 'TIMEOUT' });
+    expect(body).toMatchObject({ status: 'PENDING', rawStatus: 'PENDING' });
     expect(body).not.toHaveProperty('downloadToken');
     expect(body).not.toHaveProperty('mpesaReceiptNumber');
     expect(mpesaMocks.queryPaymentStatus).not.toHaveBeenCalled();

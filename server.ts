@@ -110,17 +110,9 @@ function getPaymentCapability(req: Request): unknown {
   return req.headers['x-payment-capability'];
 }
 
-function getMerchantRequestId(req: Request): string | undefined {
-  const value = req.headers['x-merchant-request-id'];
-  return isSafePublicIdentifier(value, 160) ? value : undefined;
-}
-
-const MPESA_AMBIGUOUS_RECONCILIATION_MS = 2 * 60 * 1000;
-
 async function resolvePaymentStatusSubject(
   identifier: string,
-  paymentCapability: string,
-  merchantRequestId?: string
+  paymentCapability: string
 ): Promise<{
   transaction?: PaymentTransaction;
   intent?: Awaited<ReturnType<typeof store.loadMpesaCallbackIntentByPaymentHash>>;
@@ -147,10 +139,7 @@ async function resolvePaymentStatusSubject(
 
   const matchesAttempt = intent.paymentAttemptId === identifier;
   const matchesCheckout = intent.checkoutRequestId === identifier;
-  const canRecoverProviderAttachment = !isAttemptIdentifier &&
-    !intent.checkoutRequestId &&
-    Boolean(merchantRequestId);
-  if (!matchesAttempt && !matchesCheckout && !canRecoverProviderAttachment) return {};
+  if (!matchesAttempt && !matchesCheckout) return {};
 
   if (intent.checkoutRequestId) {
     const linked = await store.refreshTransaction(intent.checkoutRequestId);
@@ -160,24 +149,6 @@ async function resolvePaymentStatusSubject(
         : {};
     }
   }
-
-  const correlatedMerchantId = intent.merchantRequestId || merchantRequestId;
-  const correlatedCheckoutId = intent.checkoutRequestId || (matchesAttempt ? undefined : identifier);
-  if (
-    correlatedCheckoutId &&
-    correlatedMerchantId &&
-    isSafePublicIdentifier(correlatedCheckoutId, 160) &&
-    isSafePublicIdentifier(correlatedMerchantId, 160)
-  ) {
-    const recovered = await store.attachMpesaCallbackIntent(
-      intent.callbackCapabilityHash,
-      correlatedCheckoutId,
-      correlatedMerchantId
-    );
-    if (recovered && verifyPaymentCapability(paymentCapability, recovered.paymentCapabilityHash)) {
-      return { transaction: recovered, intent };
-    }
-  }
   return { intent };
 }
 
@@ -185,10 +156,6 @@ function toPublicMpesaIntentStatus(
   requestedIdentifier: string,
   intent: NonNullable<Awaited<ReturnType<typeof store.loadMpesaCallbackIntentByPaymentHash>>>
 ) {
-  const createdAtMs = Date.parse(intent.createdAt);
-  const reconciliationTimedOut = !intent.checkoutRequestId &&
-    Number.isFinite(createdAtMs) &&
-    Date.now() - createdAtMs >= MPESA_AMBIGUOUS_RECONCILIATION_MS;
   return {
     checkoutRequestId: requestedIdentifier,
     articleId: intent.articleId,
@@ -197,11 +164,9 @@ function toPublicMpesaIntentStatus(
     currency: intent.currency,
     paymentMethod: 'mpesa',
     type: intent.type,
-    status: reconciliationTimedOut ? 'TIMEOUT' : 'PENDING',
-    rawStatus: reconciliationTimedOut ? 'TIMEOUT' : 'PENDING',
-    resultDesc: reconciliationTimedOut
-      ? 'No completed Safaricom payment was confirmed for this request. Check your M-Pesa messages before retrying.'
-      : 'Waiting for Safaricom payment confirmation.'
+    status: 'PENDING',
+    rawStatus: 'PENDING',
+    resultDesc: 'Payment is not yet confirmed. Keep this window open and check your M-Pesa messages before retrying.'
   };
 }
 
@@ -1210,7 +1175,7 @@ export async function createApp() {
         success: true,
         message: stkResult.message,
         checkoutRequestId: stkResult.checkoutRequestId,
-        merchantRequestId: stkResult.merchantRequestId,
+        reconciliationPending: stkResult.reconciliationPending === true,
         articleTitle,
         amount: chargeAmount,
         currency: currency || "KES",
@@ -1371,8 +1336,7 @@ export async function createApp() {
       }
       const resolved = await resolvePaymentStatusSubject(
         checkoutRequestId,
-        paymentCapability,
-        getMerchantRequestId(req)
+        paymentCapability
       );
       if (!resolved.transaction && resolved.intent) {
         res.setHeader('Cache-Control', 'no-store');
@@ -1411,8 +1375,7 @@ export async function createApp() {
       }
       const resolved = await resolvePaymentStatusSubject(
         id,
-        paymentCapability,
-        getMerchantRequestId(req)
+        paymentCapability
       );
       if (!resolved.transaction && resolved.intent) {
         res.setHeader('Cache-Control', 'no-store');
@@ -2744,8 +2707,20 @@ export async function createApp() {
         });
       }
 
+      const reconciliationPending = stkResult.reconciliationPending === true;
+      if (reconciliationPending) {
+        return res.status(202).json({
+          success: false,
+          status: 'PENDING',
+          reconciliationPending: true,
+          message: stkResult.message || 'Safaricom acceptance could not be confirmed immediately. Do not retry until the request is reconciled.',
+          checkoutRequestId: stkResult.checkoutRequestId
+        });
+      }
+
       res.json({
         success: true,
+        reconciliationPending: false,
         message: `Safaricom accepted the KES ${testAmount} test request. Await handset delivery confirmation before treating the connection as ready.`,
         checkoutRequestId: stkResult.checkoutRequestId,
         merchantRequestId: stkResult.merchantRequestId
@@ -3537,11 +3512,22 @@ ${currentDraft || prompt}
         return res.status(404).json({ error: "Affiliate not found." });
       }
 
+      if (Object.prototype.hasOwnProperty.call(req.body, 'email')) {
+        const requestedEmail = typeof req.body.email === 'string'
+          ? req.body.email.trim().toLowerCase()
+          : '';
+        const existingEmail = (existing.email || '').trim().toLowerCase();
+        if (requestedEmail !== existingEmail) {
+          return res.status(409).json({
+            error: "Affiliate login email cannot be changed from the general editor. Create a new account or use the audited identity-migration process."
+          });
+        }
+      }
+
       // Keep the general editor away from credentials, identity keys, balances,
       // counters, and timestamps. Status/link changes use their durable paths.
       const editableFields = [
         'name',
-        'email',
         'phone',
         'customCommissionRate',
         'payoutMethod',

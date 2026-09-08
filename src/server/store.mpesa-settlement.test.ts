@@ -311,6 +311,71 @@ describe('atomic M-Pesa settlement', () => {
     )).toHaveLength(1);
   });
 
+  it.each(['FAILED', 'CANCELLED', 'TIMEOUT'] as const)(
+    'allows one fully correlated success to supersede prior %s state without duplicating settlement',
+    async priorStatus => {
+      const checkoutRequestId = `checkout_late_${priorStatus.toLowerCase()}`;
+      const receiptNumber = `SIALATE${priorStatus.slice(0, 4)}`;
+      firestoreMock.documents.set(
+        `transactions/${checkoutRequestId}`,
+        pendingTransaction(checkoutRequestId, {
+          status: priorStatus,
+          resultCode: priorStatus === 'CANCELLED' ? 1032 : priorStatus === 'TIMEOUT' ? 1037 : 1,
+          resultDesc: `Earlier ${priorStatus.toLowerCase()} result`,
+          completedAt: '2026-09-05T10:02:00.000Z'
+        })
+      );
+
+      const [first, second] = await Promise.all([
+        store.settleMpesaTransaction(
+          checkoutRequestId,
+          settlement(checkoutRequestId, receiptNumber)
+        ),
+        store.settleMpesaTransaction(
+          checkoutRequestId,
+          settlement(checkoutRequestId, receiptNumber)
+        )
+      ]);
+
+      expect([first.outcome, second.outcome].sort()).toEqual(['committed', 'duplicate']);
+      expect(first.downloadToken).toBe(second.downloadToken);
+      expect(first.downloadToken).toMatch(/^ink_/);
+      expect(firestoreMock.documents.get(`transactions/${checkoutRequestId}`)).toMatchObject({
+        status: 'CONFIRMED',
+        resultCode: 0,
+        resultDesc: 'Success',
+        mpesaReceiptNumber: receiptNumber,
+        receiptNumber,
+        downloadToken: first.downloadToken
+      });
+      expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+        key.startsWith('payment_receipts/')
+      )).toHaveLength(1);
+      expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+        key.startsWith('reader_licenses/')
+      )).toHaveLength(1);
+
+      const laterFailure = await store.recordMpesaTerminalFailure(checkoutRequestId, {
+        merchantRequestId: `merchant_${checkoutRequestId}`,
+        callbackCapabilityHash: 'b'.repeat(64),
+        resultCode: 1032,
+        resultDesc: 'Late cancellation must not win',
+        status: 'CANCELLED'
+      });
+
+      expect(laterFailure.outcome).toBe('rejected');
+      expect(firestoreMock.documents.get(`transactions/${checkoutRequestId}`)).toMatchObject({
+        status: 'CONFIRMED',
+        resultCode: 0,
+        mpesaReceiptNumber: receiptNumber,
+        downloadToken: first.downloadToken
+      });
+      expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+        key.startsWith('reader_licenses/')
+      )).toHaveLength(1);
+    }
+  );
+
   it('prevents a later failure callback from regressing a confirmed payment', async () => {
     firestoreMock.documents.set('transactions/checkout_1', pendingTransaction('checkout_1'));
     await store.settleMpesaTransaction('checkout_1', settlement('checkout_1'));
