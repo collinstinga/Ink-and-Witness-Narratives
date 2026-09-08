@@ -502,6 +502,7 @@ export type TransactionStatus = 'INITIATED' | 'STK_SENT' | 'PENDING' | 'CONFIRME
 export interface PaymentTransaction {
   id: string;
   checkoutRequestId: string;
+  paymentAttemptId?: string;
   merchantRequestId?: string;
   articleId: string;
   articleTitle?: string;

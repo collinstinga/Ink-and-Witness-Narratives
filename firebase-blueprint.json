@@ -93,6 +93,19 @@
       },
       "required": ["storageVersion", "affiliateId", "sessionVersion", "createdAt", "expiresAt"]
     },
+    "AffiliateIdentityReservation": {
+      "title": "AffiliateIdentityReservation",
+      "description": "Server-only transactional ownership reservation preventing duplicate affiliate codes or emails",
+      "type": "object",
+      "properties": {
+        "affiliateId": { "type": "string" },
+        "affiliateCode": { "type": "string" },
+        "emailHash": { "type": "string" },
+        "reservedAt": { "type": "string" },
+        "deletedAt": { "type": "string" }
+      },
+      "required": ["affiliateId", "reservedAt"]
+    },
     "PaymentTransaction": {
       "title": "PaymentTransaction",
       "description": "Reader payment transaction and M-Pesa payment record",
@@ -100,6 +113,7 @@
       "properties": {
         "id": { "type": "string" },
         "checkoutRequestId": { "type": "string" },
+        "paymentAttemptId": { "type": "string", "description": "Random browser-visible correlation ID used only when the immediate Daraja response is ambiguous" },
         "merchantRequestId": { "type": "string" },
         "mpesaReceiptNumber": { "type": "string" },
         "receiptNumber": { "type": "string" },
@@ -142,6 +156,7 @@
         "version": { "type": "number", "enum": [1] },
         "callbackCapabilityHash": { "type": "string" },
         "paymentCapabilityHash": { "type": "string" },
+        "paymentAttemptId": { "type": "string" },
         "requestLockId": { "type": "string" },
         "articleId": { "type": "string" },
         "articleTitle": { "type": "string" },
@@ -166,7 +181,7 @@
         "status": { "type": "string", "enum": ["PREPARED", "ATTACHED"] },
         "attachedAt": { "type": "string" }
       },
-      "required": ["version", "callbackCapabilityHash", "paymentCapabilityHash", "requestLockId", "articleId", "phoneNumber", "amount", "type", "createdAt", "expiresAt", "status"]
+      "required": ["version", "callbackCapabilityHash", "paymentCapabilityHash", "paymentAttemptId", "requestLockId", "articleId", "phoneNumber", "amount", "type", "createdAt", "expiresAt", "status"]
     },
     "MpesaRequestLock": {
       "title": "MpesaRequestLock",
@@ -401,6 +416,14 @@
     "/affiliate_sessions/{hashedSessionId}": {
       "schema": "AffiliateSession",
       "description": "Signed affiliate sessions keyed by v2_<sha256(cookie token)>; bearer values are never persisted"
+    },
+    "/affiliate_codes/{normalizedCode}": {
+      "schema": "AffiliateIdentityReservation",
+      "description": "Permanent transactional affiliate-code ownership reservation; codes are not silently reassigned"
+    },
+    "/affiliate_emails/{emailHash}": {
+      "schema": "AffiliateIdentityReservation",
+      "description": "Transactional affiliate-email ownership reservation keyed by SHA-256 email hash"
     },
     "/transactions/{transactionId}": {
       "schema": "PaymentTransaction",

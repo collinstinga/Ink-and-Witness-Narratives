@@ -196,6 +196,7 @@ let cachedSessionVerifiedAt: Map<string, number> = new Map();
 let sessionLookupPromises: Map<string, Promise<AffiliateAccount | null>> = new Map();
 let missingSessions: Map<string, number> = new Map();
 let affiliateSessionInvalidationEpochs: Map<string, number> = new Map();
+let affiliateDirectoryReady = false;
 
 const AFFILIATE_SESSION_CACHE_TTL_MS = 60 * 1000;
 const MISSING_AFFILIATE_SESSION_CACHE_TTL_MS = 30 * 1000;
@@ -308,6 +309,7 @@ export const affiliateStore = {
     sessionLookupPromises.clear();
     missingSessions.clear();
     affiliateSessionInvalidationEpochs.clear();
+    affiliateDirectoryReady = false;
 
     // 1. Load Settings from Firestore / JSON
     try {
@@ -352,6 +354,7 @@ export const affiliateStore = {
         cachedAffiliates = [];
         writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
       }
+      affiliateDirectoryReady = true;
     } catch (e) {
       console.warn('[AffiliateStore] Error loading affiliates:', e);
     }
@@ -541,6 +544,9 @@ export const affiliateStore = {
   },
 
   async createAffiliate(data: Partial<AffiliateAccount>, actor = 'System'): Promise<AffiliateAccount> {
+    if (!affiliateDirectoryReady) {
+      throw new Error('Affiliate registration is temporarily unavailable. Please retry later.');
+    }
     const email = (data.email || '').trim().toLowerCase();
     if (!email) {
       throw new Error("Email address is required.");
@@ -557,9 +563,10 @@ export const affiliateStore = {
       affiliateCode = `${namePart || 'IW'}${randDigits}`;
     }
 
-    // Check duplicate code
+    // Existing legacy accounts predate the reservation index, so a complete
+    // directory load remains part of the duplicate check during migration.
     if (this.getAffiliateByCode(affiliateCode)) {
-      affiliateCode = `${affiliateCode}${crypto.randomInt(10, 100)}`;
+      throw new Error('That affiliate code is already in use. Choose another code.');
     }
 
     const id = `aff_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
@@ -603,7 +610,34 @@ export const affiliateStore = {
       sessionVersion: createAffiliateSessionVersion()
     };
 
-    await setFirestoreDoc('affiliates', newAffiliate.id, newAffiliate);
+    const db = getDb();
+    const affiliateRef = db.collection('affiliates').doc(newAffiliate.id);
+    const codeReservationRef = db.collection('affiliate_codes').doc(affiliateCode);
+    const emailReservationId = crypto.createHash('sha256').update(email).digest('hex');
+    const emailReservationRef = db.collection('affiliate_emails').doc(emailReservationId);
+    await db.runTransaction(async firestoreTransaction => {
+      const [codeReservation, emailReservation] = await Promise.all([
+        firestoreTransaction.get(codeReservationRef),
+        firestoreTransaction.get(emailReservationRef)
+      ]);
+      if (codeReservation.exists) {
+        throw new Error('That affiliate code is already in use. Choose another code.');
+      }
+      if (emailReservation.exists) {
+        throw new Error('An affiliate account already exists for that email address.');
+      }
+      firestoreTransaction.set(affiliateRef, newAffiliate, { merge: false });
+      firestoreTransaction.set(codeReservationRef, {
+        affiliateId: newAffiliate.id,
+        affiliateCode,
+        reservedAt: now
+      }, { merge: false });
+      firestoreTransaction.set(emailReservationRef, {
+        affiliateId: newAffiliate.id,
+        emailHash: emailReservationId,
+        reservedAt: now
+      }, { merge: false });
+    });
     cachedAffiliates.unshift(newAffiliate);
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
     this.recordAudit(actor, 'affiliate_created', 'affiliate', `Created affiliate ${newAffiliate.name} (${newAffiliate.affiliateCode})`, id, null, newAffiliate);

@@ -3,6 +3,7 @@ import { getMpesaRequestLockId, store, type MpesaCallbackIntent } from './store.
 import { MpesaConfig, PaymentTransaction } from '../types.js';
 import {
   attachCallbackCapability,
+  generatePaymentAttemptId,
   generatePaymentCapability,
   hashPaymentCapability,
   verifyPaymentCapability
@@ -419,6 +420,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   const callbackCapability = generatePaymentCapability();
   const callbackCapabilityHash = hashPaymentCapability(callbackCapability);
   const paymentCapability = generatePaymentCapability();
+  const paymentAttemptId = generatePaymentAttemptId();
   try {
     callbackUrl = attachCallbackCapability(
       resolveDarajaCallbackUrl(
@@ -448,6 +450,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     version: 1,
     callbackCapabilityHash,
     paymentCapabilityHash: hashPaymentCapability(paymentCapability),
+    paymentAttemptId,
     requestLockId: getMpesaRequestLockId(
       articleId || (paymentType === 'TIP' ? 'general_tip' : 'custom'),
       formattedPhone
@@ -576,21 +579,37 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
       } else {
         console.warn('[M-PESA STK AMBIGUOUS] Recovery intent retained because provider acceptance could not be ruled out.');
       }
-      return {
-        success: false,
-        error: definitiveRejection
-          ? errorMsg
-          : 'Safaricom returned an uncertain response. Do not retry immediately; wait two minutes while payment status is reconciled.',
-        checkoutRequestId: undefined
-      };
+      if (!definitiveRejection) {
+        return ambiguousStkResponse(intent, paymentCapability);
+      }
+      return { success: false, error: errorMsg };
     }
   } catch (error: any) {
     console.error('[M-PESA STK NETWORK ERROR]:', error);
+    return ambiguousStkResponse(intent, paymentCapability);
+  }
+}
+
+function ambiguousStkResponse(
+  intent: MpesaCallbackIntent,
+  paymentCapability: string
+): StkPushResult {
+  if (!intent.paymentAttemptId) {
     return {
       success: false,
-      error: 'Safaricom returned an uncertain network outcome. Do not retry immediately; wait two minutes while any accepted payment is reconciled.'
+      error: 'Safaricom returned an uncertain response. Wait two minutes before trying again.'
     };
   }
+  return {
+    success: true,
+    checkoutRequestId: intent.paymentAttemptId,
+    customerMessage: 'Safaricom is still confirming whether the request was accepted.',
+    message: 'The immediate Safaricom response was interrupted. Payment status will be reconciled automatically; do not retry yet.',
+    amount: intent.amount,
+    phoneNumber: intent.phoneNumber,
+    articleTitle: intent.articleTitle,
+    paymentCapability
+  };
 }
 
 async function handleSuccessfulStkResponse(

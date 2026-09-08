@@ -301,7 +301,9 @@ describe('public payment route security', () => {
     expect(response.status).toBe(200);
     expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
       affiliateCode: 'partner_7',
-      campaignCode: 'launch_2026'
+      campaignCode: 'launch_2026',
+      affiliateAttributionAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      affiliateAttributionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)
     }));
   });
 
@@ -352,7 +354,9 @@ describe('public payment route security', () => {
     expect(storeMocks.saveTransaction).toHaveBeenCalledWith(expect.objectContaining({
       articleId: 'article_1',
       affiliateCode: 'partner_7',
-      campaignCode: 'launch_2026'
+      campaignCode: 'launch_2026',
+      affiliateAttributionAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      affiliateAttributionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)
     }));
   });
 

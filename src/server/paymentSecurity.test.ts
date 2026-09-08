@@ -3,8 +3,10 @@ import {
   PAYMENT_CALLBACK_QUERY_PARAMETER,
   attachCallbackCapability,
   canRecoverMpesaPurchase,
+  generatePaymentAttemptId,
   generatePaymentCapability,
   hashPaymentCapability,
+  isPaymentAttemptId,
   redactPaymentTransaction,
   verifyPaymentCapability
 } from './paymentSecurity.js';
@@ -17,6 +19,16 @@ describe('payment capabilities', () => {
     expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(second).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(first).not.toBe(second);
+  });
+
+  it('generates opaque payment attempt identifiers with a strict public format', () => {
+    const first = generatePaymentAttemptId();
+    const second = generatePaymentAttemptId();
+
+    expect(first).toMatch(/^attempt_[a-f0-9]{36}$/);
+    expect(second).not.toBe(first);
+    expect(isPaymentAttemptId(first)).toBe(true);
+    expect(isPaymentAttemptId('attempt_wrong_identifier')).toBe(false);
   });
 
   it('stores and verifies only a SHA-256 hash', () => {

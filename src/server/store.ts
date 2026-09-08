@@ -7,6 +7,7 @@ import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
 import { sanitizeImageDataUrl } from './imageSecurity.js';
+import { isPaymentAttemptId } from './paymentSecurity.js';
 import {
   AUTH_SESSION_STORAGE_VERSION,
   createSignedAuthSessionToken,
@@ -123,6 +124,7 @@ export type MpesaCallbackIntent = {
   version: 1;
   callbackCapabilityHash: string;
   paymentCapabilityHash: string;
+  paymentAttemptId?: string;
   requestLockId: string;
   articleId: string;
   articleTitle: string;
@@ -363,6 +365,7 @@ function findCachedTransaction(identifier: string): PaymentTransaction | undefin
     if (
       tx.id === identifier ||
       tx.checkoutRequestId === identifier ||
+      tx.paymentAttemptId === identifier ||
       tx.merchantRequestId === identifier ||
       tx.mpesaReceiptNumber === identifier ||
       tx.receiptNumber === identifier ||
@@ -460,6 +463,9 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
     !safeOptionalIntentText(intent.userId, 160) ||
     !safeOptionalIntentText(intent.userEmail, 320)
   ) return undefined;
+  if (intent.paymentAttemptId !== undefined && !isPaymentAttemptId(intent.paymentAttemptId)) {
+    return undefined;
+  }
   if (intent.affiliateAttributionAt !== undefined && (
     typeof intent.affiliateAttributionAt !== 'string' ||
     !Number.isFinite(Date.parse(intent.affiliateAttributionAt))
@@ -500,6 +506,7 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
 function mpesaIntentsMatch(left: MpesaCallbackIntent, right: MpesaCallbackIntent): boolean {
   return left.callbackCapabilityHash === right.callbackCapabilityHash &&
     left.paymentCapabilityHash === right.paymentCapabilityHash &&
+    left.paymentAttemptId === right.paymentAttemptId &&
     left.requestLockId === right.requestLockId &&
     left.articleId === right.articleId &&
     left.articleTitle === right.articleTitle &&
@@ -529,6 +536,7 @@ function transactionFromMpesaIntent(
   return {
     id: `tx_mpesa_${crypto.createHash('sha256').update(checkoutRequestId).digest('hex').slice(0, 24)}`,
     checkoutRequestId,
+    paymentAttemptId: intent.paymentAttemptId,
     merchantRequestId,
     articleId: intent.articleId,
     articleTitle: intent.articleTitle,
@@ -1852,6 +1860,25 @@ export const store = {
       !transaction ||
       !isPersistentTransaction(transaction) ||
       transaction.checkoutRequestId !== checkoutRequestId
+    ) {
+      return undefined;
+    }
+    return cacheTransaction(transaction);
+  },
+
+  async refreshTransactionByPaymentAttemptId(paymentAttemptId: string): Promise<PaymentTransaction | undefined> {
+    if (!isPaymentAttemptId(paymentAttemptId)) return undefined;
+    const snapshot = await getDb()
+      .collection('transactions')
+      .where('paymentAttemptId', '==', paymentAttemptId)
+      .limit(2)
+      .get();
+    if (snapshot.docs.length !== 1) return undefined;
+    const transaction = snapshot.docs[0].data() as PaymentTransaction;
+    if (
+      !isPersistentTransaction(transaction) ||
+      transaction.paymentAttemptId !== paymentAttemptId ||
+      !transaction.checkoutRequestId
     ) {
       return undefined;
     }

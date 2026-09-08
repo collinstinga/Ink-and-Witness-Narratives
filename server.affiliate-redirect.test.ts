@@ -80,10 +80,11 @@ describe('affiliate redirect route', () => {
       status: 'active',
       linksDisabled: false
     });
-    affiliateMocks.registerClick.mockReturnValue({
+    affiliateMocks.registerClick.mockImplementation((_code, _articleId, campaign) => ({
       valid: true,
-      affiliate: { affiliateCode: 'PARTNER_7', name: 'Test Partner' }
-    });
+      affiliate: { affiliateCode: 'PARTNER_7', name: 'Test Partner' },
+      campaign: campaign ? { code: String(campaign).toUpperCase() } : undefined
+    }));
   });
 
   async function requestRedirect(path: string): Promise<Response> {
@@ -156,7 +157,7 @@ describe('affiliate redirect route', () => {
     expect(target.pathname).toBe('/');
     expect(Object.fromEntries(target.searchParams)).toEqual({
       ref: 'PARTNER_7',
-      c: 'launch_2026'
+      c: 'LAUNCH_2026'
     });
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
     expect(affiliateMocks.registerClick.mock.calls[0]?.slice(0, 3)).toEqual([

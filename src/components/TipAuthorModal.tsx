@@ -214,6 +214,10 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
           const detail = tx.resultDesc || (tx as any).error || 'Safaricom rejected this tip request.';
           setErrorMessage(`Safaricom Notice: ${detail}`);
           setStep('ERROR');
+        } else if (tx && (tx.status === 'TIMEOUT' || tx.status === 'TIMED_OUT')) {
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+          setErrorMessage(tx.resultDesc || 'No completed Safaricom payment was confirmed. Check your M-Pesa messages before retrying.');
+          setStep('ERROR');
         }
         // Keep polling calmly if status is PENDING or other
       } catch (err) {
@@ -247,6 +251,9 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
       } else if (tx && tx.status === 'FAILED') {
         const detail = tx.resultDesc || (tx as any).error || 'Safaricom rejected this payment.';
         setErrorMessage(`Safaricom Notice: ${detail}`);
+        setStep('ERROR');
+      } else if (tx && (tx.status === 'TIMEOUT' || tx.status === 'TIMED_OUT')) {
+        setErrorMessage(tx.resultDesc || 'No completed Safaricom payment was confirmed. Check your M-Pesa messages before retrying.');
         setStep('ERROR');
       } else {
         setErrorMessage('Payment is awaiting confirmation on Safaricom. If you entered your PIN on your phone, please wait a moment.');

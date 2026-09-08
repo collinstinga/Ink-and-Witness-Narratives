@@ -3,12 +3,22 @@ import { PaymentTransaction } from '../types.js';
 
 export const PAYMENT_CAPABILITY_BYTES = 32;
 export const PAYMENT_CALLBACK_QUERY_PARAMETER = 'cb_auth';
+export const PAYMENT_ATTEMPT_BYTES = 18;
 
 const CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const PAYMENT_ATTEMPT_PATTERN = /^attempt_[a-f0-9]{36}$/;
 
 export function generatePaymentCapability(): string {
   return crypto.randomBytes(PAYMENT_CAPABILITY_BYTES).toString('base64url');
+}
+
+export function generatePaymentAttemptId(): string {
+  return `attempt_${crypto.randomBytes(PAYMENT_ATTEMPT_BYTES).toString('hex')}`;
+}
+
+export function isPaymentAttemptId(value: unknown): value is string {
+  return typeof value === 'string' && PAYMENT_ATTEMPT_PATTERN.test(value);
 }
 
 export function hashPaymentCapability(capability: string): string {

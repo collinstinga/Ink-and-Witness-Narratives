@@ -177,6 +177,49 @@ describe('affiliate store credential boundaries', () => {
     expect(affiliateStore.getAffiliateById(created.id)?.passwordHash).toBe(TEST_HASH);
   });
 
+  it('does not silently reassign a reserved affiliate code or email after deletion', async () => {
+    const created = await affiliateStore.createAffiliate({
+      name: 'Reserved Identity Affiliate',
+      email: 'reserved-identity@example.test',
+      phone: '254700000099',
+      passwordHash: TEST_HASH,
+      affiliateCode: 'RESERVED99'
+    });
+    expect(await affiliateStore.deleteAffiliate(created.id, 'Test')).toBe(true);
+
+    await expect(affiliateStore.createAffiliate({
+      name: 'Code Reassignment Attempt',
+      email: 'different-reservation@example.test',
+      phone: '254700000098',
+      passwordHash: TEST_HASH,
+      affiliateCode: 'RESERVED99'
+    })).rejects.toThrow(/already in use/i);
+
+    await expect(affiliateStore.createAffiliate({
+      name: 'Email Reassignment Attempt',
+      email: 'reserved-identity@example.test',
+      phone: '254700000097',
+      passwordHash: TEST_HASH,
+      affiliateCode: 'DIFFERENT99'
+    })).rejects.toThrow(/already exists/i);
+  });
+
+  it('fails closed when the affiliate directory could not be loaded', async () => {
+    firestore.getAllDocs.mockRejectedValueOnce(new Error('simulated affiliate directory outage'));
+    await affiliateStore.init();
+
+    await expect(affiliateStore.createAffiliate({
+      name: 'Unavailable Directory Attempt',
+      email: 'directory-outage@example.test',
+      phone: '254700000096',
+      passwordHash: TEST_HASH,
+      affiliateCode: 'OUTAGE96'
+    })).rejects.toThrow(/temporarily unavailable/i);
+
+    // Restore the shared fixture for later tests in this file.
+    await affiliateStore.init();
+  });
+
   it('persists only credential fields and re-finds the affiliate after an async write', async () => {
     const created = await affiliateStore.createAffiliate({
       name: 'Credential Merge Test Affiliate',

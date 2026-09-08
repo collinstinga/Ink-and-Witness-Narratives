@@ -42,6 +42,7 @@ import {
   canRecoverMpesaPurchase,
   generatePaymentCapability,
   hashPaymentCapability,
+  isPaymentAttemptId,
   redactPaymentTransaction,
   verifyPaymentCapability
 } from "./src/server/paymentSecurity.js";
@@ -114,6 +115,8 @@ function getMerchantRequestId(req: Request): string | undefined {
   return isSafePublicIdentifier(value, 160) ? value : undefined;
 }
 
+const MPESA_AMBIGUOUS_RECONCILIATION_MS = 2 * 60 * 1000;
+
 async function resolvePaymentStatusSubject(
   identifier: string,
   paymentCapability: string,
@@ -122,21 +125,53 @@ async function resolvePaymentStatusSubject(
   transaction?: PaymentTransaction;
   intent?: Awaited<ReturnType<typeof store.loadMpesaCallbackIntentByPaymentHash>>;
 }> {
-  const existing = await store.refreshTransaction(identifier);
-  if (existing) {
-    return verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)
-      ? { transaction: existing }
-      : {};
+  const isAttemptIdentifier = isPaymentAttemptId(identifier);
+  if (!isAttemptIdentifier) {
+    const existing = await store.refreshTransaction(identifier);
+    if (existing) {
+      return verifyPaymentCapability(paymentCapability, existing.paymentCapabilityHash)
+        ? { transaction: existing }
+        : {};
+    }
   }
 
   const intent = await store.loadMpesaCallbackIntentByPaymentHash(hashPaymentCapability(paymentCapability));
-  if (!intent || (intent.checkoutRequestId && intent.checkoutRequestId !== identifier)) return {};
+  if (!intent) {
+    if (!isAttemptIdentifier) return {};
+    const recoveredByAttempt = await store.refreshTransactionByPaymentAttemptId(identifier);
+    if (!recoveredByAttempt) return {};
+    return verifyPaymentCapability(paymentCapability, recoveredByAttempt.paymentCapabilityHash)
+      ? { transaction: recoveredByAttempt }
+      : {};
+  }
+
+  const matchesAttempt = intent.paymentAttemptId === identifier;
+  const matchesCheckout = intent.checkoutRequestId === identifier;
+  const canRecoverProviderAttachment = !isAttemptIdentifier &&
+    !intent.checkoutRequestId &&
+    Boolean(merchantRequestId);
+  if (!matchesAttempt && !matchesCheckout && !canRecoverProviderAttachment) return {};
+
+  if (intent.checkoutRequestId) {
+    const linked = await store.refreshTransaction(intent.checkoutRequestId);
+    if (linked) {
+      return verifyPaymentCapability(paymentCapability, linked.paymentCapabilityHash)
+        ? { transaction: linked, intent }
+        : {};
+    }
+  }
 
   const correlatedMerchantId = intent.merchantRequestId || merchantRequestId;
-  if (correlatedMerchantId && isSafePublicIdentifier(correlatedMerchantId, 160)) {
+  const correlatedCheckoutId = intent.checkoutRequestId || (matchesAttempt ? undefined : identifier);
+  if (
+    correlatedCheckoutId &&
+    correlatedMerchantId &&
+    isSafePublicIdentifier(correlatedCheckoutId, 160) &&
+    isSafePublicIdentifier(correlatedMerchantId, 160)
+  ) {
     const recovered = await store.attachMpesaCallbackIntent(
       intent.callbackCapabilityHash,
-      identifier,
+      correlatedCheckoutId,
       correlatedMerchantId
     );
     if (recovered && verifyPaymentCapability(paymentCapability, recovered.paymentCapabilityHash)) {
@@ -144,6 +179,30 @@ async function resolvePaymentStatusSubject(
     }
   }
   return { intent };
+}
+
+function toPublicMpesaIntentStatus(
+  requestedIdentifier: string,
+  intent: NonNullable<Awaited<ReturnType<typeof store.loadMpesaCallbackIntentByPaymentHash>>>
+) {
+  const createdAtMs = Date.parse(intent.createdAt);
+  const reconciliationTimedOut = !intent.checkoutRequestId &&
+    Number.isFinite(createdAtMs) &&
+    Date.now() - createdAtMs >= MPESA_AMBIGUOUS_RECONCILIATION_MS;
+  return {
+    checkoutRequestId: requestedIdentifier,
+    articleId: intent.articleId,
+    articleTitle: intent.articleTitle,
+    amount: intent.amount,
+    currency: intent.currency,
+    paymentMethod: 'mpesa',
+    type: intent.type,
+    status: reconciliationTimedOut ? 'TIMEOUT' : 'PENDING',
+    rawStatus: reconciliationTimedOut ? 'TIMEOUT' : 'PENDING',
+    resultDesc: reconciliationTimedOut
+      ? 'No completed Safaricom payment was confirmed for this request. Check your M-Pesa messages before retrying.'
+      : 'Waiting for Safaricom payment confirmation.'
+  };
 }
 
 function toPublicPaymentStatus(
@@ -244,7 +303,9 @@ function setVerifiedAffiliateAttribution(
   maxAgeMs = AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS
 ) {
   const cookieValue = createAffiliateAttributionCookieValue(attribution, { maxAgeMs });
-  if (cookieValue) setAffiliateAttributionCookie(res, cookieValue, maxAgeMs);
+  if (!cookieValue) return false;
+  setAffiliateAttributionCookie(res, cookieValue, maxAgeMs);
+  return true;
 }
 
 // Cookie-authenticated state changes must come from this same site. Combined
@@ -941,11 +1002,15 @@ export async function createApp() {
       };
       const clickDedupCookie = createAffiliateClickDedupCookieValue(attribution);
       if (clickDedupCookie) setAffiliateClickDedupCookie(res, clickDedupCookie);
-      setVerifiedAffiliateAttribution(
+      const attributionSet = setVerifiedAffiliateAttribution(
         res,
         attribution,
         clickResult.attributionMaxAgeMs
       );
+      if (!attributionSet) {
+        console.error('[Affiliate Attribution] Signing configuration is unavailable.');
+        return res.redirect(302, fallbackLocation);
+      }
 
       // Build target redirect URL preserving ref, article, and campaign query parameters.
       const params = new URLSearchParams();
@@ -1310,25 +1375,15 @@ export async function createApp() {
         getMerchantRequestId(req)
       );
       if (!resolved.transaction && resolved.intent) {
-        const { intent } = resolved;
         res.setHeader('Cache-Control', 'no-store');
-        return res.json({
-          checkoutRequestId,
-          articleId: intent.articleId,
-          articleTitle: intent.articleTitle,
-          amount: intent.amount,
-          currency: intent.currency,
-          paymentMethod: 'mpesa',
-          type: intent.type,
-          status: 'PENDING',
-          rawStatus: 'PENDING'
-        });
+        return res.json(toPublicMpesaIntentStatus(checkoutRequestId, resolved.intent));
       }
       if (!resolved.transaction) {
         return res.status(404).json({ error: "Transaction not found." });
       }
-      const result = await queryPaymentStatus(checkoutRequestId);
-      const tx = await store.loadTransaction(checkoutRequestId) || resolved.transaction;
+      const canonicalCheckoutRequestId = resolved.transaction.checkoutRequestId;
+      const result = await queryPaymentStatus(canonicalCheckoutRequestId);
+      const tx = await store.loadTransaction(canonicalCheckoutRequestId) || resolved.transaction;
       try {
         await store.ensureAffiliateCommissionForTransaction(tx);
       } catch {
@@ -1360,25 +1415,15 @@ export async function createApp() {
         getMerchantRequestId(req)
       );
       if (!resolved.transaction && resolved.intent) {
-        const { intent } = resolved;
         res.setHeader('Cache-Control', 'no-store');
-        return res.json({
-          checkoutRequestId: id,
-          articleId: intent.articleId,
-          articleTitle: intent.articleTitle,
-          amount: intent.amount,
-          currency: intent.currency,
-          paymentMethod: 'mpesa',
-          type: intent.type,
-          status: 'PENDING',
-          rawStatus: 'PENDING'
-        });
+        return res.json(toPublicMpesaIntentStatus(id, resolved.intent));
       }
       if (!resolved.transaction) {
         return res.status(404).json({ error: "Transaction not found." });
       }
-      const result = await queryPaymentStatus(id);
-      const tx = await store.loadTransaction(id) || resolved.transaction;
+      const canonicalCheckoutRequestId = resolved.transaction.checkoutRequestId;
+      const result = await queryPaymentStatus(canonicalCheckoutRequestId);
+      const tx = await store.loadTransaction(canonicalCheckoutRequestId) || resolved.transaction;
       try {
         await store.ensureAffiliateCommissionForTransaction(tx);
       } catch {
@@ -2899,11 +2944,17 @@ ${currentDraft || prompt}
 
       const result = await store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer);
       if (result.valid && result.affiliate) {
-        setVerifiedAffiliateAttribution(res, {
+        const attributionSet = setVerifiedAffiliateAttribution(res, {
           ref: result.affiliate.affiliateCode || ref,
           articleId,
           campaign: result.campaign?.code
         }, result.attributionMaxAgeMs);
+        if (!attributionSet) {
+          return res.status(503).json({
+            success: false,
+            error: 'Referral attribution is temporarily unavailable. Please retry.'
+          });
+        }
       }
       res.json({
         success: result.valid,

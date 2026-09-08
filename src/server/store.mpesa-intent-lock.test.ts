@@ -20,7 +20,24 @@ const firestoreMock = vi.hoisted(() => {
         get: async () => snapshot(ref)
       };
       return ref;
-    }
+    },
+    where: (field: string, operator: string, expected: unknown) => ({
+      limit: (limit: number) => ({
+        get: async () => ({
+          docs: Array.from(documents.entries())
+            .filter(([key, value]) =>
+              key.startsWith(`${collectionName}/`) &&
+              operator === '==' &&
+              value?.[field] === expected
+            )
+            .slice(0, limit)
+            .map(([key, value]) => ({
+              id: key.slice(collectionName.length + 1),
+              data: () => clone(value)
+            }))
+        })
+      })
+    })
   });
   const runTransaction = async (callback: (transaction: any) => Promise<any>) => {
     const writes: Array<
@@ -203,7 +220,9 @@ describe('M-Pesa request locks and intent attachment', () => {
   });
 
   it('atomically creates the transaction and marks both matching mirrors attached', async () => {
-    const prepared = intent('a', 'b');
+    const prepared = intent('a', 'b', {
+      paymentAttemptId: 'attempt_0123456789abcdef0123456789abcdef0123'
+    });
     await store.saveMpesaCallbackIntent(prepared);
 
     const result = await store.attachMpesaCallbackIntent(
@@ -217,6 +236,7 @@ describe('M-Pesa request locks and intent attachment', () => {
       merchantRequestId: 'merchant_123456789',
       articleId: prepared.articleId,
       phoneNumber: prepared.phoneNumber,
+      paymentAttemptId: prepared.paymentAttemptId,
       status: 'PENDING'
     });
     expect(firestoreMock.documents.get('transactions/ws_CO_123456789')).toEqual(result);
@@ -231,6 +251,35 @@ describe('M-Pesa request locks and intent attachment', () => {
         attachedAt: expect.any(String)
       });
     }
+
+    await expect(store.refreshTransactionByPaymentAttemptId(prepared.paymentAttemptId!))
+      .resolves.toMatchObject({ checkoutRequestId: 'ws_CO_123456789' });
+  });
+
+  it('fails closed if a payment attempt identifier is duplicated in the transaction ledger', async () => {
+    const paymentAttemptId = 'attempt_abcdef0123456789abcdef0123456789abcd';
+    firestoreMock.documents.set('transactions/checkout_1', {
+      id: 'tx_1',
+      checkoutRequestId: 'checkout_1',
+      paymentAttemptId,
+      articleId: 'article_1',
+      amount: 300,
+      type: 'PURCHASE',
+      status: 'CONFIRMED',
+      createdAt: new Date().toISOString()
+    });
+    firestoreMock.documents.set('transactions/checkout_2', {
+      id: 'tx_2',
+      checkoutRequestId: 'checkout_2',
+      paymentAttemptId,
+      articleId: 'article_1',
+      amount: 300,
+      type: 'PURCHASE',
+      status: 'CONFIRMED',
+      createdAt: new Date().toISOString()
+    });
+
+    await expect(store.refreshTransactionByPaymentAttemptId(paymentAttemptId)).resolves.toBeUndefined();
   });
 
   it('publishes none of the attachment writes if the Firestore commit fails', async () => {

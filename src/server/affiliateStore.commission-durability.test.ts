@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type FakeRef = { collectionName: string; id: string; key: string };
+type FakeQuery = { kind: 'query'; collectionName: string; field: string; value: unknown; limitCount: number };
 type IncrementSentinel = { __operation: 'increment'; amount: number };
 
 const firestoreMock = vi.hoisted(() => {
@@ -12,8 +13,16 @@ const firestoreMock = vi.hoisted(() => {
   const clone = (value: any) => value === undefined ? undefined : structuredClone(value);
   const isIncrement = (value: unknown): value is IncrementSentinel =>
     Boolean(value && typeof value === 'object' && (value as IncrementSentinel).__operation === 'increment');
+  const makeRef = (collectionName: string, id: string): FakeRef => ({
+    collectionName,
+    id,
+    key: `${collectionName}/${id}`
+  });
   const collection = (collectionName: string) => ({
-    doc: (id: string): FakeRef => ({ collectionName, id, key: `${collectionName}/${id}` })
+    doc: (id: string): FakeRef => makeRef(collectionName, id),
+    where: (field: string, _operator: string, value: unknown) => ({
+      limit: (limitCount: number): FakeQuery => ({ kind: 'query', collectionName, field, value, limitCount })
+    })
   });
   const runTransaction = vi.fn(async (operation: (transaction: any) => Promise<any>) => {
     let release!: () => void;
@@ -27,10 +36,31 @@ const firestoreMock = vi.hoisted(() => {
         | { operation: 'set'; ref: FakeRef; data: any; merge: boolean }
       > = [];
       const result = await operation({
-        get: async (ref: FakeRef) => ({
-          exists: documents.has(ref.key),
-          data: () => clone(documents.get(ref.key))
-        }),
+        get: async (ref: FakeRef | FakeQuery) => {
+          if ('kind' in ref) {
+            const prefix = `${ref.collectionName}/`;
+            return {
+              docs: Array.from(documents.entries())
+                .filter(([key, value]) => key.startsWith(prefix) && value?.[ref.field] === ref.value)
+                .slice(0, ref.limitCount)
+                .map(([key, value]) => {
+                  const documentRef = makeRef(ref.collectionName, key.slice(prefix.length));
+                  return {
+                    id: documentRef.id,
+                    ref: documentRef,
+                    exists: true,
+                    data: () => clone(value)
+                  };
+                })
+            };
+          }
+          return {
+            id: ref.id,
+            ref,
+            exists: documents.has(ref.key),
+            data: () => clone(documents.get(ref.key))
+          };
+        },
         create: (ref: FakeRef, data: any) => {
           if (documents.has(ref.key)) throw new Error('document already exists');
           writes.push({ operation: 'create', ref, data: clone(data) });
@@ -275,6 +305,62 @@ describe('affiliate commission durability', () => {
       salesCount: 1,
       revenueKes: 500,
       commissionsKes: 100
+    });
+  });
+
+  it('rejects a checkout created after its signed attribution expired', async () => {
+    const transaction = {
+      ...confirmedAffiliateTransaction(),
+      affiliateAttributionAt: '2026-09-01T08:00:00.000Z',
+      affiliateAttributionExpiresAt: '2026-09-07T08:00:00.000Z'
+    };
+
+    await expect(
+      affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code)
+    ).resolves.toBeNull();
+    expect(firestoreMock.runTransaction).not.toHaveBeenCalled();
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('affiliate_commissions/')
+    )).toBe(false);
+  });
+
+  it('honours a campaign click made inside its dates through the signed attribution window', async () => {
+    firestoreMock.documents.set(`affiliate_campaigns/${campaign.id}`, {
+      ...structuredClone(campaign),
+      endDate: '2026-09-05T23:59:59.000Z'
+    });
+    const transaction = {
+      ...confirmedAffiliateTransaction(),
+      affiliateAttributionAt: '2026-09-04T08:00:00.000Z',
+      affiliateAttributionExpiresAt: '2026-10-04T08:00:00.000Z'
+    };
+
+    const commission = await affiliateStore.recordAffiliateSale(
+      transaction,
+      affiliate.affiliateCode,
+      campaign.code
+    );
+
+    expect(commission).toMatchObject({ commissionRate: 20, commissionAmountKes: 100 });
+  });
+
+  it('falls back to the bounded base rate when a campaign was not valid at click time', async () => {
+    const transaction = {
+      ...confirmedAffiliateTransaction(),
+      affiliateAttributionAt: '2026-08-20T08:00:00.000Z',
+      affiliateAttributionExpiresAt: '2026-09-19T08:00:00.000Z'
+    };
+
+    const commission = await affiliateStore.recordAffiliateSale(
+      transaction,
+      affiliate.affiliateCode,
+      campaign.code
+    );
+
+    expect(commission).toMatchObject({
+      commissionRate: 15,
+      commissionAmountKes: 75,
+      campaignCode: undefined
     });
   });
 });

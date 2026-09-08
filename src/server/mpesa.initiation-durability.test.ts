@@ -112,6 +112,8 @@ describe('M-Pesa initiation durability', () => {
     const stkBody = JSON.parse(String(stkRequest?.[1]?.body));
     const callbackCapability = new URL(stkBody.CallBackURL).searchParams.get('cb_auth');
 
+    expect(intent.paymentAttemptId).toMatch(/^attempt_[A-Za-z0-9_-]{16,}$/);
+    expect(intent.paymentAttemptId).not.toBe(result.checkoutRequestId);
     expect(intent.paymentCapabilityHash).toBe(
       crypto.createHash('sha256').update(result.paymentCapability).digest('hex')
     );
@@ -149,7 +151,7 @@ describe('M-Pesa initiation durability', () => {
   it.each([
     ['an HTTP 5xx response', jsonResponse(503, { errorMessage: 'Upstream unavailable' })],
     ['a malformed HTTP 200 response', jsonResponse(200, { unexpected: 'response shape' })]
-  ])('retains the durable intent after %s', async (_description, providerResponse) => {
+  ])('returns a durable anonymous polling handle after %s', async (_description, providerResponse) => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))
       .mockResolvedValueOnce(providerResponse);
@@ -161,15 +163,25 @@ describe('M-Pesa initiation durability', () => {
       articleId: 'article_1'
     });
 
-    expect(result).toMatchObject({
-      success: false,
-      error: expect.stringMatching(/uncertain response/i)
-    });
+    expect(result).toMatchObject({ success: true });
+    expect(result.checkoutRequestId).toMatch(/^attempt_[A-Za-z0-9_-]{16,}$/);
+    expect(result.paymentCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(storeMocks.saveMpesaCallbackIntent).toHaveBeenCalledTimes(1);
     expect(storeMocks.discardMpesaCallbackIntent).not.toHaveBeenCalled();
+
+    const intent = storeMocks.saveMpesaCallbackIntent.mock.calls[0][0];
+    expect(intent).toMatchObject({
+      paymentAttemptId: result.checkoutRequestId,
+      status: 'PREPARED'
+    });
+    expect(intent).not.toHaveProperty('checkoutRequestId');
+    expect(intent.paymentCapabilityHash).toBe(
+      crypto.createHash('sha256').update(result.paymentCapability).digest('hex')
+    );
+    expect(JSON.stringify(intent)).not.toContain(result.paymentCapability);
   });
 
-  it('retains the durable intent after an ambiguous network failure', async () => {
+  it('returns the same durable anonymous polling handle stored before an ambiguous network failure', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))
       .mockRejectedValueOnce(new Error('fetch failed'));
@@ -181,9 +193,19 @@ describe('M-Pesa initiation durability', () => {
       articleId: 'article_1'
     });
 
-    expect(result).toMatchObject({ success: false });
+    expect(result).toMatchObject({ success: true });
+    expect(result.checkoutRequestId).toMatch(/^attempt_[A-Za-z0-9_-]{16,}$/);
+    expect(result.paymentCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(storeMocks.saveMpesaCallbackIntent).toHaveBeenCalledTimes(1);
     expect(storeMocks.discardMpesaCallbackIntent).not.toHaveBeenCalled();
+
+    const intent = storeMocks.saveMpesaCallbackIntent.mock.calls[0][0];
+    expect(intent.paymentAttemptId).toBe(result.checkoutRequestId);
+    expect(intent.status).toBe('PREPARED');
+    expect(intent).not.toHaveProperty('checkoutRequestId');
+    expect(intent.paymentCapabilityHash).toBe(
+      crypto.createHash('sha256').update(result.paymentCapability).digest('hex')
+    );
   });
 
   it('persists tips as tips so a successful tip cannot create an article license', async () => {
