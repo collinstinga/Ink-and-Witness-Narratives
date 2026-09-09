@@ -110,6 +110,46 @@ function getPaymentCapability(req: Request): unknown {
   return req.headers['x-payment-capability'];
 }
 
+function publicCoverUrl(article: Article): string | undefined {
+  if (!article.coverImage?.startsWith('data:image')) return article.coverImage;
+  const version = encodeURIComponent(article.updatedAt || article.id);
+  return `/api/articles/${encodeURIComponent(article.id)}/cover?v=${version}`;
+}
+
+function toPublicArticleSummary(article: Article, defaultPriceKes: number, isUnlocked = false): Article {
+  const isPaid = article.isPaid !== false && article.priceKes > 0;
+  return {
+    id: article.id,
+    title: article.title,
+    subtitle: article.subtitle,
+    slug: article.slug,
+    excerpt: article.excerpt,
+    synopsis: article.synopsis || '',
+    content: '',
+    category: article.category,
+    categories: article.categories || (article.category ? [article.category] : []),
+    topics: article.topics || [],
+    status: article.status,
+    isPaid,
+    priceKes: article.priceKes || defaultPriceKes,
+    prices: article.prices,
+    currencyOverrides: article.currencyOverrides,
+    readTimeMinutes: article.readTimeMinutes,
+    publishedAt: article.publishedAt,
+    createdAt: article.createdAt,
+    updatedAt: article.updatedAt,
+    coverImage: publicCoverUrl(article),
+    featured: article.featured,
+    downloadsCount: article.downloadsCount || 0,
+    viewsCount: article.viewsCount || 0,
+    likesCount: article.likesCount || 0,
+    commentsCount: article.commentsCount || 0,
+    previewParagraphs: article.previewParagraphs || [],
+    tags: article.tags || [],
+    isUnlocked: !isPaid || isUnlocked
+  };
+}
+
 async function resolvePaymentStatusSubject(
   identifier: string,
   paymentCapability: string
@@ -664,7 +704,16 @@ export async function createApp() {
 
   // Public Homepage Configuration & Curated Sections
   app.get("/api/homepage", (_req: Request, res: Response) => {
-    res.json(store.getHomepageConfig());
+    const homepage = store.getHomepageConfig();
+    const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
+    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=300');
+    res.json({
+      config: homepage.config,
+      mostSellingPieces: homepage.mostSellingPieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
+      pieceOfTheWeek: homepage.pieceOfTheWeek
+        ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
+        : undefined
+    });
   });
 
   // Public Custom Categories (Dynamically managed by writer Jake)
@@ -713,51 +762,47 @@ export async function createApp() {
 
       res.json({
         topic,
-        pieces: assignedPieces
+        pieces: assignedPieces.map(article =>
+          toPublicArticleSummary(article, store.getMpesaSettings().defaultPriceKes || 1050)
+        )
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch topic details" });
     }
   });
 
-  // Public Articles List (DRAFTS ARE STRICTLY EXCLUDED)
-  app.get("/api/articles", (req: Request, res: Response) => {
-    const isAdmin = (req as any).user?.role === 'admin';
+  app.get('/api/articles/:id/cover', (req: Request, res: Response) => {
+    try {
+      const article = store.getArticleById(req.params.id, false);
+      if (!article?.coverImage?.startsWith('data:image')) {
+        return res.status(404).json({ error: 'Embedded cover image not found.' });
+      }
+      const image = validateImageDataUrl(article.coverImage);
+      res.setHeader('Content-Type', image.mimeType);
+      res.setHeader('Content-Disposition', `inline; filename="${article.id}.${image.extension}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=31536000, immutable');
+      res.setHeader('Content-Length', String(image.buffer.length));
+      return res.send(image.buffer);
+    } catch (err) {
+      if (err instanceof ImageValidationError) {
+        return res.status(415).json({ error: 'Stored cover is not an approved image type.' });
+      }
+      return res.status(503).json({ error: 'Cover image is temporarily unavailable.' });
+    }
+  });
 
-    // If admin requested via public endpoint, can include drafts, but standard readers only get published
-    const list = store.getArticles(isAdmin);
+  // Public Articles List (DRAFTS ARE STRICTLY EXCLUDED)
+  app.get("/api/articles", (_req: Request, res: Response) => {
+    const list = store.getArticles(false);
     const mpesaSettings = store.getMpesaSettings();
 
-    const publicArticles = list.map(art => {
-      const isPaid = art.isPaid !== false && (art.priceKes > 0);
-      return {
-        id: art.id,
-        title: art.title,
-        subtitle: art.subtitle,
-        slug: art.slug,
-        category: art.category,
-        categories: art.categories || (art.category ? [art.category] : []),
-        status: art.status,
-        isPaid,
-        priceKes: art.priceKes || mpesaSettings.defaultPriceKes,
-        readTimeMinutes: art.readTimeMinutes,
-        publishedAt: art.publishedAt,
-        createdAt: art.createdAt,
-        updatedAt: art.updatedAt,
-        coverImage: art.coverImage,
-        featured: art.featured,
-        downloadsCount: art.downloadsCount || 0,
-        viewsCount: art.viewsCount || 0,
-        previewParagraphs: art.previewParagraphs || [],
-        tags: art.tags || [],
-        excerpt: art.excerpt,
-        synopsis: art.synopsis || "",
-        // If article is free OR reader is authenticated admin, send content; otherwise mask
-        content: (!isPaid || isAdmin) ? art.content : "",
-        isUnlocked: !isPaid || isAdmin,
-      };
-    });
+    const publicArticles = list.map(article =>
+      toPublicArticleSummary(article, mpesaSettings.defaultPriceKes || 1050)
+    );
 
+    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=300');
     res.json(publicArticles);
   });
 
@@ -801,8 +846,10 @@ export async function createApp() {
       }
     }
 
+    const { coverImageOriginal: _privateOriginal, ...publicArticle } = article;
     return res.json({
-      ...article,
+      ...publicArticle,
+      coverImage: publicCoverUrl(article),
       content: isUnlocked ? article.content : "",
       isUnlocked,
       priceKes: article.priceKes || store.getMpesaSettings().defaultPriceKes,

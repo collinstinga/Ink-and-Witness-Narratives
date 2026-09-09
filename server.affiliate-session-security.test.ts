@@ -31,6 +31,31 @@ const privateAffiliate = {
   updatedAt: '2026-09-06T00:00:00.000Z'
 };
 
+const publicArticleFixture = {
+  id: 'art-public-1',
+  title: 'Public Summary Test',
+  subtitle: 'Subtitle',
+  slug: 'public-summary-test',
+  excerpt: 'Safe excerpt',
+  synopsis: 'Safe synopsis',
+  content: 'PAID BODY MUST NEVER APPEAR IN A PUBLIC COLLECTION RESPONSE',
+  category: 'Essays',
+  categories: ['Essays'],
+  topics: ['life'],
+  status: 'published' as const,
+  isPaid: true,
+  priceKes: 300,
+  readTimeMinutes: 4,
+  publishedAt: '2026-09-09',
+  createdAt: '2026-09-09T00:00:00.000Z',
+  updatedAt: '2026-09-09T01:00:00.000Z',
+  coverImage: 'data:image/jpeg;base64,AAA',
+  coverImageOriginal: 'data:image/jpeg;base64,PRIVATE-ORIGINAL',
+  downloadsCount: 0,
+  previewParagraphs: ['Safe preview'],
+  tags: ['Test']
+};
+
 const affiliateMocks = vi.hoisted(() => ({
   verifyAffiliateSession: vi.fn(),
   createAffiliateSession: vi.fn(),
@@ -148,6 +173,17 @@ describe('affiliate session route boundaries', () => {
       ...privateAffiliate,
       passwordHash: '$argon2id$new-hash',
       sessionVersion: 'f'.repeat(64)
+    });
+    storeMocks.getArticles.mockReturnValue([{ ...publicArticleFixture }]);
+    storeMocks.getArticleById.mockReturnValue({ ...publicArticleFixture });
+    storeMocks.getMpesaSettings.mockReturnValue({ defaultPriceKes: 300 });
+    storeMocks.getHomepageConfig.mockReturnValue({
+      config: { welcomeBackground: {}, mostSellingPieceIds: [] },
+      startHerePieces: [{ ...publicArticleFixture }],
+      mostSellingPieces: [{ ...publicArticleFixture }],
+      pieceOfTheWeek: { ...publicArticleFixture },
+      autoRankedPieces: [{ ...publicArticleFixture }],
+      categories: []
     });
     affiliateMocks.getAffiliateDashboard.mockReturnValue({
       affiliate: {
@@ -378,5 +414,25 @@ describe('affiliate session route boundaries', () => {
     expect(emailField).toContain('readOnly');
     expect(emailField).toContain('aria-readonly="true"');
     expect(emailField).not.toContain('onChange=');
+  });
+
+  it('returns bounded public article summaries without paid bodies or original base64 images', async () => {
+    const [articlesResponse, homepageResponse] = await Promise.all([
+      fetch(`${baseUrl}/api/articles`),
+      fetch(`${baseUrl}/api/homepage`)
+    ]);
+    const articles = await articlesResponse.json() as Record<string, any>[];
+    const homepage = await homepageResponse.json() as Record<string, any>;
+
+    expect(articlesResponse.status).toBe(200);
+    expect(homepageResponse.status).toBe(200);
+    expect(articles[0]).toMatchObject({ content: '', isUnlocked: false });
+    expect(articles[0].coverImage).toMatch(/^\/api\/articles\/art-public-1\/cover\?v=/);
+    expect(articles[0]).not.toHaveProperty('coverImageOriginal');
+    expect(homepage).not.toHaveProperty('startHerePieces');
+    expect(homepage).not.toHaveProperty('autoRankedPieces');
+    expect(homepage.mostSellingPieces[0]).toMatchObject({ content: '', isUnlocked: false });
+    expect(homepage.mostSellingPieces[0]).not.toHaveProperty('coverImageOriginal');
+    expect(JSON.stringify(homepage)).not.toContain(publicArticleFixture.content);
   });
 });
