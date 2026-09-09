@@ -453,6 +453,10 @@
       "schema": "ManualAccessGrant",
       "description": "Admin manual access authorizations for monographs"
     },
+    "/manual_access_phone_reservations/{phoneHmac}": {
+      "schema": "ManualAccessPhoneReservation",
+      "description": "Permanent server-only one-phone/one-grant reservation and account-binding tombstone keyed by a secret HMAC"
+    },
     "/site_configs/mpesa_settings": {
       "schema": "MpesaPublicConfig",
       "description": "Non-secret M-Pesa rail settings; provider credentials live only in protected runtime environment variables"

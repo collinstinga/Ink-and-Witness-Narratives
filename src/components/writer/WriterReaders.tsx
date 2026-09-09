@@ -14,7 +14,6 @@ import {
   RefreshCw,
   Copy,
   Check,
-  RotateCcw,
   Shield,
   UserCheck,
   Lock,
@@ -112,39 +111,14 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
       setManualNotes('');
       await fetchData();
     } catch (err: any) {
-      setManualError(err.message || 'Failed to grant single-session manual access.');
+      setManualError(err.message || 'Failed to grant one-time manual access.');
     } finally {
       setManualSubmitting(false);
     }
   };
 
-  const handleResetManualAccess = async (grant: ManualAccessGrant) => {
-    const confirmPrompt = `Are you sure you want to reset manual access for ${grant.phone} (${grant.articleTitle || grant.articleId})?\n\nThis will:\n• Clear the account & device session binding (${grant.boundUserEmail || 'Current Device'})\n• Mark activation status back to Pending (unactivated)\n• Allow the genuine reader to activate again once from their account.`;
-    
-    if (!window.confirm(confirmPrompt)) {
-      return;
-    }
-
-    try {
-      setActionLoadingId(grant.id);
-      const res = await api.resetManualAccess(grant.id);
-      setBannerMessage({
-        type: 'success',
-        text: res.message || `Access for ${grant.phone} has been reset. The authorized reader can now activate it again.`
-      });
-      await fetchData();
-    } catch (err: any) {
-      setBannerMessage({
-        type: 'error',
-        text: err.message || 'Failed to reset manual access.'
-      });
-    } finally {
-      setActionLoadingId(null);
-    }
-  };
-
   const handleRevokeManualAccess = async (grantId: string, phone: string) => {
-    if (!window.confirm(`Are you sure you want to revoke manual access for ${phone}? The reader will not be able to read the piece until re-authorized.`)) {
+    if (!window.confirm(`Revoke manual access for ${phone}? Access will stop, and this single-use phone number will remain permanently reserved.`)) {
       return;
     }
 
@@ -167,7 +141,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   };
 
   const handleDeleteManualAccess = async (grantId: string, phone: string) => {
-    if (!window.confirm(`PERMANENT DELETE: Are you sure you want to completely remove the manual access grant for ${phone}?\n\nThis will permanently remove the manual grant record and any associated manual grant tokens. (Legitimate M-Pesa purchases will not be affected).`)) {
+    if (!window.confirm(`PERMANENT DELETE: Remove the manual access grant for ${phone}?\n\nThe grant and its manual token will be removed, but this phone number will remain permanently reserved and cannot be authorized again. Legitimate M-Pesa purchases are not affected.`)) {
       return;
     }
 
@@ -268,34 +242,26 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
             Reader Access &amp; Licenses
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 font-sans mt-1">
-            Manage single-session phone authorization whitelist, monitor activation bindings, reset reader sessions, and inspect cryptographic licenses.
+            Manage one-time phone authorizations, monitor permanent reader bindings, revoke access, and inspect legacy licenses.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <button
             onClick={() => {
-              if (activeTab === 'manual-access') {
-                setShowManualGrantModal(true);
-                setManualSuccessMsg(null);
-                setManualError(null);
-                if (!manualArticleId && articles.length > 0) {
-                  setManualArticleId(articles[0].id);
-                }
-              } else {
-                setShowLicenseModal(true);
-                setGrantSuccessMsg(null);
-                setGrantError(null);
-                if (!grantArticleId && articles.length > 0) {
-                  setGrantArticleId(articles[0].id);
-                }
+              setActiveTab('manual-access');
+              setShowManualGrantModal(true);
+              setManualSuccessMsg(null);
+              setManualError(null);
+              if (!manualArticleId && articles.length > 0) {
+                setManualArticleId(articles[0].id);
               }
             }}
             id="btn-grant-access-top"
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-medium text-xs flex items-center gap-2 shadow-lg shadow-sky-950/50 cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>{activeTab === 'manual-access' ? 'Authorize Phone Access' : 'Issue Token License'}</span>
+            <span>Authorize One-Time Phone</span>
           </button>
 
           <button
@@ -346,7 +312,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
           }`}
         >
           <Shield className="w-4 h-4" />
-          <span>Single-Session Manual Grants ({manualGrants.length})</span>
+          <span>Single-Use Manual Grants ({manualGrants.length})</span>
         </button>
 
         <button
@@ -360,7 +326,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
           }`}
         >
           <KeyRound className="w-4 h-4" />
-          <span>Cryptographic Tokens ({licenses.length})</span>
+          <span>Legacy Licenses ({licenses.length})</span>
         </button>
       </div>
 
@@ -396,9 +362,9 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
           <div className="p-4 rounded-2xl bg-sky-950/20 border border-sky-800/40 text-xs text-sky-200 flex items-start gap-3">
             <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <p className="font-semibold text-sky-300">Single-Session Anti-Sharing Policy Enforced</p>
+              <p className="font-semibold text-sky-300">Single-Use Anti-Sharing Policy Enforced</p>
               <p className="text-slate-300 leading-relaxed">
-                When an authorized reader enters their granted phone number, the system activates access and permanently binds it to their account. If a second user enters the same number, access is automatically blocked to prevent credential sharing. You can click <strong>Reset</strong> below at any time to clear the binding and allow re-activation.
+                A normalized phone number can be authorized only once. The reader must sign in before the first claim, which permanently binds the grant to that account. Revoke or delete can stop access, but the phone number remains reserved and cannot be reset, transferred, or reused.
               </p>
             </div>
           </div>
@@ -629,19 +595,8 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                       {/* Actions */}
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {/* Reset Access Button */}
-                          <button
-                            type="button"
-                            onClick={() => handleResetManualAccess(grant)}
-                            disabled={actionLoadingId === grant.id}
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 border border-slate-700 transition-colors cursor-pointer disabled:opacity-50"
-                            title="Reset manual access (clears binding so reader can re-claim)"
-                          >
-                            <RotateCcw className={`w-3.5 h-3.5 ${actionLoadingId === grant.id ? 'animate-spin' : ''}`} />
-                          </button>
-
                           {/* Revoke Access Button */}
-                          {grant.status !== 'revoked' ? (
+                          {grant.status !== 'revoked' && (
                             <button
                               type="button"
                               onClick={() => handleRevokeManualAccess(grant.id, grant.phone)}
@@ -650,16 +605,6 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                               title="Revoke access (temporarily disable)"
                             >
                               <Lock className="w-3.5 h-3.5" />
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleResetManualAccess(grant)}
-                              disabled={actionLoadingId === grant.id}
-                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 hover:text-emerald-200 border border-slate-700 transition-colors cursor-pointer disabled:opacity-50"
-                              title="Re-activate access"
-                            >
-                              <Unlock className="w-3.5 h-3.5" />
                             </button>
                           )}
 
@@ -697,6 +642,15 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
       {/* ============================================================== */}
       {activeTab === 'token-licenses' && (
         <div className="space-y-6 animate-in fade-in duration-200">
+          <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-700/50 text-xs text-amber-100 flex items-start gap-3">
+            <ShieldCheck className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-200">New copyable token issuance is disabled</p>
+              <p className="mt-1 text-slate-300 leading-relaxed">
+                Existing licenses remain visible for controlled revocation and migration. Use Authorize One-Time Phone for every new complimentary reader grant.
+              </p>
+            </div>
+          </div>
           
           {/* Stats row */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

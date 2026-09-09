@@ -741,8 +741,8 @@ export const api = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err: any = new Error(data.error || data.message || 'No manual access found for this phone number.');
-      err.alreadyActivated = Boolean(data.alreadyActivated || res.status === 403);
-      err.requiresAuth = Boolean(data.requiresAuth);
+      err.alreadyActivated = Boolean(data.alreadyActivated || res.status === 409);
+      err.requiresAuth = Boolean(data.requiresAuth || res.status === 401);
       err.data = data;
       throw err;
     }

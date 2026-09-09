@@ -1073,7 +1073,7 @@ export async function createApp() {
   });
 
   // Manual Access / Self-Unlock verification for Readers with One-Time Activation & Account Binding
-  app.post("/api/manual-access/verify", publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, async (req: Request, res: Response) => {
+  app.post("/api/manual-access/verify", publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, requireAuth, async (req: Request, res: Response) => {
     try {
       const { articleId, phone } = req.body;
       const currentUser = (req as any).user || null;
@@ -1084,9 +1084,16 @@ export async function createApp() {
           error: "Piece ID and phone number are required." 
         });
       }
+      if (currentUser.role !== 'client') {
+        return res.status(403).json({
+          success: false,
+          verified: false,
+          error: 'Manual access can only be claimed by a reader account.',
+          code: 'MANUAL_ACCESS_READER_REQUIRED'
+        });
+      }
 
-      await store.ensureTransactionsHydrated();
-      const result = store.verifyManualAccess(articleId, phone, currentUser);
+      const result = await store.verifyManualAccess(articleId, phone, currentUser);
 
       if (result.success && result.verified) {
         return res.json({
@@ -1097,19 +1104,32 @@ export async function createApp() {
           articleId: result.articleId,
           articleTitle: result.articleTitle,
           boundUser: result.boundUser,
-          grant: result.grant,
           message: result.message
         });
       } else {
-        return res.status(404).json({
+        const status = result.alreadyActivated
+          ? 409
+          : result.code === 'MANUAL_ACCESS_REVOKED'
+            ? 403
+            : 404;
+        return res.status(status).json({
           success: false,
           verified: false,
+          alreadyActivated: Boolean(result.alreadyActivated),
+          requiresAuth: Boolean(result.requiresAuth),
+          code: result.code,
           error: result.error || result.message,
           message: result.message
         });
       }
     } catch (err: any) {
-      res.status(500).json({ success: false, verified: false, error: err.message || "Manual access verification failed." });
+      const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
+      res.status(status).json({
+        success: false,
+        verified: false,
+        code: err?.code || 'MANUAL_ACCESS_UNAVAILABLE',
+        error: status >= 500 ? 'Manual access is temporarily unavailable.' : err.message
+      });
     }
   });
 
@@ -2262,16 +2282,11 @@ export async function createApp() {
 
   // Writer: Manually Grant Reader License
   app.post("/api/admin/readers/grant", requireAdminAuth, async (req: Request, res: Response) => {
-    try {
-      const { articleId, phone, receipt, durationDays } = req.body;
-      if (!articleId || !phone) {
-        return res.status(400).json({ error: "articleId and phone are required." });
-      }
-      const result = store.grantReaderLicense(articleId, phone, receipt, durationDays || 60);
-      res.json({ success: true, ...result, message: "Access license granted." });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to grant reader license." });
-    }
+    return res.status(409).json({
+      success: false,
+      code: 'MANUAL_TOKEN_ISSUANCE_DISABLED',
+      error: 'Copyable manual tokens are disabled. Use the one-time phone authorization workflow.'
+    });
   });
 
   // Writer: Revoke Reader License
@@ -2307,10 +2322,15 @@ export async function createApp() {
       if (!articleId || !phone) {
         return res.status(400).json({ error: "articleId and phone are required." });
       }
-      const result = store.grantManualAccess(articleId, phone, grantedBy || 'Jake', notes);
+      const result = await store.grantManualAccess(articleId, phone, grantedBy || 'Jake', notes);
       res.json({ success: true, ...result, message: "Manual access authorization granted successfully." });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to grant manual access." });
+      const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
+      res.status(status).json({
+        success: false,
+        code: err?.code || 'MANUAL_ACCESS_UNAVAILABLE',
+        error: status >= 500 ? 'Manual access is temporarily unavailable.' : err.message
+      });
     }
   });
 
@@ -2376,7 +2396,12 @@ export async function createApp() {
       }
       const result = store.resetManualAccess(grantId);
       if (!result.success) {
-        return res.status(404).json({ error: result.error || "Manual access grant not found." });
+        const status = result.code === 'MANUAL_ACCESS_PHONE_SINGLE_USE' ? 409 : 404;
+        return res.status(status).json({
+          success: false,
+          code: result.code,
+          error: result.error || "Manual access grant not found."
+        });
       }
       res.json(result);
     } catch (err: any) {

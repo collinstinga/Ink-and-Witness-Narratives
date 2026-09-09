@@ -173,6 +173,7 @@ export interface ManualAccessGrant {
   boundUserId?: string;
   boundUserEmail?: string;
   boundUserName?: string;
+  phoneReservationId?: string;
   token?: string;
   grantedAt: string;
   grantedBy: string;

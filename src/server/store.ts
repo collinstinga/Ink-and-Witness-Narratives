@@ -9,6 +9,15 @@ import { hashPassword, generateSecureToken } from './auth.js';
 import { sanitizeImageDataUrl } from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
 import {
+  MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION,
+  MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+  ManualAccessError,
+  type ManualAccessPhoneReservation,
+  createManualAccessPhoneAlreadyUsedError,
+  getManualAccessPhoneReservationId,
+  normalizeManualAccessPhone
+} from './manualAccessSecurity.js';
+import {
   AUTH_SESSION_STORAGE_VERSION,
   createSignedAuthSessionToken,
   getAuthSessionTokenKind,
@@ -2759,55 +2768,60 @@ export const store = {
 
   // MANUAL ACCESS MANAGEMENT & SELF-UNLOCK SYSTEM
   normalizePhone(input: string): string {
-    if (!input) return '';
-    const trimmed = input.trim();
-    let digits = trimmed.replace(/\D/g, '');
-    if (!digits) return '';
-
-    if (digits.startsWith('00')) {
-      digits = digits.substring(2);
-    }
-    if (digits.startsWith('0') && digits.length === 10) {
-      digits = '254' + digits.substring(1);
-    } else if ((digits.startsWith('7') || digits.startsWith('1')) && digits.length === 9) {
-      digits = '254' + digits;
-    }
-    return digits;
+    return normalizeManualAccessPhone(input);
   },
 
   getManualAccessGrants(articleId?: string): ManualAccessGrant[] {
-    const list = Array.from(cachedManualAccess.values());
-    if (articleId) {
-      return list.filter(g => g.articleId === articleId || g.articleId === 'all');
-    }
-    return list.sort((a, b) => new Date(b.grantedAt).getTime() - new Date(a.grantedAt).getTime());
+    const list = Array.from(cachedManualAccess.values())
+      .filter(grant => !articleId || grant.articleId === articleId || grant.articleId === 'all')
+      .sort((a, b) => new Date(b.grantedAt).getTime() - new Date(a.grantedAt).getTime());
+
+    return list.map(grant => {
+      const {
+        token: _token,
+        rawPhone: _rawPhone,
+        claimedPhone: _claimedPhone,
+        phoneReservationId: _phoneReservationId,
+        ...safeGrant
+      } = grant;
+      return safeGrant as ManualAccessGrant;
+    });
   },
 
-  grantManualAccess(articleId: string, phone: string, grantedBy = 'Jake', notes = ''): { success: boolean; grant: ManualAccessGrant; token: string } {
+  async grantManualAccess(
+    articleId: string,
+    phone: string,
+    grantedBy = 'Jake',
+    notes = ''
+  ): Promise<{ success: true; grant: ManualAccessGrant }> {
     const normalizedPhone = this.normalizePhone(phone);
-    if (!normalizedPhone || normalizedPhone.length < 9) {
-      throw new Error("Invalid phone number. Please provide a valid phone number (e.g., 0712345678 or 254712345678).");
+    if (!normalizedPhone) {
+      throw new ManualAccessError(
+        'MANUAL_ACCESS_INVALID_PHONE',
+        'Please provide a valid phone number.',
+        400
+      );
     }
     if (!articleId) {
-      throw new Error("articleId is required to grant manual access.");
+      throw new ManualAccessError(
+        'MANUAL_ACCESS_INVALID_PIECE',
+        'A valid piece is required to grant manual access.',
+        400
+      );
     }
 
     const article = cachedArticles.find(a => a.id === articleId || a.slug === articleId);
+    if (!article && articleId !== 'all') {
+      throw new ManualAccessError(
+        'MANUAL_ACCESS_INVALID_PIECE',
+        'The selected piece was not found.',
+        400
+      );
+    }
     const resolvedArticleId = article ? article.id : articleId;
     const resolvedArticleTitle = article ? article.title : (articleId === 'all' ? 'All Archive Access' : 'Monograph');
-
-    // Prevent duplicate active grants for the exact same normalized phone and piece
-    for (const existing of cachedManualAccess.values()) {
-      const isSamePiece = existing.articleId === resolvedArticleId || existing.articleId === articleId;
-      if (isSamePiece && this.phonesMatch(normalizedPhone, existing.phone)) {
-        if (existing.status === 'active' || existing.status === 'claimed') {
-          throw new Error(`An active access authorization already exists for phone ${normalizedPhone} on "${existing.articleTitle || resolvedArticleTitle}".`);
-        }
-      }
-    }
-
-    const grantId = `grant_${resolvedArticleId}_${normalizedPhone}`;
-    const secureToken = `ink_grant_${crypto.randomBytes(24).toString('hex')}`;
+    const phoneReservationId = getManualAccessPhoneReservationId(normalizedPhone);
+    const grantId = `grant_${crypto.randomBytes(16).toString('hex')}`;
     const now = new Date().toISOString();
 
     const grant: ManualAccessGrant = {
@@ -2815,10 +2829,9 @@ export const store = {
       articleId: resolvedArticleId,
       articleTitle: resolvedArticleTitle,
       phone: normalizedPhone,
-      rawPhone: phone.trim(),
+      phoneReservationId,
       status: 'active',
       activated: false,
-      token: secureToken,
       grantedAt: now,
       grantedBy: grantedBy || 'Jake',
       accessType: 'manual',
@@ -2826,12 +2839,43 @@ export const store = {
       notes: notes ? notes.trim() : ''
     };
 
+    const reservation: ManualAccessPhoneReservation = {
+      storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+      grantId,
+      articleId: resolvedArticleId,
+      state: 'unclaimed',
+      createdAt: now,
+      updatedAt: now
+    };
+
+    await getDb().runTransaction(async transaction => {
+      const reservations = getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION);
+      const manualAccess = getDb().collection('manual_access');
+      const reservationRef = reservations.doc(phoneReservationId);
+      const reservationSnapshot = await transaction.get(reservationRef);
+      if (reservationSnapshot.exists) {
+        throw createManualAccessPhoneAlreadyUsedError();
+      }
+
+      // Legacy grants predate the reservation collection. The query remains inside
+      // the transaction so a concurrent grant cannot pass the uniqueness check.
+      const legacyGrantSnapshot = await transaction.get(
+        manualAccess.where('phone', '==', normalizedPhone).limit(2)
+      );
+      if (!legacyGrantSnapshot.empty) {
+        throw createManualAccessPhoneAlreadyUsedError();
+      }
+
+      transaction.set(reservationRef, sanitizeForFirestore(reservation));
+      transaction.set(manualAccess.doc(grantId), sanitizeForFirestore(grant));
+    });
+
     cachedManualAccess.set(grantId, grant);
     writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-    setFirestoreDoc('manual_access', grantId, grant).catch(() => {});
 
-    console.log(`[ManualAccess] Successfully created grant ${grantId} for ${normalizedPhone} -> "${resolvedArticleTitle}"`);
-    return { success: true, grant, token: secureToken };
+    console.log(`[ManualAccess] Created one-time grant ${grantId}.`);
+    const { phoneReservationId: _reservationId, ...safeGrant } = grant;
+    return { success: true, grant: safeGrant as ManualAccessGrant };
   },
 
   async revokeManualAccess(grantId: string): Promise<boolean> {
@@ -2845,7 +2889,14 @@ export const store = {
       }
     }
     if (grant) {
-      const revokedGrant = { ...grant, status: 'revoked' as const, revokedAt: new Date().toISOString() };
+      const revokedAt = new Date().toISOString();
+      const phoneReservationId = grant.phoneReservationId || getManualAccessPhoneReservationId(grant.phone);
+      const revokedGrant = {
+        ...grant,
+        phoneReservationId,
+        status: 'revoked' as const,
+        revokedAt
+      };
       const manualTokenData = grant.token ? cachedTokens.get(grant.token) : undefined;
       const shouldDeleteToken = Boolean(
         grant.token && manualTokenData?.accessSource === 'MANUAL_GRANT'
@@ -2855,6 +2906,21 @@ export const store = {
       if (shouldDeleteToken && grant.token) {
         batch.delete(getDb().collection('reader_licenses').doc(grant.token));
       }
+      batch.set(
+        getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION).doc(phoneReservationId),
+        sanitizeForFirestore({
+          storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+          grantId: grant.id,
+          articleId: grant.articleId,
+          state: 'revoked',
+          createdAt: grant.grantedAt,
+          updatedAt: revokedAt,
+          boundUserId: grant.boundUserId || grant.claimedUserId,
+          claimedAt: grant.claimedAt,
+          revokedAt
+        }),
+        { merge: true }
+      );
       await batch.commit();
 
       cachedManualAccess.set(grant.id, revokedGrant);
@@ -2867,7 +2933,7 @@ export const store = {
         writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
       }
 
-      console.log(`[ManualAccess] Revoked grant ${grant.id} for phone ${grant.phone}`);
+      console.log(`[ManualAccess] Revoked one-time grant ${grant.id}.`);
       return true;
     }
     return false;
@@ -2884,6 +2950,8 @@ export const store = {
       }
     }
     if (!grant) return false;
+    const deletedAt = new Date().toISOString();
+    const phoneReservationId = grant.phoneReservationId || getManualAccessPhoneReservationId(grant.phone);
 
     // Collect ONLY manual grant tokens (never legitimate M-Pesa purchase tokens)
     // before committing one durable deletion batch.
@@ -2903,6 +2971,21 @@ export const store = {
     for (const token of manualTokenKeys) {
       batch.delete(getDb().collection('reader_licenses').doc(token));
     }
+    batch.set(
+      getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION).doc(phoneReservationId),
+      sanitizeForFirestore({
+        storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+        grantId: grant.id,
+        articleId: grant.articleId,
+        state: 'deleted',
+        createdAt: grant.grantedAt,
+        updatedAt: deletedAt,
+        boundUserId: grant.boundUserId || grant.claimedUserId,
+        claimedAt: grant.claimedAt,
+        deletedAt
+      }),
+      { merge: true }
+    );
     await batch.commit();
 
     cachedManualAccess.delete(grant.id);
@@ -2917,11 +3000,17 @@ export const store = {
       writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
     }
 
-    console.log(`[ManualAccess] Permanently deleted grant ${grant.id} and associated manual tokens for ${grant.phone}`);
+    console.log(`[ManualAccess] Deleted one-time grant ${grant.id}; its phone reservation remains blocked.`);
     return true;
   },
 
-  resetManualAccess(grantId: string): { success: boolean; grant?: ManualAccessGrant; error?: string; message: string } {
+  resetManualAccess(grantId: string): {
+    success: boolean;
+    grant?: ManualAccessGrant;
+    error?: string;
+    code?: string;
+    message: string;
+  } {
     let grant = cachedManualAccess.get(grantId);
     if (!grant) {
       for (const g of cachedManualAccess.values()) {
@@ -2939,49 +3028,32 @@ export const store = {
       };
     }
 
-    grant.status = 'active';
-    grant.activated = false;
-    grant.claimedAt = undefined;
-    grant.claimedPhone = undefined;
-    grant.claimedUserId = undefined;
-    grant.claimedUserEmail = undefined;
-    grant.claimedUserName = undefined;
-    grant.boundUserId = undefined;
-    grant.boundUserEmail = undefined;
-    grant.boundUserName = undefined;
-    grant.notes = `${grant.notes ? grant.notes + ' | ' : ''}Reset on ${new Date().toISOString()}`;
-
-    cachedManualAccess.set(grant.id, grant);
-    writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-    setFirestoreDoc('manual_access', grant.id, grant).catch(() => {});
-
-    console.log(`[ManualAccess] Reset grant ${grant.id} for phone ${grant.phone} back to active/unclaimed state.`);
-
     return {
-      success: true,
-      grant,
-      message: `Manual access for ${grant.phone} (${grant.articleTitle || grant.articleId}) has been reset to active. The reader may now claim access seamlessly.`
+      success: false,
+      code: 'MANUAL_ACCESS_PHONE_SINGLE_USE',
+      error: 'This phone number is permanently reserved and cannot be reset or reused.',
+      message: 'Manual-access phone numbers are single-use. Revoke or delete the grant to stop access; authorize a different number for another reader.'
     };
   },
 
-  verifyManualAccess(
-    articleId: string, 
-    phone: string, 
+  async verifyManualAccess(
+    articleId: string,
+    phone: string,
     currentUser?: { id: string; email: string; name?: string } | null
-  ): { 
+  ): Promise<{
     success: boolean;
-    verified: boolean; 
-    activated?: boolean; 
+    verified: boolean;
+    activated?: boolean;
     alreadyActivated?: boolean;
     requiresAuth?: boolean;
-    token?: string; 
-    articleId?: string; 
-    articleTitle?: string; 
-    grant?: ManualAccessGrant; 
-    boundUser?: { id: string; email: string; name?: string }; 
-    error?: string; 
-    message: string 
-  } {
+    token?: string;
+    articleId?: string;
+    articleTitle?: string;
+    boundUser?: { id: string; email: string; name?: string };
+    code?: string;
+    error?: string;
+    message: string;
+  }> {
     if (!articleId || !phone) {
       return {
         success: false,
@@ -2990,8 +3062,21 @@ export const store = {
       };
     }
 
+    // A phone number is only a one-time grant locator. It is never sufficient
+    // authorization by itself and must not reveal whether a grant exists.
+    if (!currentUser?.id) {
+      return {
+        success: false,
+        verified: false,
+        requiresAuth: true,
+        code: 'MANUAL_ACCESS_AUTH_REQUIRED',
+        error: 'Sign In Required',
+        message: 'Please sign in before claiming manual access.'
+      };
+    }
+
     const normalizedPhone = this.normalizePhone(phone);
-    if (!normalizedPhone || normalizedPhone.length < 8) {
+    if (!normalizedPhone) {
       return {
         success: false,
         verified: false,
@@ -3000,194 +3085,241 @@ export const store = {
     }
 
     const article = cachedArticles.find(a => a.id === articleId || a.slug === articleId);
+    if (!article && articleId !== 'all') {
+      return {
+        success: false,
+        verified: false,
+        code: 'MANUAL_ACCESS_PIECE_NOT_FOUND',
+        message: 'The requested piece was not found.'
+      };
+    }
     const resolvedArticleId = article ? article.id : articleId;
     const resolvedArticleTitle = article ? article.title : (articleId === 'all' ? 'All Archive Access' : 'Monograph');
+    const phoneReservationId = getManualAccessPhoneReservationId(normalizedPhone);
+    const manualAccessCollection = getDb().collection('manual_access');
+    const reservationCollection = getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION);
 
-    // 1. Search manual access grants for matching phone + matching pieceId
-    let matchedGrant: ManualAccessGrant | undefined = undefined;
+    const transactionResult = await getDb().runTransaction(async transaction => {
+      const reservationRef = reservationCollection.doc(phoneReservationId);
+      const reservationSnapshot = await transaction.get(reservationRef);
+      let reservation = reservationSnapshot.exists
+        ? reservationSnapshot.data() as Partial<ManualAccessPhoneReservation>
+        : null;
+      let grantDocument: { id: string; data: () => ManualAccessGrant } | null = null;
 
-    for (const grant of cachedManualAccess.values()) {
-      const grantMatchesPiece = grant.articleId === resolvedArticleId || 
-                                grant.articleId === articleId || 
-                                (article && grant.articleId === article.slug) || 
-                                grant.articleId === 'all';
-      if (!grantMatchesPiece) continue;
-
-      if (this.phonesMatch(normalizedPhone, grant.phone)) {
-        matchedGrant = grant;
-        break;
-      }
-    }
-
-    if (matchedGrant) {
-      // Check if grant is revoked
-      if (matchedGrant.status === 'revoked') {
-        return {
-          success: false,
-          verified: false,
-          error: "Access Revoked",
-          message: "This manual access authorization has been revoked. If you believe this is an error, please contact the Support Desk."
-        };
-      }
-
-      if (matchedGrant.status === 'deleted') {
-        return {
-          success: false,
-          verified: false,
-          error: "Access Not Found",
-          message: "No active access authorization was found for this phone number."
-        };
-      }
-
-      // Check if already claimed and bound to a specific user account
-      if (matchedGrant.status === 'claimed' || matchedGrant.activated) {
-        if (matchedGrant.boundUserId && currentUser && currentUser.id !== matchedGrant.boundUserId) {
+      if (reservation) {
+        if (typeof reservation.grantId !== 'string' || !reservation.grantId) {
+          throw new ManualAccessError(
+            'MANUAL_ACCESS_RESERVATION_CORRUPT',
+            'Manual access is temporarily unavailable.',
+            503
+          );
+        }
+        if (reservation.state === 'revoked' || reservation.state === 'deleted') {
           return {
-            success: false,
-            verified: false,
-            error: "Access Already Claimed",
-            message: "This authorization has already been claimed and bound to another reader account. Access cannot be shared across different accounts."
+            kind: 'blocked' as const,
+            code: 'MANUAL_ACCESS_REVOKED',
+            message: 'This manual access authorization is no longer active.'
           };
         }
-
-        if (matchedGrant.boundUserId && !currentUser) {
-          return {
-            success: false,
-            verified: false,
-            requiresAuth: true,
-            error: "Sign In Required",
-            message: "This authorization is permanently bound to a registered reader account. Please sign in to read this monograph."
-          };
+        const grantSnapshot = await transaction.get(manualAccessCollection.doc(reservation.grantId));
+        if (!grantSnapshot.exists) {
+          throw new ManualAccessError(
+            'MANUAL_ACCESS_RESERVATION_ORPHANED',
+            'Manual access is temporarily unavailable.',
+            503
+          );
         }
-
-        // Return the existing valid token
-        const activeToken = matchedGrant.token || `ink_grant_${crypto.randomBytes(24).toString('hex')}`;
-        return {
-          success: true,
-          verified: true,
-          activated: true,
-          token: activeToken,
-          articleId: resolvedArticleId,
-          articleTitle: resolvedArticleTitle,
-          grant: matchedGrant,
-          boundUser: currentUser ? { id: currentUser.id, email: currentUser.email, name: currentUser.name } : undefined,
-          message: "Access confirmed! You now have full access to read this piece."
+        grantDocument = {
+          id: grantSnapshot.id,
+          data: () => grantSnapshot.data() as ManualAccessGrant
+        };
+      } else {
+        // Legacy grants are adopted lazily with a bounded equality query. More
+        // than one match is an integrity conflict and is never silently resolved.
+        const legacySnapshot = await transaction.get(
+          manualAccessCollection.where('phone', '==', normalizedPhone).limit(2)
+        );
+        if (legacySnapshot.empty) {
+          return { kind: 'not-found' as const };
+        }
+        if (legacySnapshot.size !== 1) {
+          throw new ManualAccessError(
+            'MANUAL_ACCESS_LEGACY_CONFLICT',
+            'This phone number has conflicting legacy grants. Contact Support for review.',
+            409
+          );
+        }
+        const legacyDocument = legacySnapshot.docs[0];
+        grantDocument = {
+          id: legacyDocument.id,
+          data: () => legacyDocument.data() as ManualAccessGrant
         };
       }
 
-      // First-Time Activation (Single-Use Claim Transition)
+      const storedGrant = grantDocument.data();
+      const matchedGrant: ManualAccessGrant = {
+        ...storedGrant,
+        id: storedGrant.id || grantDocument.id,
+        phoneReservationId
+      };
+      if (this.normalizePhone(matchedGrant.phone) !== normalizedPhone) {
+        throw new ManualAccessError(
+          'MANUAL_ACCESS_RESERVATION_MISMATCH',
+          'Manual access is temporarily unavailable.',
+          503
+        );
+      }
+
+      const grantMatchesPiece = matchedGrant.articleId === resolvedArticleId ||
+        matchedGrant.articleId === articleId ||
+        (article && matchedGrant.articleId === article.slug) ||
+        matchedGrant.articleId === 'all';
+      if (!grantMatchesPiece) {
+        return { kind: 'not-found' as const };
+      }
+      if (matchedGrant.status === 'revoked' || matchedGrant.status === 'deleted' || matchedGrant.status === 'expired') {
+        return {
+          kind: 'blocked' as const,
+          code: 'MANUAL_ACCESS_REVOKED',
+          message: 'This manual access authorization is no longer active.'
+        };
+      }
+
+      const existingBoundUserId = reservation?.boundUserId ||
+        matchedGrant.boundUserId ||
+        matchedGrant.claimedUserId;
+      if (existingBoundUserId && existingBoundUserId !== currentUser.id) {
+        return {
+          kind: 'already-claimed' as const,
+          code: 'MANUAL_ACCESS_ALREADY_CLAIMED',
+          message: 'This phone number has already been claimed and bound to another reader account.'
+        };
+      }
+
+      if (existingBoundUserId === currentUser.id && (matchedGrant.status === 'claimed' || matchedGrant.activated)) {
+        return {
+          kind: 'owned' as const,
+          grant: matchedGrant
+        };
+      }
+
       const now = new Date().toISOString();
-      if (!matchedGrant.token) {
-        matchedGrant.token = `ink_grant_${crypto.randomBytes(24).toString('hex')}`;
-      }
-
-      const activeToken = matchedGrant.token;
-      matchedGrant.status = 'claimed';
-      matchedGrant.activated = true;
-      matchedGrant.claimedAt = now;
-      matchedGrant.claimedPhone = normalizedPhone;
-
-      if (currentUser && currentUser.id) {
-        matchedGrant.boundUserId = currentUser.id;
-        matchedGrant.boundUserEmail = currentUser.email?.toLowerCase();
-        matchedGrant.boundUserName = currentUser.name || currentUser.email;
-        matchedGrant.claimedUserId = currentUser.id;
-        matchedGrant.claimedUserEmail = currentUser.email?.toLowerCase();
-        matchedGrant.claimedUserName = currentUser.name || currentUser.email;
-      }
-
-      // Persist the claimed grant state to disk cache & Firestore
-      cachedManualAccess.set(matchedGrant.id, matchedGrant);
-      writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-      setFirestoreDoc('manual_access', matchedGrant.id, matchedGrant).catch(() => {});
-
-      // Save permanent reader license in token cache & Firestore
-      void this.savePurchasedToken(activeToken, {
-        articleId: resolvedArticleId,
+      const activeToken = typeof matchedGrant.token === 'string' &&
+        /^ink_grant_(?:[0-9]{10,16}_)?[a-f0-9]{32,64}$/.test(matchedGrant.token)
+        ? matchedGrant.token
+        : `ink_grant_${crypto.randomBytes(24).toString('hex')}`;
+      const expiresAt = Number.isFinite(Number(matchedGrant.expiresAt))
+        ? Number(matchedGrant.expiresAt)
+        : Date.now() + 3650 * 24 * 60 * 60 * 1000;
+      const claimedGrant: ManualAccessGrant = {
+        ...matchedGrant,
+        phoneReservationId,
+        token: activeToken,
+        status: 'claimed',
+        activated: true,
+        claimedAt: matchedGrant.claimedAt || now,
+        boundUserId: currentUser.id,
+        boundUserEmail: currentUser.email.toLowerCase(),
+        boundUserName: currentUser.name || currentUser.email,
+        claimedUserId: currentUser.id,
+        claimedUserEmail: currentUser.email.toLowerCase(),
+        claimedUserName: currentUser.name || currentUser.email
+      };
+      const claimedReservation: ManualAccessPhoneReservation = {
+        storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+        grantId: claimedGrant.id,
+        articleId: claimedGrant.articleId,
+        state: 'claimed',
+        createdAt: reservation?.createdAt || claimedGrant.grantedAt || now,
+        updatedAt: now,
+        boundUserId: currentUser.id,
+        claimedAt: claimedGrant.claimedAt || now
+      };
+      const readerLicense: CachedReaderLicense = {
+        token: activeToken,
+        articleId: claimedGrant.articleId,
         phone: normalizedPhone,
-        expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
-        receipt: matchedGrant.notes || `MANUAL-CLAIMED-${now.slice(0, 10)}`,
+        expiresAt,
+        receipt: claimedGrant.notes || `MANUAL-CLAIMED-${now.slice(0, 10)}`,
         createdAt: now,
-        userId: currentUser?.id,
-        email: currentUser?.email,
+        userId: currentUser.id,
+        email: currentUser.email.toLowerCase(),
         accessSource: 'MANUAL_GRANT'
-      }).catch(err => console.warn('[Data Store] Error persisting manual access token:', err));
+      };
 
-      console.log(`[ManualAccess] Single-use activated ${matchedGrant.id} for phone ${normalizedPhone} on piece "${resolvedArticleTitle}".`);
+      transaction.set(
+        manualAccessCollection.doc(claimedGrant.id),
+        sanitizeForFirestore(claimedGrant),
+        { merge: true }
+      );
+      transaction.set(reservationRef, sanitizeForFirestore(claimedReservation), { merge: true });
+      transaction.set(
+        getDb().collection('reader_licenses').doc(activeToken),
+        sanitizeForFirestore(readerLicense),
+        { merge: true }
+      );
 
       return {
-        success: true,
-        verified: true,
-        activated: true,
+        kind: 'claimed' as const,
+        grant: claimedGrant,
         token: activeToken,
-        articleId: resolvedArticleId,
-        articleTitle: resolvedArticleTitle,
-        grant: matchedGrant,
-        boundUser: currentUser ? { id: currentUser.id, email: currentUser.email, name: currentUser.name } : undefined,
-        message: "Access confirmed & activated! You now have full access to read this piece."
+        readerLicense
+      };
+    });
+
+    if (transactionResult.kind === 'not-found') {
+      return {
+        success: false,
+        verified: false,
+        code: 'MANUAL_ACCESS_NOT_FOUND',
+        message: 'No active manual access authorization was found.'
+      };
+    }
+    if (transactionResult.kind === 'blocked') {
+      return {
+        success: false,
+        verified: false,
+        code: transactionResult.code,
+        error: 'Access Revoked',
+        message: transactionResult.message
+      };
+    }
+    if (transactionResult.kind === 'already-claimed') {
+      return {
+        success: false,
+        verified: false,
+        alreadyActivated: true,
+        code: transactionResult.code,
+        error: 'Access Already Claimed',
+        message: transactionResult.message
       };
     }
 
-    // 2. Search reader license tokens (issued by admin or payment)
-    for (const [tokenKey, tokenData] of cachedTokens.entries()) {
-      const tokenMatchesPiece = tokenData.articleId === resolvedArticleId || 
-                                tokenData.articleId === articleId || 
-                                (article && tokenData.articleId === article.slug) || 
-                                tokenData.articleId === 'all';
-      if (!tokenMatchesPiece) continue;
-
-      if (tokenData.phone && this.phonesMatch(normalizedPhone, tokenData.phone)) {
-        const isExpired = tokenData.expiresAt && Date.now() > Number(tokenData.expiresAt);
-        if (!isExpired) {
-          return {
-            success: true,
-            verified: true,
-            activated: true,
-            token: tokenKey,
-            articleId: resolvedArticleId,
-            articleTitle: resolvedArticleTitle,
-            message: "Purchased access verified! You now have full access to read this piece."
-          };
-        }
-      }
+    if (transactionResult.kind === 'claimed') {
+      cachedManualAccess.set(transactionResult.grant.id, transactionResult.grant);
+      cachedTokens.set(transactionResult.token, transactionResult.readerLicense);
+      cachedReaderLicenseVerifiedAt.set(transactionResult.token, Date.now());
+      missingReaderLicenses.delete(transactionResult.token);
+      readerLicenseUserLookupVerifiedAt.clear();
+      writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
+      writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
+      console.log(`[ManualAccess] Bound one-time grant ${transactionResult.grant.id} to one reader account.`);
     }
 
-    // 3. Search completed transactions matching phone + piece
-    for (const tx of cachedTransactions.values()) {
-      const isSuccessStatus = ['CONFIRMED', 'SUCCESS', 'PAID'].includes(tx.status as any);
-      if (isSuccessStatus && tx.phoneNumber) {
-        const txMatchesPiece = tx.articleId === resolvedArticleId || 
-                               tx.articleId === articleId || 
-                               (article && tx.articleId === article.slug) || 
-                               tx.articleId === 'all';
-        if (txMatchesPiece && this.phonesMatch(normalizedPhone, tx.phoneNumber)) {
-          const purchaseToken = `ink_mpesa_${tx.mpesaReceiptNumber || tx.checkoutRequestId || tx.id}`;
-          void this.savePurchasedToken(purchaseToken, {
-            articleId: resolvedArticleId,
-            phone: normalizedPhone,
-            expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
-            receipt: tx.mpesaReceiptNumber || 'MPESA-PAID',
-            createdAt: tx.completedAt || tx.createdAt,
-            accessSource: 'MPESA_PURCHASE'
-          }).catch(err => console.warn('[Data Store] Error persisting restored purchase token:', err));
-
-          return {
-            success: true,
-            verified: true,
-            activated: true,
-            token: purchaseToken,
-            articleId: resolvedArticleId,
-            articleTitle: resolvedArticleTitle,
-            message: "M-Pesa payment verified! You now have full access to read this piece."
-          };
-        }
-      }
-    }
-
+    const boundGrant = transactionResult.grant;
     return {
-      success: false,
-      verified: false,
-      message: "No active access authorization was found for this phone number. If you believe this is an error, please contact the Support Desk."
+      success: true,
+      verified: true,
+      activated: true,
+      alreadyActivated: transactionResult.kind === 'owned',
+      ...(transactionResult.kind === 'claimed' ? { token: transactionResult.token } : {}),
+      articleId: resolvedArticleId,
+      articleTitle: resolvedArticleTitle,
+      boundUser: { id: currentUser.id, email: currentUser.email, name: currentUser.name },
+      message: transactionResult.kind === 'claimed'
+        ? 'Access activated and permanently bound to your reader account.'
+        : 'Access is already bound to your reader account.'
     };
   },
 
