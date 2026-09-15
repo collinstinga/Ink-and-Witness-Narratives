@@ -52,6 +52,9 @@ export interface NavState {
   readerScrollTop?: number;
 }
 
+type LibraryAccessSource = 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+type LibraryArticle = Article & { libraryAccessSource?: LibraryAccessSource };
+
 export default function App() {
   const [author, setAuthor] = useState<AuthorProfile | null>(null);
   const [articles, setArticles] = useState<Article[]>([]);
@@ -82,6 +85,9 @@ export default function App() {
 
   // Unlocked Tokens map (cached locally)
   const [unlockedTokens, setUnlockedTokens] = useState<Record<string, any>>({});
+  const [accountLibraryArticles, setAccountLibraryArticles] = useState<LibraryArticle[]>([]);
+  const [accountLibraryLoading, setAccountLibraryLoading] = useState(false);
+  const [accountLibraryError, setAccountLibraryError] = useState('');
 
   // Pending article slug or id to open once articles finish loading
   const pendingArticleSlugOrIdRef = React.useRef<string | null>(null);
@@ -89,6 +95,36 @@ export default function App() {
   articlesRef.current = articles;
   const unlockedTokensRef = React.useRef<Record<string, any>>({});
   unlockedTokensRef.current = unlockedTokens;
+  const currentUserRef = React.useRef<User | null>(null);
+  currentUserRef.current = currentUser;
+
+  const libraryArticles = React.useMemo(() => {
+    const unlockedById = new Map<string, LibraryArticle>();
+    for (const article of accountLibraryArticles) {
+      unlockedById.set(article.id, { ...article, isUnlocked: true });
+    }
+    for (const article of articles) {
+      if (unlockedTokens[article.id] || (article.slug && unlockedTokens[article.slug])) {
+        unlockedById.set(article.id, {
+          ...article,
+          isUnlocked: true,
+          libraryAccessSource: 'MPESA_PURCHASE'
+        });
+      }
+    }
+    return Array.from(unlockedById.values());
+  }, [accountLibraryArticles, articles, unlockedTokens]);
+
+  const effectiveUnlockedTokens = React.useMemo(() => {
+    const effective: Record<string, any> = { ...unlockedTokens };
+    for (const article of accountLibraryArticles) {
+      effective[article.id] = effective[article.id] || { accountEntitlement: true };
+      if (article.slug) {
+        effective[article.slug] = effective[article.slug] || { accountEntitlement: true };
+      }
+    }
+    return effective;
+  }, [accountLibraryArticles, unlockedTokens]);
 
   // Helper to get window scroll Y
   const getWindowScroll = (): number => {
@@ -530,7 +566,39 @@ export default function App() {
     }, 'push');
   };
 
+  const refreshAccountLibrary = async (user: User | null = currentUser) => {
+    if (!user || user.role !== 'client') {
+      setAccountLibraryArticles([]);
+      setAccountLibraryLoading(false);
+      setAccountLibraryError('');
+      return;
+    }
+
+    setAccountLibraryLoading(true);
+    setAccountLibraryError('');
+    try {
+      const response = await api.getUserLibrary();
+      if (currentUserRef.current?.id !== user.id) return;
+      setAccountLibraryArticles(
+        response.library
+          .map(item => ({
+            ...item.article,
+            libraryAccessSource: item.accessSource
+          }))
+      );
+    } catch {
+      if (currentUserRef.current?.id === user.id) {
+        setAccountLibraryError('Your account library is temporarily unavailable. Close and reopen it to retry.');
+      }
+    } finally {
+      if (currentUserRef.current?.id === user.id) {
+        setAccountLibraryLoading(false);
+      }
+    }
+  };
+
   const handleOpenLibrary = () => {
+    void refreshAccountLibrary();
     navigate({ isLibraryOpen: true, isCheckoutOpen: false }, 'push');
   };
 
@@ -576,9 +644,11 @@ export default function App() {
       const tokenInfo = stored[art.id] || (art.slug ? stored[art.slug] : undefined);
       try {
         const detailed = await api.getArticle(art.id, tokenInfo?.token);
-        setActiveReaderArticle({ ...detailed, isUnlocked: true });
+        if (!detailed.isUnlocked) return;
+        setActiveReaderArticle(detailed);
+        await refreshAccountLibrary(currentUserRef.current);
       } catch {
-        setActiveReaderArticle({ ...art, isUnlocked: true });
+        // The reader remains locked unless the server confirms the entitlement.
       }
     }
   };
@@ -614,6 +684,8 @@ export default function App() {
 
   const handleAuthSuccess = (user: User) => {
     setCurrentUser(user);
+    setAccountLibraryArticles([]);
+    setAccountLibraryError('');
     setIsSignInOpen(false);
     if (user.role === 'admin') {
       navigate({ isWriterStudioOpen: true, isSignInOpen: false }, 'push');
@@ -627,6 +699,9 @@ export default function App() {
       await api.authLogout();
     } catch {}
     setCurrentUser(null);
+    setAccountLibraryArticles([]);
+    setAccountLibraryLoading(false);
+    setAccountLibraryError('');
     setIsWriterStudioOpen(false);
     navigate({ view: 'home', isWriterStudioOpen: false }, 'replace');
   };
@@ -639,6 +714,11 @@ export default function App() {
       }
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    setAccountLibraryArticles([]);
+    void refreshAccountLibrary(currentUser);
+  }, [currentUser?.id, currentUser?.role]);
 
   // Fetch initial data
   const fetchData = async () => {
@@ -772,6 +852,7 @@ export default function App() {
         onOpenAffiliates={handleOpenAffiliates}
         onOpenSignIn={() => setIsSignInOpen(true)}
         onLogout={handleLogout}
+        unlockedCount={libraryArticles.length}
       />
 
       {/* Main View Router */}
@@ -780,7 +861,7 @@ export default function App() {
           <HomeView
             author={author}
             articles={articles}
-            unlockedTokens={unlockedTokens}
+            unlockedTokens={effectiveUnlockedTokens}
             onReadArticle={handleOpenReader}
             onUnlockArticle={handleUnlockRequest}
             onNavigate={handleNavigateView}
@@ -792,7 +873,7 @@ export default function App() {
           <AllPiecesView
             articles={articles}
             categories={categories}
-            unlockedTokens={unlockedTokens}
+            unlockedTokens={effectiveUnlockedTokens}
             onReadArticle={handleOpenReader}
             onUnlockArticle={handleUnlockRequest}
             onOpenTip={handleOpenTip}
@@ -981,7 +1062,7 @@ export default function App() {
       <ArticleReaderModal
         article={activeReaderArticle}
         isOpen={Boolean(activeReaderArticle)}
-        isUnlocked={activeReaderArticle ? Boolean(unlockedTokens[activeReaderArticle.id] || activeReaderArticle.isUnlocked) : false}
+        isUnlocked={activeReaderArticle ? Boolean(effectiveUnlockedTokens[activeReaderArticle.id] || activeReaderArticle.isUnlocked) : false}
         onClose={handleCloseReader}
         author={author}
         currentUser={currentUser}
@@ -1014,7 +1095,9 @@ export default function App() {
       <MyLibraryModal
         isOpen={isLibraryOpen}
         onClose={handleCloseLibrary}
-        articles={articles}
+        articles={libraryArticles}
+        isLoading={accountLibraryLoading}
+        error={accountLibraryError}
         onReadArticle={handleOpenReader}
         onExploreCatalog={() => {
           handleCloseLibrary();

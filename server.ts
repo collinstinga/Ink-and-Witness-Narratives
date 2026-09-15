@@ -37,6 +37,7 @@ import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/se
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import { ImageValidationError, validateImageDataUrl } from "./src/server/imageSecurity.js";
 import { hasUnsafeMpesaSecretUpdate } from "./src/server/mpesaSecretStorage.js";
+import { isManualAccessBearerLicense } from "./src/server/manualAccessSecurity.js";
 import {
   PAYMENT_CALLBACK_QUERY_PARAMETER,
   canRecoverMpesaPurchase,
@@ -827,7 +828,11 @@ export async function createApp() {
       } catch {
         return res.status(503).json({ error: "Reader access is temporarily unavailable. Please retry." });
       }
-      if (tokenData && tokenData.expiresAt > Date.now()) {
+      if (
+        tokenData
+        && !isManualAccessBearerLicense(token, tokenData)
+        && tokenData.expiresAt > Date.now()
+      ) {
         if (tokenData.articleId === article.id || tokenData.articleId === 'all') {
           isUnlocked = true;
         }
@@ -1054,6 +1059,12 @@ export async function createApp() {
     if (!tokenData) {
       return res.status(401).json({ valid: false, message: "Invalid or expired access token." });
     }
+    if (isManualAccessBearerLicense(token, tokenData)) {
+      return res.status(401).json({
+        valid: false,
+        message: "Manual access must be claimed while signed in to the authorized reader account."
+      });
+    }
 
     if (tokenData.expiresAt < Date.now()) {
       return res.status(401).json({ valid: false, message: "Access token has expired." });
@@ -1100,14 +1111,13 @@ export async function createApp() {
           success: true,
           verified: true,
           activated: Boolean(result.activated),
-          token: result.token,
           articleId: result.articleId,
           articleTitle: result.articleTitle,
           boundUser: result.boundUser,
           message: result.message
         });
       } else {
-        const status = result.alreadyActivated
+        const status = result.alreadyActivated || result.code === 'MANUAL_ACCESS_LEGACY_RECONCILIATION_REQUIRED'
           ? 409
           : result.code === 'MANUAL_ACCESS_REVOKED'
             ? 403
@@ -1769,18 +1779,18 @@ export async function createApp() {
       return res.status(503).json({ success: false, error: "Your reader library is temporarily unavailable. Please retry." });
     }
     const articles = store.getArticles(false);
+    const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
 
     const library = purchases.map(p => {
       const art = articles.find(a => a.id === p.articleId);
+      const { token: _privateLegacyBearer, ...safePurchase } = p;
       return {
-        ...p,
-        article: art ? {
-          ...art,
-          isUnlocked: true
-        } : null
+        ...safePurchase,
+        article: art ? toPublicArticleSummary(art, defaultPriceKes, true) : null
       };
     }).filter(item => item.article !== null);
 
+    res.setHeader('Cache-Control', 'private, no-store');
     return res.json({
       success: true,
       user: {
@@ -2305,13 +2315,13 @@ export async function createApp() {
   });
 
   // Writer: Get Manual Access Grants
-  app.get("/api/admin/manual-access", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/manual-access", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const articleId = req.query.articleId as string;
-      const grants = store.getManualAccessGrants(articleId);
+      const grants = await store.getManualAccessGrants(articleId);
       res.json({ success: true, grants });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to retrieve manual access grants." });
+    } catch {
+      res.status(503).json({ error: "Manual access grants are temporarily unavailable." });
     }
   });
 
@@ -2341,32 +2351,38 @@ export async function createApp() {
       if (!grantId) {
         return res.status(400).json({ error: "grantId is required to revoke manual access." });
       }
-      await store.ensureReaderLicensesHydrated();
       const revoked = await store.revokeManualAccess(grantId);
       if (!revoked) {
         return res.status(404).json({ error: "Manual access grant not found." });
       }
       res.json({ success: true, message: "Manual access authorization revoked." });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to revoke manual access grant." });
+      const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
+      res.status(status).json({
+        code: err?.code || 'MANUAL_ACCESS_UNAVAILABLE',
+        error: status >= 500 ? 'Manual access is temporarily unavailable.' : err.message
+      });
     }
   });
 
-  // Writer: Delete Manual Access (Permanently removes record and manual tokens, protecting M-Pesa purchases)
+  // Writer: Delete Manual Access (soft-deletes the grant and keeps a permanent phone tombstone)
   app.delete(["/api/admin/manual-access/:grantId", "/api/admin/manual-access"], requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const grantId = req.params.grantId || req.body.grantId;
       if (!grantId) {
         return res.status(400).json({ error: "grantId is required to delete manual access." });
       }
-      await store.ensureReaderLicensesHydrated();
       const deleted = await store.deleteManualAccess(grantId);
       if (!deleted) {
         return res.status(404).json({ error: "Manual access grant not found." });
       }
       res.json({ success: true, message: "Manual access authorization permanently deleted." });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to delete manual access grant." });
+      const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
+      res.status(status).json({
+        code: err?.code || 'MANUAL_ACCESS_UNAVAILABLE',
+        error: status >= 500 ? 'Manual access is temporarily unavailable.' : err.message
+      });
     }
   });
 
@@ -2376,14 +2392,17 @@ export async function createApp() {
       if (!grantId) {
         return res.status(400).json({ error: "grantId is required to delete manual access." });
       }
-      await store.ensureReaderLicensesHydrated();
       const deleted = await store.deleteManualAccess(grantId);
       if (!deleted) {
         return res.status(404).json({ error: "Manual access grant not found." });
       }
       res.json({ success: true, message: "Manual access authorization permanently deleted." });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to delete manual access grant." });
+      const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
+      res.status(status).json({
+        code: err?.code || 'MANUAL_ACCESS_UNAVAILABLE',
+        error: status >= 500 ? 'Manual access is temporarily unavailable.' : err.message
+      });
     }
   });
 

@@ -368,20 +368,66 @@
     },
     "ManualAccessGrant": {
       "title": "ManualAccessGrant",
-      "description": "Administrator-granted manual reading access for specific readers without requiring M-Pesa payments",
+      "description": "Server-managed one-time phone authorization. New records never contain a reusable reader token.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "articleId": { "type": "string" },
         "articleTitle": { "type": "string" },
         "phone": { "type": "string" },
-        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "phoneReservationId": { "type": "string", "description": "Private HMAC reservation reference; never returned by HTTP APIs" },
+        "entitlementId": { "type": "string", "description": "Private HMAC entitlement reference populated after claim; never returned by HTTP APIs" },
+        "status": { "type": "string", "enum": ["active", "claimed", "revoked", "deleted", "expired"] },
+        "activated": { "type": "boolean" },
+        "claimedAt": { "type": "string" },
+        "boundUserId": { "type": "string" },
+        "boundUserEmail": { "type": "string" },
+        "boundUserName": { "type": "string" },
         "grantedAt": { "type": "string" },
         "grantedBy": { "type": "string" },
         "accessType": { "type": "string", "enum": ["manual"] },
-        "notes": { "type": "string" }
+        "accessSource": { "type": "string", "enum": ["MANUAL_GRANT"] },
+        "notes": { "type": "string" },
+        "expiresAt": { "type": "number" },
+        "revokedAt": { "type": "string" },
+        "deletedAt": { "type": "string" }
       },
-      "required": ["id", "articleId", "phone", "status", "grantedAt", "grantedBy", "accessType"]
+      "required": ["id", "articleId", "phone", "phoneReservationId", "status", "grantedAt", "grantedBy", "accessType", "accessSource"]
+    },
+    "ManualAccessPhoneReservation": {
+      "title": "ManualAccessPhoneReservation",
+      "description": "Permanent single-use phone reservation and account-binding tombstone. The document key is a secret HMAC and the body contains no phone number.",
+      "type": "object",
+      "properties": {
+        "storageVersion": { "type": "number", "enum": [1] },
+        "grantId": { "type": "string" },
+        "articleId": { "type": "string" },
+        "state": { "type": "string", "enum": ["unclaimed", "claimed", "revoked", "deleted"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "boundUserId": { "type": "string" },
+        "claimedAt": { "type": "string" },
+        "revokedAt": { "type": "string" },
+        "deletedAt": { "type": "string" }
+      },
+      "required": ["storageVersion", "grantId", "articleId", "state", "createdAt", "updatedAt"]
+    },
+    "ManualAccessEntitlement": {
+      "title": "ManualAccessEntitlement",
+      "description": "Token-free manual reading entitlement bound to one authenticated account and article. The document key is a secret HMAC of the account/article pair.",
+      "type": "object",
+      "properties": {
+        "storageVersion": { "type": "number", "enum": [1] },
+        "grantId": { "type": "string" },
+        "userId": { "type": "string" },
+        "articleId": { "type": "string" },
+        "state": { "type": "string", "enum": ["active", "revoked", "deleted"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "revokedAt": { "type": "string" },
+        "deletedAt": { "type": "string" }
+      },
+      "required": ["storageVersion", "grantId", "userId", "articleId", "state", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -456,6 +502,10 @@
     "/manual_access_phone_reservations/{phoneHmac}": {
       "schema": "ManualAccessPhoneReservation",
       "description": "Permanent server-only one-phone/one-grant reservation and account-binding tombstone keyed by a secret HMAC"
+    },
+    "/manual_access_entitlements/{accountArticleHmac}": {
+      "schema": "ManualAccessEntitlement",
+      "description": "Server-only token-free account entitlement keyed by a secret HMAC of reader and article identifiers"
     },
     "/site_configs/mpesa_settings": {
       "schema": "MpesaPublicConfig",

@@ -17,7 +17,6 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { AuthorProfile, User } from '../types.js';
-import { getStoredTokens } from '../utils/api.js';
 
 export type PublicViewType = 'home' | 'all-pieces' | 'about' | 'how-to-pay';
 
@@ -32,6 +31,7 @@ interface NavbarProps {
   onOpenSignIn?: () => void;
   onOpenWriterStudio?: () => void;
   onLogout?: () => void;
+  unlockedCount: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -44,27 +44,20 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAffiliates,
   onOpenSignIn,
   onOpenWriterStudio,
-  onLogout
+  onLogout,
+  unlockedCount
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [unlockedCount, setUnlockedCount] = useState(0);
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
-    const checkTokens = () => {
-      const tokens = getStoredTokens();
-      setUnlockedCount(Object.keys(tokens).length);
-    };
-    checkTokens();
-    window.addEventListener('storage', checkTokens);
-    
     const handleScroll = () => {
       setScrolled(window.scrollY > 20);
     };
-    window.addEventListener('scroll', handleScroll);
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
 
     return () => {
-      window.removeEventListener('storage', checkTokens);
       window.removeEventListener('scroll', handleScroll);
     };
   }, []);

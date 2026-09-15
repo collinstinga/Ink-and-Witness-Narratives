@@ -352,7 +352,11 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       newIds[activePickerSlot.slotIndex] = articleId;
       setConfig(prev => ({
         ...prev,
-        mostSellingPieceIds: newIds
+        mostSellingPieceIds: newIds,
+        // Choosing a display slot is an explicit editorial override. Without
+        // this switch, the server continues to resolve the automatic ranking
+        // and the saved manual selection appears to have been ignored.
+        mostSellingMode: 'manual'
       }));
     } else if (activePickerSlot.type === 'pieceOfTheWeek') {
       setConfig(prev => ({

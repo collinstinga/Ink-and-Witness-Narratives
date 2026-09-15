@@ -9,12 +9,18 @@ import { hashPassword, generateSecureToken } from './auth.js';
 import { sanitizeImageDataUrl } from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
 import {
+  MANUAL_ACCESS_ENTITLEMENT_COLLECTION,
+  MANUAL_ACCESS_ENTITLEMENT_VERSION,
   MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION,
   MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
   ManualAccessError,
+  type ManualAccessEntitlement,
   type ManualAccessPhoneReservation,
   createManualAccessPhoneAlreadyUsedError,
+  getManualAccessEntitlementId,
   getManualAccessPhoneReservationId,
+  isManualAccessEntitlementId,
+  normalizeManualAccessEntitlement,
   normalizeManualAccessPhone
 } from './manualAccessSecurity.js';
 import {
@@ -181,6 +187,7 @@ const READER_LICENSE_CACHE_TTL_MS = 60 * 1000;
 const MISSING_READER_LICENSE_CACHE_TTL_MS = 30 * 1000;
 const MAX_MISSING_READER_LICENSE_CACHE_ENTRIES = 1000;
 const READER_LICENSE_USER_CACHE_TTL_MS = 60 * 1000;
+const MAX_MANUAL_ACCESS_ADMIN_RESULTS = 200;
 const MPESA_REQUEST_LOCK_MS = 2 * 60 * 1000;
 
 let cachedHomepageConfig: HomepageConfig = {
@@ -598,6 +605,386 @@ function normalizeStoredReaderLicense(
     ...value,
     phone: value.phone || ''
   };
+}
+
+function manualAccessIntegrityError(code: string): ManualAccessError {
+  return new ManualAccessError(code, 'Manual access is temporarily unavailable.', 503);
+}
+
+function cleanManualAccessGrantForStorage(grant: ManualAccessGrant): ManualAccessGrant {
+  const {
+    token: _legacyToken,
+    rawPhone: _rawPhone,
+    claimedPhone: _claimedPhone,
+    downloadToken: _downloadToken,
+    ...cleanGrant
+  } = grant as ManualAccessGrant & { downloadToken?: string };
+  return cleanGrant as ManualAccessGrant;
+}
+
+function getValidatedManualAccessExpiry(grant: ManualAccessGrant): number | undefined {
+  if (grant.expiresAt === undefined) return undefined;
+  if (
+    typeof grant.expiresAt !== 'number'
+    || !Number.isFinite(grant.expiresAt)
+    || grant.expiresAt <= 0
+  ) {
+    throw manualAccessIntegrityError('MANUAL_ACCESS_EXPIRY_CORRUPT');
+  }
+  return grant.expiresAt;
+}
+
+function toManualAccessAdminView(grant: ManualAccessGrant): ManualAccessGrant | null {
+  const phone = normalizeManualAccessPhone(grant.phone);
+  if (
+    !grant.id
+    || !grant.articleId
+    || !phone
+    || !['active', 'claimed', 'revoked', 'deleted', 'expired'].includes(grant.status)
+    || typeof grant.grantedAt !== 'string'
+    || !Number.isFinite(Date.parse(grant.grantedAt))
+  ) {
+    return null;
+  }
+
+  const safe: ManualAccessGrant = {
+    id: grant.id,
+    articleId: grant.articleId,
+    ...(typeof grant.articleTitle === 'string' ? { articleTitle: grant.articleTitle } : {}),
+    phone,
+    status: grant.status,
+    ...(typeof grant.activated === 'boolean' ? { activated: grant.activated } : {}),
+    ...(typeof grant.claimedAt === 'string' ? { claimedAt: grant.claimedAt } : {}),
+    ...(typeof grant.claimedUserId === 'string' ? { claimedUserId: grant.claimedUserId } : {}),
+    ...(typeof grant.claimedUserEmail === 'string' ? { claimedUserEmail: grant.claimedUserEmail } : {}),
+    ...(typeof grant.claimedUserName === 'string' ? { claimedUserName: grant.claimedUserName } : {}),
+    ...(typeof grant.boundUserId === 'string' ? { boundUserId: grant.boundUserId } : {}),
+    ...(typeof grant.boundUserEmail === 'string' ? { boundUserEmail: grant.boundUserEmail } : {}),
+    ...(typeof grant.boundUserName === 'string' ? { boundUserName: grant.boundUserName } : {}),
+    grantedAt: grant.grantedAt,
+    grantedBy: typeof grant.grantedBy === 'string' ? grant.grantedBy : 'Unknown',
+    accessType: 'manual',
+    accessSource: 'MANUAL_GRANT',
+    ...(typeof grant.notes === 'string' ? { notes: grant.notes } : {}),
+    ...(typeof grant.expiresAt === 'number' && Number.isFinite(grant.expiresAt)
+      ? { expiresAt: grant.expiresAt }
+      : {}),
+    ...(typeof grant.revokedAt === 'string' ? { revokedAt: grant.revokedAt } : {}),
+    ...(typeof grant.deletedAt === 'string' ? { deletedAt: grant.deletedAt } : {})
+  };
+  return safe;
+}
+
+function getManualAccessBoundUserId(
+  grant: ManualAccessGrant,
+  reservation?: Partial<ManualAccessPhoneReservation> | null
+): string | undefined {
+  const userIds = new Set(
+    [reservation?.boundUserId, grant.boundUserId, grant.claimedUserId]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+  );
+  if (userIds.size > 1) throw manualAccessIntegrityError('MANUAL_ACCESS_BINDING_CONFLICT');
+  return userIds.values().next().value;
+}
+
+function getManualAccessLegacyPhoneValues(normalizedPhone: string): string[] {
+  return Array.from(new Set([
+    normalizedPhone,
+    ...(normalizedPhone.startsWith('254') && normalizedPhone.length === 12
+      ? [`0${normalizedPhone.slice(3)}`, normalizedPhone.slice(3), `+${normalizedPhone}`, `00${normalizedPhone}`]
+      : [])
+  ]));
+}
+
+function validateManualAccessReservation(
+  reservation: Partial<ManualAccessPhoneReservation>,
+  reservationId: string,
+  grant: ManualAccessGrant
+): ManualAccessPhoneReservation {
+  if (
+    reservation.storageVersion !== MANUAL_ACCESS_PHONE_RESERVATION_VERSION
+    || reservation.grantId !== grant.id
+    || reservation.articleId !== grant.articleId
+    || grant.phoneReservationId !== reservationId
+    || !['unclaimed', 'claimed', 'revoked', 'deleted'].includes(String(reservation.state))
+    || typeof reservation.createdAt !== 'string'
+    || !Number.isFinite(Date.parse(reservation.createdAt))
+    || typeof reservation.updatedAt !== 'string'
+    || !Number.isFinite(Date.parse(reservation.updatedAt))
+    || Date.parse(reservation.updatedAt) < Date.parse(reservation.createdAt)
+  ) {
+    throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
+  }
+
+  const boundUserId = getManualAccessBoundUserId(grant, reservation);
+  if (reservation.state === 'unclaimed') {
+    if (boundUserId || grant.status !== 'active' || grant.activated || grant.claimedAt) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_STATE_CONFLICT');
+    }
+  } else if (reservation.state === 'claimed') {
+    if (!boundUserId || grant.status !== 'claimed' || !grant.activated) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_STATE_CONFLICT');
+    }
+  } else if (reservation.state === 'revoked') {
+    if (grant.status !== 'revoked' && grant.status !== 'deleted') {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_STATE_CONFLICT');
+    }
+  } else if (reservation.state === 'deleted' && grant.status !== 'deleted') {
+    throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_STATE_CONFLICT');
+  }
+
+  return reservation as ManualAccessPhoneReservation;
+}
+
+function validateManualAccessEntitlementMapping(
+  value: unknown,
+  entitlementId: string,
+  grant: ManualAccessGrant,
+  userId: string
+): ManualAccessEntitlement {
+  const entitlement = normalizeManualAccessEntitlement(value);
+  if (
+    !entitlement
+    || entitlementId !== getManualAccessEntitlementId(userId, grant.articleId)
+    || entitlement.grantId !== grant.id
+    || entitlement.userId !== userId
+    || entitlement.articleId !== grant.articleId
+  ) {
+    throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+  }
+  return entitlement;
+}
+
+async function transitionManualAccessGrant(
+  grantId: string,
+  requestedState: 'revoked' | 'deleted'
+): Promise<boolean> {
+  if (
+    typeof grantId !== 'string'
+    || grantId.length === 0
+    || grantId.length > 512
+    || grantId.includes('/')
+  ) {
+    throw new ManualAccessError(
+      'MANUAL_ACCESS_INVALID_GRANT',
+      'A valid manual access grant is required.',
+      400
+    );
+  }
+
+  const db = getDb();
+  const grantRef = db.collection('manual_access').doc(grantId);
+  const transactionResult = await db.runTransaction(async transaction => {
+    const grantSnapshot = await transaction.get(grantRef);
+    if (!grantSnapshot.exists) return { found: false as const };
+
+    const stored = grantSnapshot.data() as Partial<ManualAccessGrant>;
+    if (stored.id !== undefined && stored.id !== grantSnapshot.id) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_GRANT_ID_MISMATCH');
+    }
+    const grant = { ...stored, id: grantSnapshot.id } as ManualAccessGrant;
+    const normalizedPhone = normalizeManualAccessPhone(grant.phone);
+    if (!normalizedPhone || !grant.articleId || !grant.grantedAt || !Number.isFinite(Date.parse(grant.grantedAt))) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_GRANT_CORRUPT');
+    }
+    getValidatedManualAccessExpiry(grant);
+
+    const reservationId = getManualAccessPhoneReservationId(normalizedPhone);
+    if (grant.phoneReservationId && grant.phoneReservationId !== reservationId) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
+    }
+    const reservationRef = db
+      .collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION)
+      .doc(reservationId);
+    const storedEntitlementId = grant.entitlementId;
+    if (storedEntitlementId !== undefined && !isManualAccessEntitlementId(storedEntitlementId)) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+    }
+    const legacyToken = typeof grant.token === 'string' && grant.token.length > 0
+      ? grant.token
+      : null;
+    if (legacyToken && !isSafeLegacyReaderLicenseToken(legacyToken)) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LICENSE_CORRUPT');
+    }
+    const legacyLicenseRef = legacyToken
+      ? db.collection('reader_licenses').doc(legacyToken)
+      : null;
+
+    // All reads precede every write so Firestore can safely retry on contention
+    // with a simultaneous first claim.
+    const reservationSnapshot = await transaction.get(reservationRef);
+    const reservation = reservationSnapshot.exists
+      ? validateManualAccessReservation(
+          reservationSnapshot.data() as Partial<ManualAccessPhoneReservation>,
+          reservationId,
+          grant
+        )
+      : null;
+    const initialBoundUserId = getManualAccessBoundUserId(grant, reservation);
+    let entitlementId = storedEntitlementId
+      || (initialBoundUserId ? getManualAccessEntitlementId(initialBoundUserId, grant.articleId) : null);
+    let entitlementRef = entitlementId
+      ? db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(entitlementId)
+      : null;
+    let entitlementSnapshot = entitlementRef ? await transaction.get(entitlementRef) : null;
+
+    if (!entitlementRef) {
+      const entitlementQuery = await transaction.get(
+        db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION)
+          .where('grantId', '==', grant.id)
+          .limit(2)
+      );
+      if (entitlementQuery.size > 1) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+      }
+      if (entitlementQuery.size === 1) {
+        entitlementSnapshot = entitlementQuery.docs[0];
+        entitlementId = entitlementSnapshot.id;
+        entitlementRef = db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(entitlementId);
+      }
+    }
+
+    const normalizedEntitlement = entitlementSnapshot?.exists
+      ? normalizeManualAccessEntitlement(entitlementSnapshot.data())
+      : null;
+    if (entitlementSnapshot?.exists && !normalizedEntitlement) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+    }
+    const boundUserIds = new Set(
+      [initialBoundUserId, normalizedEntitlement?.userId]
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    );
+    if (boundUserIds.size > 1) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_BINDING_CONFLICT');
+    }
+    const boundUserId = boundUserIds.values().next().value as string | undefined;
+    const existingEntitlement = normalizedEntitlement && entitlementId && boundUserId
+      ? validateManualAccessEntitlementMapping(
+          normalizedEntitlement,
+          entitlementId,
+          grant,
+          boundUserId
+        )
+      : null;
+    if (storedEntitlementId && entitlementId !== storedEntitlementId) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+    }
+
+    const legacyLicenseSnapshot = legacyLicenseRef
+      ? await transaction.get(legacyLicenseRef)
+      : null;
+    if (
+      existingEntitlement?.state === 'active'
+      && (grant.status !== 'claimed' || !grant.activated)
+    ) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
+    }
+    if (
+      existingEntitlement?.state === 'revoked'
+      && grant.status !== 'revoked'
+      && grant.status !== 'deleted'
+    ) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
+    }
+    if (existingEntitlement?.state === 'deleted' && grant.status !== 'deleted') {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
+    }
+
+    if (legacyLicenseSnapshot?.exists && legacyToken) {
+      const legacyLicense = normalizeStoredReaderLicense(
+        legacyToken,
+        legacyLicenseSnapshot.data() as CachedReaderLicense
+      );
+      if (
+        !legacyLicense
+        || legacyLicense.accessSource !== 'MANUAL_GRANT'
+        || legacyLicense.articleId !== grant.articleId
+        || normalizeManualAccessPhone(legacyLicense.phone) !== normalizedPhone
+      ) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LICENSE_MISMATCH');
+      }
+    }
+
+    const now = new Date().toISOString();
+    const finalState = grant.status === 'deleted' || reservation?.state === 'deleted'
+      ? 'deleted'
+      : requestedState;
+    const cleanedGrant = cleanManualAccessGrantForStorage({
+      ...grant,
+      phone: normalizedPhone,
+      phoneReservationId: reservationId,
+      ...(entitlementId ? { entitlementId } : {}),
+      ...(boundUserId ? {
+        boundUserId,
+        claimedUserId: grant.claimedUserId || boundUserId
+      } : {}),
+      status: finalState,
+      ...(finalState === 'revoked'
+        ? { revokedAt: grant.revokedAt || now }
+        : { deletedAt: grant.deletedAt || now })
+    });
+    const terminalAt = finalState === 'deleted'
+      ? cleanedGrant.deletedAt as string
+      : cleanedGrant.revokedAt as string;
+    const terminalReservation: ManualAccessPhoneReservation = {
+      storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+      grantId: grant.id,
+      articleId: grant.articleId,
+      state: finalState,
+      createdAt: reservation?.createdAt || grant.grantedAt,
+      updatedAt: terminalAt,
+      ...(boundUserId ? { boundUserId } : {}),
+      ...(grant.claimedAt ? { claimedAt: grant.claimedAt } : {}),
+      ...(finalState === 'revoked' ? { revokedAt: terminalAt } : { deletedAt: terminalAt })
+    };
+
+    transaction.set(grantRef, sanitizeForFirestore(cleanedGrant));
+    if (reservationSnapshot.exists) {
+      transaction.set(reservationRef, sanitizeForFirestore(terminalReservation));
+    } else {
+      transaction.create(reservationRef, sanitizeForFirestore(terminalReservation));
+    }
+
+    if (boundUserId && entitlementRef && entitlementId) {
+      const createdAt = existingEntitlement?.createdAt || grant.claimedAt || grant.grantedAt;
+      const terminalEntitlement: ManualAccessEntitlement = {
+        storageVersion: MANUAL_ACCESS_ENTITLEMENT_VERSION,
+        grantId: grant.id,
+        userId: boundUserId,
+        articleId: grant.articleId,
+        state: finalState,
+        createdAt,
+        updatedAt: terminalAt,
+        ...(finalState === 'revoked' ? { revokedAt: terminalAt } : { deletedAt: terminalAt })
+      };
+      if (entitlementSnapshot?.exists) {
+        transaction.set(entitlementRef, sanitizeForFirestore(terminalEntitlement));
+      } else {
+        transaction.create(entitlementRef, sanitizeForFirestore(terminalEntitlement));
+      }
+    }
+    if (legacyLicenseSnapshot?.exists && legacyLicenseRef) {
+      transaction.delete(legacyLicenseRef);
+    }
+
+    return {
+      found: true as const,
+      grant: cleanedGrant,
+      removedLegacyToken: legacyLicenseSnapshot?.exists ? legacyToken : null
+    };
+  });
+
+  if (!transactionResult.found) return false;
+  cachedManualAccess.set(transactionResult.grant.id, transactionResult.grant);
+  writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
+  if (transactionResult.removedLegacyToken) {
+    cachedTokens.delete(transactionResult.removedLegacyToken);
+    cachedReaderLicenseVerifiedAt.delete(transactionResult.removedLegacyToken);
+    rememberMissingReaderLicense(transactionResult.removedLegacyToken);
+    readerLicenseUserLookupVerifiedAt.clear();
+    writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
+  }
+  return true;
 }
 
 function isReaderLicenseBoundToUser(
@@ -1062,7 +1449,6 @@ export const store = {
     const startupReads = {
       users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
       articles: captureStartupRead(getAllFirestoreDocs<Article>('articles')),
-      manualAccess: captureStartupRead(getAllFirestoreDocs<ManualAccessGrant>('manual_access')),
       author: captureStartupRead((async () =>
         (await getFirestoreDoc<AuthorProfile>('site_configs', 'author')) ||
         (await getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'))
@@ -1244,32 +1630,24 @@ export const store = {
       }
     }
 
-    // 3c. Load Manual Access Grants from Firestore / JSON
-    try {
-      const fsGrants = await useStartupRead(startupReads.manualAccess);
-      if (fsGrants && fsGrants.length > 0) {
-        cachedManualAccess.clear();
-        for (const grant of fsGrants) {
-          if (grant.id) {
-            cachedManualAccess.set(grant.id, grant);
-          }
-        }
-        writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-      } else if (fs.existsSync(MANUAL_ACCESS_FILE)) {
+    // 3c. Manual access is resolved by targeted reservation/entitlement reads.
+    // Never enumerate every grant during a serverless cold start. A local-only
+    // cache remains available for offline development, but it is not pushed back
+    // to Firestore implicitly after an outage or empty read.
+    cachedManualAccess.clear();
+    if (!process.env.VERCEL && fs.existsSync(MANUAL_ACCESS_FILE)) {
+      try {
         const raw = fs.readFileSync(MANUAL_ACCESS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
-        cachedManualAccess.clear();
         if (Array.isArray(parsed)) {
-          for (const g of parsed) {
-            if (g.id) {
-              cachedManualAccess.set(g.id, g);
-              setFirestoreDoc('manual_access', g.id, g).catch(() => {});
-            }
+          for (const value of parsed) {
+            const grant = value as ManualAccessGrant;
+            if (grant?.id) cachedManualAccess.set(grant.id, grant);
           }
         }
+      } catch (err) {
+        console.warn('[Data Store] Error loading the local manual-access cache:', err);
       }
-    } catch (err) {
-      console.warn('[Data Store] Error loading manual_access from Firestore:', err);
     }
 
     // 4. Load Author Profile from Firestore / JSON
@@ -2504,14 +2882,39 @@ export const store = {
     return record;
   },
 
-  async getUserPurchases(userIdOrEmail: string, phone?: string): Promise<{ articleId: string; token: string; receipt?: string; createdAt: string; expiresAt: number; articleTitle: string }[]> {
+  async getUserPurchases(userIdOrEmail: string, phone?: string): Promise<Array<{
+    articleId: string;
+    token?: string;
+    receipt?: string;
+    createdAt: string;
+    expiresAt: number;
+    articleTitle: string;
+    accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+  }>> {
     const user = this.getUserById(userIdOrEmail) || this.getUserByEmail(userIdOrEmail);
     const userEmail = user ? user.email.toLowerCase() : userIdOrEmail.toLowerCase();
     const userPhone = phone || '';
 
-    if (user) await loadReaderLicensesForUser(user);
+    const manualEntitlementsPromise = user
+      ? getDb()
+          .collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION)
+          .where('userId', '==', user.id)
+          .limit(MAX_MANUAL_ACCESS_ADMIN_RESULTS)
+          .get()
+      : Promise.resolve(null);
+    if (user) {
+      await Promise.all([loadReaderLicensesForUser(user), manualEntitlementsPromise]);
+    }
 
-    const results: { articleId: string; token: string; receipt?: string; createdAt: string; expiresAt: number; articleTitle: string }[] = [];
+    const results: Array<{
+      articleId: string;
+      token?: string;
+      receipt?: string;
+      createdAt: string;
+      expiresAt: number;
+      articleTitle: string;
+      accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+    }> = [];
     const seenArticles = new Set<string>();
 
     for (const [token, data] of cachedTokens.entries()) {
@@ -2532,40 +2935,42 @@ export const store = {
           receipt: data.receipt || 'CONFIRMED',
           createdAt: data.createdAt || new Date().toISOString(),
           expiresAt: data.expiresAt,
-          articleTitle: art ? art.title : 'Monograph'
+          articleTitle: art ? art.title : 'Monograph',
+          accessSource: data.accessSource || 'MPESA_PURCHASE'
         });
       }
     }
 
-    // Also include active / claimed manual access grants permanently bound to this user or phone
-    for (const grant of cachedManualAccess.values()) {
-      if (grant.status === 'active' || grant.status === 'claimed') {
-        const matchUserId = user && (grant.boundUserId === user.id || grant.claimedUserId === user.id);
-        const matchEmail = (grant.boundUserEmail && grant.boundUserEmail.toLowerCase() === userEmail) || (grant.claimedUserEmail && grant.claimedUserEmail.toLowerCase() === userEmail);
-        const matchPhone = userPhone && this.phonesMatch(userPhone, grant.phone);
+    const manualSnapshot = await manualEntitlementsPromise;
+    const publishedArticles = this.getArticles(false);
+    for (const document of manualSnapshot?.docs || []) {
+      const entitlement = normalizeManualAccessEntitlement(document.data());
+      if (!entitlement || entitlement.userId !== user?.id || entitlement.state !== 'active') continue;
+      if (document.id !== getManualAccessEntitlementId(entitlement.userId, entitlement.articleId)) continue;
 
-        if ((matchUserId || matchEmail || matchPhone) && !seenArticles.has(grant.articleId)) {
-          seenArticles.add(grant.articleId);
-          const art = cachedArticles.find(a => a.id === grant.articleId);
-          results.push({
-            articleId: grant.articleId,
-            token: grant.token || `ink_grant_${grant.articleId}_${grant.phone}`,
-            receipt: grant.notes || 'MANUAL-GRANT',
-            createdAt: grant.claimedAt || grant.grantedAt,
-            expiresAt: Date.now() + 3650 * 24 * 60 * 60 * 1000,
-            articleTitle: art ? art.title : (grant.articleTitle || 'Monograph')
-          });
-        }
+      const entitledArticles = entitlement.articleId === 'all'
+        ? publishedArticles
+        : publishedArticles.filter(article => article.id === entitlement.articleId);
+      for (const article of entitledArticles) {
+        if (seenArticles.has(article.id)) continue;
+        seenArticles.add(article.id);
+        results.push({
+          articleId: article.id,
+          receipt: 'COMPLIMENTARY ACCESS',
+          createdAt: entitlement.createdAt,
+          expiresAt: 253402300799999,
+          articleTitle: article.title,
+          accessSource: 'MANUAL_GRANT'
+        });
       }
     }
 
-    return results;
+    return results.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   },
 
   async isArticlePurchasedByUser(articleId: string, user?: { id: string; email: string } | null): Promise<boolean> {
     if (!user) return false;
     await loadReaderLicensesForUser(user);
-    const userEmail = user.email.toLowerCase();
     for (const data of cachedTokens.values()) {
       if (Number(data.expiresAt) > Date.now() && (data.articleId === articleId || data.articleId === 'all')) {
         if (isReaderLicenseBoundToUser(data, user)) {
@@ -2574,14 +2979,27 @@ export const store = {
       }
     }
 
-    // Check active/claimed manual access grants permanently bound to this reader
-    for (const grant of cachedManualAccess.values()) {
-      if (grant.status === 'active' || grant.status === 'claimed') {
-        if (grant.articleId === articleId || grant.articleId === 'all') {
-          if (grant.boundUserId === user.id || (grant.boundUserEmail && grant.boundUserEmail.toLowerCase() === userEmail)) {
-            return true;
-          }
-        }
+    const entitlementArticles = articleId === 'all' ? ['all'] : [articleId, 'all'];
+    const entitlementSnapshots = await Promise.all(entitlementArticles.map(entitledArticleId => {
+      const entitlementId = getManualAccessEntitlementId(user.id, entitledArticleId);
+      return getDb()
+        .collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION)
+        .doc(entitlementId)
+        .get();
+    }));
+
+    for (let index = 0; index < entitlementSnapshots.length; index += 1) {
+      const snapshot = entitlementSnapshots[index];
+      if (!snapshot.exists) continue;
+      const entitlement = normalizeManualAccessEntitlement(snapshot.data());
+      if (
+        entitlement
+        && entitlement.state === 'active'
+        && entitlement.userId === user.id
+        && entitlement.articleId === entitlementArticles[index]
+        && snapshot.id === getManualAccessEntitlementId(user.id, entitlement.articleId)
+      ) {
+        return true;
       }
     }
 
@@ -2681,60 +3099,17 @@ export const store = {
     return false;
   },
 
-  grantReaderLicense(articleId: string, phone: string, receipt?: string, durationDays = 60): { token: string; license: ReaderLicense } {
-    const token = `ink_grant_${Date.now()}_${crypto.randomBytes(16).toString('hex')}`;
-    const expiresAt = Date.now() + durationDays * 24 * 60 * 60 * 1000;
-    const createdAt = new Date().toISOString();
-    const cleanPhone = this.normalizePhone(phone) || (phone || '254700000000').trim();
-
-    void this.savePurchasedToken(token, {
-      articleId,
-      phone: cleanPhone,
-      expiresAt,
-      receipt: receipt || `MANUAL-${Date.now().toString().slice(-6)}`,
-      createdAt
-    }).catch(err => console.warn('[Data Store] Error persisting granted reader license:', err));
-
-    const article = cachedArticles.find(a => a.id === articleId || a.slug === articleId);
-    const resolvedArticleId = article ? article.id : articleId;
-    const resolvedArticleTitle = article ? article.title : (articleId === 'all' ? 'All Archive Access' : 'Custom Monograph');
-
-    if (article) {
-      article.downloadsCount = (article.downloadsCount || 0) + 1;
-      writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      setFirestoreDoc('articles', article.id, article).catch(() => {});
-    }
-
-    // Automatically create / synchronize a ManualAccessGrant so reader self-unlock lookup finds it immediately
-    const grantId = `grant_${resolvedArticleId}_${cleanPhone}`;
-    const grant: ManualAccessGrant = {
-      id: grantId,
-      articleId: resolvedArticleId,
-      articleTitle: resolvedArticleTitle,
-      phone: cleanPhone,
-      status: 'active',
-      activated: false,
-      grantedAt: createdAt,
-      grantedBy: 'Jake',
-      accessType: 'manual',
-      notes: receipt || 'Manual License Grant'
-    };
-    cachedManualAccess.set(grantId, grant);
-    writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-    setFirestoreDoc('manual_access', grantId, grant).catch(() => {});
-
-    const license: ReaderLicense = {
-      token,
-      articleId: resolvedArticleId,
-      articleTitle: resolvedArticleTitle,
-      phone: cleanPhone,
-      receipt: receipt || 'MANUAL-GRANT',
-      amount: article?.priceKes || 300,
-      createdAt,
-      expiresAt
-    };
-
-    return { token, license };
+  grantReaderLicense(
+    _articleId: string,
+    _phone: string,
+    _receipt?: string,
+    _durationDays = 60
+  ): never {
+    throw new ManualAccessError(
+      'MANUAL_TOKEN_ISSUANCE_DISABLED',
+      'Copyable manual tokens are disabled. Use the one-time phone authorization workflow.',
+      409
+    );
   },
 
   async revokeReaderLicense(token: string): Promise<boolean> {
@@ -2771,21 +3146,27 @@ export const store = {
     return normalizeManualAccessPhone(input);
   },
 
-  getManualAccessGrants(articleId?: string): ManualAccessGrant[] {
-    const list = Array.from(cachedManualAccess.values())
-      .filter(grant => !articleId || grant.articleId === articleId || grant.articleId === 'all')
-      .sort((a, b) => new Date(b.grantedAt).getTime() - new Date(a.grantedAt).getTime());
+  async getManualAccessGrants(articleId?: string): Promise<ManualAccessGrant[]> {
+    const snapshot = await getDb()
+      .collection('manual_access')
+      .limit(MAX_MANUAL_ACCESS_ADMIN_RESULTS)
+      .get();
+    const list: ManualAccessGrant[] = [];
 
-    return list.map(grant => {
-      const {
-        token: _token,
-        rawPhone: _rawPhone,
-        claimedPhone: _claimedPhone,
-        phoneReservationId: _phoneReservationId,
-        ...safeGrant
-      } = grant;
-      return safeGrant as ManualAccessGrant;
-    });
+    for (const document of snapshot.docs) {
+      const stored = document.data() as Partial<ManualAccessGrant>;
+      if (!stored || typeof stored.id !== 'string' || stored.id !== document.id) continue;
+      const grant = stored as ManualAccessGrant;
+      cachedManualAccess.set(grant.id, grant);
+      if (grant.status === 'deleted') continue;
+      if (articleId && grant.articleId !== articleId && grant.articleId !== 'all') continue;
+      const safeGrant = toManualAccessAdminView(grant);
+      if (safeGrant) list.push(safeGrant);
+    }
+
+    list.sort((a, b) => new Date(b.grantedAt).getTime() - new Date(a.grantedAt).getTime());
+
+    return list;
   },
 
   async grantManualAccess(
@@ -2823,6 +3204,7 @@ export const store = {
     const phoneReservationId = getManualAccessPhoneReservationId(normalizedPhone);
     const grantId = `grant_${crypto.randomBytes(16).toString('hex')}`;
     const now = new Date().toISOString();
+    const legacyPhoneValues = getManualAccessLegacyPhoneValues(normalizedPhone);
 
     const grant: ManualAccessGrant = {
       id: grantId,
@@ -2860,14 +3242,14 @@ export const store = {
       // Legacy grants predate the reservation collection. The query remains inside
       // the transaction so a concurrent grant cannot pass the uniqueness check.
       const legacyGrantSnapshot = await transaction.get(
-        manualAccess.where('phone', '==', normalizedPhone).limit(2)
+        manualAccess.where('phone', 'in', legacyPhoneValues).limit(2)
       );
       if (!legacyGrantSnapshot.empty) {
         throw createManualAccessPhoneAlreadyUsedError();
       }
 
-      transaction.set(reservationRef, sanitizeForFirestore(reservation));
-      transaction.set(manualAccess.doc(grantId), sanitizeForFirestore(grant));
+      transaction.create(reservationRef, sanitizeForFirestore(reservation));
+      transaction.create(manualAccess.doc(grantId), sanitizeForFirestore(grant));
     });
 
     cachedManualAccess.set(grantId, grant);
@@ -2879,129 +3261,17 @@ export const store = {
   },
 
   async revokeManualAccess(grantId: string): Promise<boolean> {
-    let grant = cachedManualAccess.get(grantId);
-    if (!grant) {
-      for (const g of cachedManualAccess.values()) {
-        if (g.id === grantId || g.token === grantId || this.phonesMatch(g.phone, grantId)) {
-          grant = g;
-          break;
-        }
-      }
-    }
-    if (grant) {
-      const revokedAt = new Date().toISOString();
-      const phoneReservationId = grant.phoneReservationId || getManualAccessPhoneReservationId(grant.phone);
-      const revokedGrant = {
-        ...grant,
-        phoneReservationId,
-        status: 'revoked' as const,
-        revokedAt
-      };
-      const manualTokenData = grant.token ? cachedTokens.get(grant.token) : undefined;
-      const shouldDeleteToken = Boolean(
-        grant.token && manualTokenData?.accessSource === 'MANUAL_GRANT'
-      );
-      const batch = getDb().batch();
-      batch.set(getDb().collection('manual_access').doc(grant.id), sanitizeForFirestore(revokedGrant), { merge: true });
-      if (shouldDeleteToken && grant.token) {
-        batch.delete(getDb().collection('reader_licenses').doc(grant.token));
-      }
-      batch.set(
-        getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION).doc(phoneReservationId),
-        sanitizeForFirestore({
-          storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
-          grantId: grant.id,
-          articleId: grant.articleId,
-          state: 'revoked',
-          createdAt: grant.grantedAt,
-          updatedAt: revokedAt,
-          boundUserId: grant.boundUserId || grant.claimedUserId,
-          claimedAt: grant.claimedAt,
-          revokedAt
-        }),
-        { merge: true }
-      );
-      await batch.commit();
-
-      cachedManualAccess.set(grant.id, revokedGrant);
-      writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-      if (shouldDeleteToken && grant.token) {
-        cachedTokens.delete(grant.token);
-        cachedReaderLicenseVerifiedAt.delete(grant.token);
-        missingReaderLicenses.set(grant.token, Date.now() + MISSING_READER_LICENSE_CACHE_TTL_MS);
-        readerLicenseUserLookupVerifiedAt.clear();
-        writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
-      }
-
-      console.log(`[ManualAccess] Revoked one-time grant ${grant.id}.`);
-      return true;
-    }
-    return false;
+    const revoked = await transitionManualAccessGrant(grantId, 'revoked');
+    if (revoked) console.log(`[ManualAccess] Revoked one-time grant ${grantId}.`);
+    return revoked;
   },
 
   async deleteManualAccess(grantId: string): Promise<boolean> {
-    let grant = cachedManualAccess.get(grantId);
-    if (!grant) {
-      for (const g of cachedManualAccess.values()) {
-        if (g.id === grantId || g.token === grantId || this.phonesMatch(g.phone, grantId)) {
-          grant = g;
-          break;
-        }
-      }
+    const deleted = await transitionManualAccessGrant(grantId, 'deleted');
+    if (deleted) {
+      console.log(`[ManualAccess] Soft-deleted one-time grant ${grantId}; its phone reservation remains blocked.`);
     }
-    if (!grant) return false;
-    const deletedAt = new Date().toISOString();
-    const phoneReservationId = grant.phoneReservationId || getManualAccessPhoneReservationId(grant.phone);
-
-    // Collect ONLY manual grant tokens (never legitimate M-Pesa purchase tokens)
-    // before committing one durable deletion batch.
-    const manualTokenKeys: string[] = [];
-    for (const [tKey, tData] of cachedTokens.entries()) {
-      const isManualSource = tData.accessSource === 'MANUAL_GRANT' || tKey.startsWith('ink_grant_') || tKey.startsWith('ink_manual_') || (tData.receipt && tData.receipt.startsWith('MANUAL'));
-      const isSamePiece = tData.articleId === grant.articleId || grant.articleId === 'all';
-      const isSamePhone = this.phonesMatch(tData.phone, grant.phone);
-
-      if (isManualSource && isSamePiece && isSamePhone) {
-        manualTokenKeys.push(tKey);
-      }
-    }
-
-    const batch = getDb().batch();
-    batch.delete(getDb().collection('manual_access').doc(grant.id));
-    for (const token of manualTokenKeys) {
-      batch.delete(getDb().collection('reader_licenses').doc(token));
-    }
-    batch.set(
-      getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION).doc(phoneReservationId),
-      sanitizeForFirestore({
-        storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
-        grantId: grant.id,
-        articleId: grant.articleId,
-        state: 'deleted',
-        createdAt: grant.grantedAt,
-        updatedAt: deletedAt,
-        boundUserId: grant.boundUserId || grant.claimedUserId,
-        claimedAt: grant.claimedAt,
-        deletedAt
-      }),
-      { merge: true }
-    );
-    await batch.commit();
-
-    cachedManualAccess.delete(grant.id);
-    writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-    for (const token of manualTokenKeys) {
-      cachedTokens.delete(token);
-      cachedReaderLicenseVerifiedAt.delete(token);
-      missingReaderLicenses.set(token, Date.now() + MISSING_READER_LICENSE_CACHE_TTL_MS);
-    }
-    if (manualTokenKeys.length > 0) {
-      readerLicenseUserLookupVerifiedAt.clear();
-      writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
-    }
-
-    console.log(`[ManualAccess] Deleted one-time grant ${grant.id}; its phone reservation remains blocked.`);
-    return true;
+    return deleted;
   },
 
   resetManualAccess(grantId: string): {
@@ -3046,7 +3316,6 @@ export const store = {
     activated?: boolean;
     alreadyActivated?: boolean;
     requiresAuth?: boolean;
-    token?: string;
     articleId?: string;
     articleTitle?: string;
     boundUser?: { id: string; email: string; name?: string };
@@ -3098,10 +3367,36 @@ export const store = {
     const phoneReservationId = getManualAccessPhoneReservationId(normalizedPhone);
     const manualAccessCollection = getDb().collection('manual_access');
     const reservationCollection = getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION);
+    const entitlementCollection = getDb().collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION);
+    const legacyPhoneValues = getManualAccessLegacyPhoneValues(normalizedPhone);
 
     const transactionResult = await getDb().runTransaction(async transaction => {
       const reservationRef = reservationCollection.doc(phoneReservationId);
-      const reservationSnapshot = await transaction.get(reservationRef);
+      const userRef = getDb().collection('users').doc(currentUser.id);
+      const [userSnapshot, reservationSnapshot] = await Promise.all([
+        transaction.get(userRef),
+        transaction.get(reservationRef)
+      ]);
+      if (!userSnapshot.exists) {
+        throw new ManualAccessError(
+          'MANUAL_ACCESS_READER_UNAVAILABLE',
+          'Please sign in again before claiming manual access.',
+          403
+        );
+      }
+      const freshUser = userSnapshot.data() as Partial<UserRecord>;
+      if (
+        freshUser.id !== currentUser.id
+        || freshUser.role !== 'client'
+        || typeof freshUser.email !== 'string'
+        || !freshUser.email.trim()
+      ) {
+        throw new ManualAccessError(
+          'MANUAL_ACCESS_READER_REQUIRED',
+          'Manual access can only be claimed by an active reader account.',
+          403
+        );
+      }
       let reservation = reservationSnapshot.exists
         ? reservationSnapshot.data() as Partial<ManualAccessPhoneReservation>
         : null;
@@ -3114,13 +3409,6 @@ export const store = {
             'Manual access is temporarily unavailable.',
             503
           );
-        }
-        if (reservation.state === 'revoked' || reservation.state === 'deleted') {
-          return {
-            kind: 'blocked' as const,
-            code: 'MANUAL_ACCESS_REVOKED',
-            message: 'This manual access authorization is no longer active.'
-          };
         }
         const grantSnapshot = await transaction.get(manualAccessCollection.doc(reservation.grantId));
         if (!grantSnapshot.exists) {
@@ -3138,7 +3426,7 @@ export const store = {
         // Legacy grants are adopted lazily with a bounded equality query. More
         // than one match is an integrity conflict and is never silently resolved.
         const legacySnapshot = await transaction.get(
-          manualAccessCollection.where('phone', '==', normalizedPhone).limit(2)
+          manualAccessCollection.where('phone', 'in', legacyPhoneValues).limit(2)
         );
         if (legacySnapshot.empty) {
           return { kind: 'not-found' as const };
@@ -3158,10 +3446,12 @@ export const store = {
       }
 
       const storedGrant = grantDocument.data();
+      if (storedGrant.id !== undefined && storedGrant.id !== grantDocument.id) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_GRANT_ID_MISMATCH');
+      }
       const matchedGrant: ManualAccessGrant = {
         ...storedGrant,
-        id: storedGrant.id || grantDocument.id,
-        phoneReservationId
+        id: grantDocument.id
       };
       if (this.normalizePhone(matchedGrant.phone) !== normalizedPhone) {
         throw new ManualAccessError(
@@ -3170,6 +3460,17 @@ export const store = {
           503
         );
       }
+      if (matchedGrant.phoneReservationId && matchedGrant.phoneReservationId !== phoneReservationId) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
+      }
+      if (reservation) {
+        reservation = validateManualAccessReservation(
+          reservation,
+          phoneReservationId,
+          matchedGrant
+        );
+      }
+      const expiresAt = getValidatedManualAccessExpiry(matchedGrant);
 
       const grantMatchesPiece = matchedGrant.articleId === resolvedArticleId ||
         matchedGrant.articleId === articleId ||
@@ -3178,7 +3479,14 @@ export const store = {
       if (!grantMatchesPiece) {
         return { kind: 'not-found' as const };
       }
-      if (matchedGrant.status === 'revoked' || matchedGrant.status === 'deleted' || matchedGrant.status === 'expired') {
+      if (
+        matchedGrant.status === 'revoked'
+        || matchedGrant.status === 'deleted'
+        || matchedGrant.status === 'expired'
+        || reservation?.state === 'revoked'
+        || reservation?.state === 'deleted'
+        || (expiresAt !== undefined && expiresAt <= Date.now())
+      ) {
         return {
           kind: 'blocked' as const,
           code: 'MANUAL_ACCESS_REVOKED',
@@ -3189,82 +3497,148 @@ export const store = {
       const existingBoundUserId = reservation?.boundUserId ||
         matchedGrant.boundUserId ||
         matchedGrant.claimedUserId;
-      if (existingBoundUserId && existingBoundUserId !== currentUser.id) {
+      getManualAccessBoundUserId(matchedGrant, reservation);
+      const hasClaimedState = matchedGrant.status === 'claimed' || Boolean(matchedGrant.activated) || Boolean(matchedGrant.claimedAt);
+      if (hasClaimedState && !existingBoundUserId) {
+        throw new ManualAccessError(
+          'MANUAL_ACCESS_LEGACY_RECONCILIATION_REQUIRED',
+          'This phone number has already been used. Contact Support if you believe it belongs to your account.',
+          409
+        );
+      }
+      if (existingBoundUserId && existingBoundUserId !== freshUser.id) {
         return {
           kind: 'already-claimed' as const,
           code: 'MANUAL_ACCESS_ALREADY_CLAIMED',
-          message: 'This phone number has already been claimed and bound to another reader account.'
+          message: 'This phone number has already been used and is bound to another reader account.'
         };
       }
 
-      if (existingBoundUserId === currentUser.id && (matchedGrant.status === 'claimed' || matchedGrant.activated)) {
+      if (existingBoundUserId && !hasClaimedState) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_BINDING_STATE_CONFLICT');
+      }
+
+      const entitledArticleId = matchedGrant.articleId === 'all' ? 'all' : resolvedArticleId;
+      const canonicalGrantForEntitlement = matchedGrant.articleId === entitledArticleId
+        ? matchedGrant
+        : { ...matchedGrant, articleId: entitledArticleId, articleTitle: resolvedArticleTitle };
+      const entitlementId = getManualAccessEntitlementId(freshUser.id, entitledArticleId);
+      const entitlementRef = entitlementCollection.doc(entitlementId);
+      const legacyToken = typeof matchedGrant.token === 'string' && matchedGrant.token.length > 0
+        ? matchedGrant.token
+        : null;
+      if (legacyToken && !isSafeLegacyReaderLicenseToken(legacyToken)) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LICENSE_CORRUPT');
+      }
+      const legacyLicenseRef = legacyToken
+        ? getDb().collection('reader_licenses').doc(legacyToken)
+        : null;
+      const [entitlementSnapshot, legacyLicenseSnapshot] = await Promise.all([
+        transaction.get(entitlementRef),
+        legacyLicenseRef ? transaction.get(legacyLicenseRef) : Promise.resolve(null)
+      ]);
+      const existingEntitlement = entitlementSnapshot.exists
+        ? validateManualAccessEntitlementMapping(
+            entitlementSnapshot.data(),
+            entitlementId,
+            canonicalGrantForEntitlement,
+            freshUser.id
+          )
+        : null;
+      if (existingEntitlement && !existingBoundUserId) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
+      }
+      if (existingEntitlement?.state === 'revoked' || existingEntitlement?.state === 'deleted') {
         return {
-          kind: 'owned' as const,
-          grant: matchedGrant
+          kind: 'blocked' as const,
+          code: 'MANUAL_ACCESS_REVOKED',
+          message: 'This manual access authorization is no longer active.'
         };
+      }
+      if (legacyLicenseSnapshot?.exists && legacyToken) {
+        const legacyLicense = normalizeStoredReaderLicense(
+          legacyToken,
+          legacyLicenseSnapshot.data() as CachedReaderLicense
+        );
+        if (
+          !legacyLicense
+          || legacyLicense.accessSource !== 'MANUAL_GRANT'
+          || legacyLicense.articleId !== matchedGrant.articleId
+          || normalizeManualAccessPhone(legacyLicense.phone) !== normalizedPhone
+        ) {
+          throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LICENSE_MISMATCH');
+        }
+      }
+
+      const alreadyOwned = existingBoundUserId === freshUser.id && hasClaimedState;
+      if (
+        alreadyOwned
+        && reservation
+        && existingEntitlement?.state === 'active'
+        && !legacyToken
+      ) {
+        return { kind: 'owned' as const, grant: matchedGrant, freshUser };
       }
 
       const now = new Date().toISOString();
-      const activeToken = typeof matchedGrant.token === 'string' &&
-        /^ink_grant_(?:[0-9]{10,16}_)?[a-f0-9]{32,64}$/.test(matchedGrant.token)
-        ? matchedGrant.token
-        : `ink_grant_${crypto.randomBytes(24).toString('hex')}`;
-      const expiresAt = Number.isFinite(Number(matchedGrant.expiresAt))
-        ? Number(matchedGrant.expiresAt)
-        : Date.now() + 3650 * 24 * 60 * 60 * 1000;
-      const claimedGrant: ManualAccessGrant = {
+      const claimedAt = matchedGrant.claimedAt || now;
+      const claimedGrant = cleanManualAccessGrantForStorage({
         ...matchedGrant,
+        articleId: entitledArticleId,
+        articleTitle: resolvedArticleTitle,
+        phone: normalizedPhone,
         phoneReservationId,
-        token: activeToken,
+        entitlementId,
         status: 'claimed',
         activated: true,
-        claimedAt: matchedGrant.claimedAt || now,
-        boundUserId: currentUser.id,
-        boundUserEmail: currentUser.email.toLowerCase(),
-        boundUserName: currentUser.name || currentUser.email,
-        claimedUserId: currentUser.id,
-        claimedUserEmail: currentUser.email.toLowerCase(),
-        claimedUserName: currentUser.name || currentUser.email
-      };
+        claimedAt,
+        boundUserId: freshUser.id,
+        boundUserEmail: freshUser.email.toLowerCase(),
+        boundUserName: freshUser.name || freshUser.email,
+        claimedUserId: freshUser.id,
+        claimedUserEmail: freshUser.email.toLowerCase(),
+        claimedUserName: freshUser.name || freshUser.email
+      });
       const claimedReservation: ManualAccessPhoneReservation = {
         storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
         grantId: claimedGrant.id,
-        articleId: claimedGrant.articleId,
+        articleId: entitledArticleId,
         state: 'claimed',
         createdAt: reservation?.createdAt || claimedGrant.grantedAt || now,
         updatedAt: now,
-        boundUserId: currentUser.id,
-        claimedAt: claimedGrant.claimedAt || now
+        boundUserId: freshUser.id,
+        claimedAt
       };
-      const readerLicense: CachedReaderLicense = {
-        token: activeToken,
+      const entitlement: ManualAccessEntitlement = {
+        storageVersion: MANUAL_ACCESS_ENTITLEMENT_VERSION,
+        grantId: claimedGrant.id,
+        userId: freshUser.id,
         articleId: claimedGrant.articleId,
-        phone: normalizedPhone,
-        expiresAt,
-        receipt: claimedGrant.notes || `MANUAL-CLAIMED-${now.slice(0, 10)}`,
-        createdAt: now,
-        userId: currentUser.id,
-        email: currentUser.email.toLowerCase(),
-        accessSource: 'MANUAL_GRANT'
+        state: 'active',
+        createdAt: existingEntitlement?.createdAt || claimedAt,
+        updatedAt: now
       };
 
-      transaction.set(
-        manualAccessCollection.doc(claimedGrant.id),
-        sanitizeForFirestore(claimedGrant),
-        { merge: true }
-      );
-      transaction.set(reservationRef, sanitizeForFirestore(claimedReservation), { merge: true });
-      transaction.set(
-        getDb().collection('reader_licenses').doc(activeToken),
-        sanitizeForFirestore(readerLicense),
-        { merge: true }
-      );
+      transaction.set(manualAccessCollection.doc(claimedGrant.id), sanitizeForFirestore(claimedGrant));
+      if (reservationSnapshot.exists) {
+        transaction.set(reservationRef, sanitizeForFirestore(claimedReservation));
+      } else {
+        transaction.create(reservationRef, sanitizeForFirestore(claimedReservation));
+      }
+      if (entitlementSnapshot.exists) {
+        transaction.set(entitlementRef, sanitizeForFirestore(entitlement));
+      } else {
+        transaction.create(entitlementRef, sanitizeForFirestore(entitlement));
+      }
+      if (legacyLicenseSnapshot?.exists && legacyLicenseRef) {
+        transaction.delete(legacyLicenseRef);
+      }
 
       return {
-        kind: 'claimed' as const,
+        kind: alreadyOwned ? 'owned' as const : 'claimed' as const,
         grant: claimedGrant,
-        token: activeToken,
-        readerLicense
+        freshUser,
+        removedLegacyToken: legacyLicenseSnapshot?.exists ? legacyToken : null
       };
     });
 
@@ -3296,27 +3670,36 @@ export const store = {
       };
     }
 
-    if (transactionResult.kind === 'claimed') {
+    if (transactionResult.kind === 'claimed' || transactionResult.kind === 'owned') {
       cachedManualAccess.set(transactionResult.grant.id, transactionResult.grant);
-      cachedTokens.set(transactionResult.token, transactionResult.readerLicense);
-      cachedReaderLicenseVerifiedAt.set(transactionResult.token, Date.now());
-      missingReaderLicenses.delete(transactionResult.token);
-      readerLicenseUserLookupVerifiedAt.clear();
       writeJsonFileSync(MANUAL_ACCESS_FILE, Array.from(cachedManualAccess.values()));
-      writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
-      console.log(`[ManualAccess] Bound one-time grant ${transactionResult.grant.id} to one reader account.`);
+      const removedLegacyToken = 'removedLegacyToken' in transactionResult
+        ? transactionResult.removedLegacyToken
+        : null;
+      if (removedLegacyToken) {
+        cachedTokens.delete(removedLegacyToken);
+        cachedReaderLicenseVerifiedAt.delete(removedLegacyToken);
+        rememberMissingReaderLicense(removedLegacyToken);
+        readerLicenseUserLookupVerifiedAt.clear();
+        writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens));
+      }
+      if (transactionResult.kind === 'claimed') {
+        console.log(`[ManualAccess] Bound one-time grant ${transactionResult.grant.id} to one reader account.`);
+      }
     }
 
-    const boundGrant = transactionResult.grant;
     return {
       success: true,
       verified: true,
       activated: true,
       alreadyActivated: transactionResult.kind === 'owned',
-      ...(transactionResult.kind === 'claimed' ? { token: transactionResult.token } : {}),
       articleId: resolvedArticleId,
       articleTitle: resolvedArticleTitle,
-      boundUser: { id: currentUser.id, email: currentUser.email, name: currentUser.name },
+      boundUser: {
+        id: transactionResult.freshUser.id as string,
+        email: transactionResult.freshUser.email as string,
+        name: transactionResult.freshUser.name
+      },
       message: transactionResult.kind === 'claimed'
         ? 'Access activated and permanently bound to your reader account.'
         : 'Access is already bound to your reader account.'
@@ -3765,15 +4148,15 @@ export const store = {
     };
   },
 
-  saveHomepageConfig(partial: Partial<HomepageConfig>): {
+  async saveHomepageConfig(partial: Partial<HomepageConfig>): Promise<{
     config: HomepageConfig;
     startHerePieces: Article[];
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
     autoRankedPieces: Article[];
     categories: Category[];
-  } {
-    cachedHomepageConfig = {
+  }> {
+    const nextHomepageConfig: HomepageConfig = {
       ...cachedHomepageConfig,
       ...partial,
       welcomeBackground: {
@@ -3801,14 +4184,38 @@ export const store = {
       version: '1.2.0'
     };
 
-    if (cachedHomepageConfig.welcomeBackground?.imageUrl !== undefined) {
-      cachedAuthor.welcomeBackgroundUrl = cachedHomepageConfig.welcomeBackground.imageUrl;
-      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-      setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    }
+    const shouldUpdateAuthorBackground =
+      nextHomepageConfig.welcomeBackground?.imageUrl !== undefined &&
+      nextHomepageConfig.welcomeBackground.imageUrl !== cachedAuthor.welcomeBackgroundUrl;
+    const nextAuthor = shouldUpdateAuthorBackground
+      ? {
+          ...cachedAuthor,
+          welcomeBackgroundUrl: nextHomepageConfig.welcomeBackground.imageUrl
+        }
+      : cachedAuthor;
 
+    // A cold runtime reads `homepage` first and keeps `homepage_config` only as
+    // a legacy fallback. Persist both documents in one awaited batch so the API
+    // cannot acknowledge a save that a fresh runtime would later replace with
+    // stale canonical data.
+    const db = getDb();
+    const batch = db.batch();
+    const persistedHomepage = sanitizeForFirestore(nextHomepageConfig);
+    batch.set(db.collection('site_configs').doc('homepage'), persistedHomepage, { merge: true });
+    batch.set(db.collection('site_configs').doc('homepage_config'), persistedHomepage, { merge: true });
+    if (shouldUpdateAuthorBackground) {
+      const persistedAuthor = sanitizeForFirestore(nextAuthor);
+      batch.set(db.collection('site_configs').doc('author'), persistedAuthor, { merge: true });
+      batch.set(db.collection('site_configs').doc('author_profile'), persistedAuthor, { merge: true });
+    }
+    await batch.commit();
+
+    cachedHomepageConfig = nextHomepageConfig;
+    if (shouldUpdateAuthorBackground) {
+      cachedAuthor = nextAuthor;
+      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
+    }
     writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
-    setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig).catch(() => {});
     return this.getHomepageConfig();
   },
 

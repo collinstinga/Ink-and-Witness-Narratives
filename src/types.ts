@@ -174,6 +174,8 @@ export interface ManualAccessGrant {
   boundUserEmail?: string;
   boundUserName?: string;
   phoneReservationId?: string;
+  entitlementId?: string;
+  /** Legacy-only bearer retained for controlled migration/revocation. Never issue for new grants. */
   token?: string;
   grantedAt: string;
   grantedBy: string;
@@ -181,6 +183,8 @@ export interface ManualAccessGrant {
   accessSource?: 'MANUAL_GRANT';
   notes?: string;
   expiresAt?: number;
+  revokedAt?: string;
+  deletedAt?: string;
 }
 
 export interface ManualAccessVerifyResult {
@@ -190,7 +194,6 @@ export interface ManualAccessVerifyResult {
   alreadyActivated?: boolean;
   requiresAuth?: boolean;
   isOriginalUser?: boolean;
-  token?: string;
   articleId?: string;
   articleTitle?: string;
   boundUser?: {
@@ -199,6 +202,7 @@ export interface ManualAccessVerifyResult {
     name?: string;
   };
   error?: string;
+  code?: string;
   message?: string;
 }
 

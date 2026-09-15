@@ -3,8 +3,9 @@ import crypto from 'crypto';
 export const MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION = 'manual_access_phone_reservations';
 export const MANUAL_ACCESS_PHONE_RESERVATION_VERSION = 1 as const;
 export const MANUAL_ACCESS_PHONE_RESERVATION_ID_PATTERN = /^v1_[a-f0-9]{64}$/;
-
-const DEVELOPMENT_PHONE_RESERVATION_SECRET = crypto.randomBytes(32).toString('hex');
+export const MANUAL_ACCESS_ENTITLEMENT_COLLECTION = 'manual_access_entitlements';
+export const MANUAL_ACCESS_ENTITLEMENT_VERSION = 1 as const;
+export const MANUAL_ACCESS_ENTITLEMENT_ID_PATTERN = /^v1_[a-f0-9]{64}$/;
 
 export type ManualAccessPhoneReservationState =
   | 'unclaimed'
@@ -21,6 +22,25 @@ export interface ManualAccessPhoneReservation {
   updatedAt: string;
   boundUserId?: string;
   claimedAt?: string;
+  revokedAt?: string;
+  deletedAt?: string;
+}
+
+export type ManualAccessEntitlementState = 'active' | 'revoked' | 'deleted';
+
+/**
+ * A non-transferable manual-access entitlement bound to one authenticated
+ * account and one article. This record deliberately contains no bearer token,
+ * phone number, email address, receipt, or other reader PII.
+ */
+export interface ManualAccessEntitlement {
+  storageVersion: typeof MANUAL_ACCESS_ENTITLEMENT_VERSION;
+  grantId: string;
+  userId: string;
+  articleId: string;
+  state: ManualAccessEntitlementState;
+  createdAt: string;
+  updatedAt: string;
   revokedAt?: string;
   deletedAt?: string;
 }
@@ -53,11 +73,7 @@ function decodePhoneReservationSecret(value: unknown): Buffer | null {
   return null;
 }
 
-function isProductionRuntime(): boolean {
-  return Boolean(process.env.VERCEL) || process.env.NODE_ENV === 'production';
-}
-
-function resolvePhoneReservationSecret(explicitSecret?: string): Buffer {
+function resolveStableManualAccessSecret(explicitSecret?: string): Buffer {
   const configured = decodePhoneReservationSecret(
     explicitSecret === undefined
       ? process.env.MANUAL_ACCESS_PHONE_RESERVATION_SECRET
@@ -65,23 +81,37 @@ function resolvePhoneReservationSecret(explicitSecret?: string): Buffer {
   );
   if (configured) return configured;
 
-  if (isProductionRuntime()) {
-    throw new ManualAccessError(
-      'MANUAL_ACCESS_CONFIGURATION_UNAVAILABLE',
-      'Manual access is temporarily unavailable.',
-      503
-    );
-  }
+  // Entitlement IDs address shared, durable state. An ephemeral development
+  // key would make the same account/article resolve to a different document
+  // after a process restart, so this path must fail closed in every runtime.
+  throw new ManualAccessError(
+    'MANUAL_ACCESS_CONFIGURATION_UNAVAILABLE',
+    'Manual access is temporarily unavailable.',
+    503
+  );
+}
 
-  const developmentSecret = decodePhoneReservationSecret(DEVELOPMENT_PHONE_RESERVATION_SECRET);
-  if (!developmentSecret) {
-    throw new ManualAccessError(
-      'MANUAL_ACCESS_CONFIGURATION_UNAVAILABLE',
-      'Manual access is temporarily unavailable.',
-      503
-    );
+function normalizeEntitlementIdentity(
+  value: unknown,
+  code: 'MANUAL_ACCESS_INVALID_USER' | 'MANUAL_ACCESS_INVALID_ARTICLE',
+  message: string
+): string {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value !== value.trim()
+    || Buffer.byteLength(value, 'utf8') > 1024
+    || /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new ManualAccessError(code, message, 400);
   }
-  return developmentSecret;
+  return value;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
 export function normalizeManualAccessPhone(input: unknown): string {
@@ -113,7 +143,7 @@ export function getManualAccessPhoneReservationId(
   }
 
   const digest = crypto
-    .createHmac('sha256', resolvePhoneReservationSecret(explicitSecret))
+    .createHmac('sha256', resolveStableManualAccessSecret(explicitSecret))
     .update(`manual-access-phone:v1:${normalizedPhone}`, 'utf8')
     .digest('hex');
   return `v1_${digest}`;
@@ -121,6 +151,132 @@ export function getManualAccessPhoneReservationId(
 
 export function isManualAccessPhoneReservationId(value: unknown): value is string {
   return typeof value === 'string' && MANUAL_ACCESS_PHONE_RESERVATION_ID_PATTERN.test(value);
+}
+
+export function getManualAccessEntitlementId(
+  userId: unknown,
+  articleId: unknown,
+  explicitSecret?: string
+): string {
+  const normalizedUserId = normalizeEntitlementIdentity(
+    userId,
+    'MANUAL_ACCESS_INVALID_USER',
+    'An authenticated reader account is required.'
+  );
+  const normalizedArticleId = normalizeEntitlementIdentity(
+    articleId,
+    'MANUAL_ACCESS_INVALID_ARTICLE',
+    'A valid article is required.'
+  );
+  const secret = resolveStableManualAccessSecret(explicitSecret);
+  const userIdBytes = Buffer.byteLength(normalizedUserId, 'utf8');
+  const articleIdBytes = Buffer.byteLength(normalizedArticleId, 'utf8');
+  const digest = crypto
+    .createHmac('sha256', secret)
+    .update(
+      `manual-access-entitlement:v1:${userIdBytes}:${normalizedUserId}:${articleIdBytes}:${normalizedArticleId}`,
+      'utf8'
+    )
+    .digest('hex');
+
+  return `v1_${digest}`;
+}
+
+export function isManualAccessEntitlementId(value: unknown): value is string {
+  return typeof value === 'string' && MANUAL_ACCESS_ENTITLEMENT_ID_PATTERN.test(value);
+}
+
+export function isManualAccessBearerLicense(token: unknown, license: unknown): boolean {
+  const safeToken = typeof token === 'string' ? token : '';
+  const record = license && typeof license === 'object' && !Array.isArray(license)
+    ? license as Record<string, unknown>
+    : {};
+  const receipt = typeof record.receipt === 'string' ? record.receipt.toUpperCase() : '';
+
+  return record.accessSource === 'MANUAL_GRANT'
+    || safeToken.startsWith('ink_grant_')
+    || safeToken.startsWith('ink_manual_')
+    || receipt.startsWith('MANUAL');
+}
+
+export function normalizeManualAccessEntitlement(
+  value: unknown
+): ManualAccessEntitlement | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+  const record = value as Record<string, unknown>;
+  const allowedKeys = new Set([
+    'storageVersion',
+    'grantId',
+    'userId',
+    'articleId',
+    'state',
+    'createdAt',
+    'updatedAt',
+    'revokedAt',
+    'deletedAt'
+  ]);
+  if (Object.keys(record).some(key => !allowedKeys.has(key))) return null;
+
+  const isIdentity = (candidate: unknown): candidate is string => (
+    typeof candidate === 'string'
+    && candidate.length > 0
+    && candidate === candidate.trim()
+    && Buffer.byteLength(candidate, 'utf8') <= 1024
+    && !/[\u0000-\u001f\u007f]/.test(candidate)
+  );
+  const isState = (candidate: unknown): candidate is ManualAccessEntitlementState => (
+    candidate === 'active' || candidate === 'revoked' || candidate === 'deleted'
+  );
+
+  if (
+    record.storageVersion !== MANUAL_ACCESS_ENTITLEMENT_VERSION
+    || !isIdentity(record.grantId)
+    || !isIdentity(record.userId)
+    || !isIdentity(record.articleId)
+    || !isState(record.state)
+    || !isIsoTimestamp(record.createdAt)
+    || !isIsoTimestamp(record.updatedAt)
+  ) {
+    return null;
+  }
+
+  const createdAtMs = Date.parse(record.createdAt);
+  const updatedAtMs = Date.parse(record.updatedAt);
+  if (updatedAtMs < createdAtMs) return null;
+
+  const revokedAt = record.revokedAt;
+  const deletedAt = record.deletedAt;
+  if (revokedAt !== undefined && !isIsoTimestamp(revokedAt)) return null;
+  if (deletedAt !== undefined && !isIsoTimestamp(deletedAt)) return null;
+  if (
+    (revokedAt !== undefined
+      && (Date.parse(revokedAt) < createdAtMs || Date.parse(revokedAt) > updatedAtMs))
+    || (deletedAt !== undefined
+      && (Date.parse(deletedAt) < createdAtMs || Date.parse(deletedAt) > updatedAtMs))
+  ) {
+    return null;
+  }
+
+  if (record.state === 'active' && (revokedAt !== undefined || deletedAt !== undefined)) {
+    return null;
+  }
+  if (record.state === 'revoked' && (revokedAt === undefined || deletedAt !== undefined)) {
+    return null;
+  }
+  if (record.state === 'deleted' && deletedAt === undefined) return null;
+
+  return {
+    storageVersion: MANUAL_ACCESS_ENTITLEMENT_VERSION,
+    grantId: record.grantId,
+    userId: record.userId,
+    articleId: record.articleId,
+    state: record.state,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    ...(revokedAt === undefined ? {} : { revokedAt }),
+    ...(deletedAt === undefined ? {} : { deletedAt })
+  };
 }
 
 export function createManualAccessPhoneAlreadyUsedError(): ManualAccessError {

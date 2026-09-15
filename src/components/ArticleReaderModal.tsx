@@ -133,9 +133,18 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const handleVerifyManualAccess = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!article) return;
+
+    if (!currentUser) {
+      setManualRequiresAuth(true);
+      setManualAlreadyActivated(false);
+      setManualError(null);
+      setManualSuccess('Sign in or register before claiming writer-granted access. Your first successful claim permanently binds the grant to that reader account.');
+      return;
+    }
+
     const cleanPhone = manualPhone.trim();
     if (!cleanPhone) {
-      setManualError('Please enter your phone number to verify access.');
+      setManualError('Enter the phone number the writer authorized for this grant.');
       return;
     }
 
@@ -150,7 +159,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       if (res.requiresAuth) {
         setManualRequiresAuth(true);
         setManualError(null);
-        setManualSuccess(res.message || 'Authorization confirmed! Please sign in or register to permanently bind this piece to your reader account.');
+        setManualSuccess(res.message || 'Sign in or register before claiming writer-granted access.');
         return;
       }
       if (res.verified) {
@@ -165,14 +174,14 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
         setManualError(res.message || 'No manual access was found for this phone number. If you believe this is an error, please contact the Support Desk.');
       }
     } catch (err: any) {
-      if (err.alreadyActivated || err.message?.toLowerCase().includes('already activated') || err.message?.toLowerCase().includes('access already activated')) {
+      if (err.alreadyActivated || err.code === 'MANUAL_ACCESS_ALREADY_CLAIMED') {
         setManualAlreadyActivated(true);
         setManualRequiresAuth(false);
-        setManualError(err.message || 'This phone number has already been activated on another reader session. To prevent unauthorized sharing, granted access can only be activated once. Please sign in to the original account or contact Support.');
+        setManualError(err.message || 'This phone number is already bound to another reader account. Sign in to the original account or contact Support.');
       } else if (err.requiresAuth) {
         setManualRequiresAuth(true);
         setManualError(null);
-        setManualSuccess(err.message || 'Authorization confirmed! Please sign in or register to bind this piece to your account.');
+        setManualSuccess(err.message || 'Sign in or register before claiming writer-granted access.');
       } else {
         setManualAlreadyActivated(false);
         setManualRequiresAuth(false);
@@ -1325,14 +1334,14 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setShowManualForm(!showManualForm);
+                                  setShowManualForm((isVisible) => !isVisible);
                                   setManualError(null);
                                   setManualSuccess(null);
                                 }}
                                 className="text-sky-400 hover:text-sky-300 transition-colors inline-flex items-center gap-1 cursor-pointer"
                               >
                                 <KeyRound className="w-3 h-3" />
-                                <span>{showManualForm ? 'Hide Claim Access Form' : 'Already paid or granted manual access? Restore or Claim'}</span>
+                                <span>{showManualForm ? 'Hide Grant Claim Form' : 'Writer granted access? Claim it'}</span>
                               </button>
 
                               <button
@@ -1348,18 +1357,18 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                         </div>
                       </div>
 
-                      {/* MANUAL SELF-UNLOCK & AUTHOR-GRANTED ACCESS CARD (SECONDARY RECOVERY) */}
+                      {/* WRITER-GRANTED, ACCOUNT-BOUND ACCESS CLAIM */}
                       {showManualForm && (
                       <div className="p-6 rounded-2xl bg-slate-900/90 border border-sky-500/30 text-left space-y-4 animate-in fade-in">
                         <div className="flex items-center justify-between flex-wrap gap-2">
                           <div className="flex items-center gap-2 text-sky-400 font-mono text-xs font-semibold uppercase tracking-wider">
                             <KeyRound className="w-4 h-4" />
-                            <span>Granted Access / Restore Access</span>
+                            <span>Writer-Granted Access</span>
                           </div>
                         </div>
 
                         <p className="text-xs text-slate-300 font-sans leading-relaxed">
-                          If Jake has personally authorized access for your phone number or you previously purchased this monograph, enter your phone number below to verify and claim reading access.
+                          Use this form only if Jake personally granted complimentary access to your phone number. M-PESA purchases are unlocked from their confirmed payment record; use receipt recovery or the Support Desk for a purchase issue.
                         </p>
 
                         <form onSubmit={handleVerifyManualAccess} className="space-y-3 pt-2">
@@ -1371,7 +1380,9 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                                   id="manual-access-phone-input"
                                   value={manualPhone}
                                   onChange={(e) => setManualPhone(e.target.value)}
-                                  placeholder="Phone number (e.g. 0712345678 or 2547...)"
+                                  placeholder="Writer-authorized phone number"
+                                  autoComplete="tel"
+                                  aria-label="Writer-authorized phone number"
                                   className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-slate-100 text-xs font-mono placeholder:text-slate-500 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
                                 />
                               </div>
@@ -1396,17 +1407,17 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                               </button>
                             </div>
 
-                            {/* 1. SINGLE-SESSION BINDING REQUIRED BANNER */}
+                            {/* 1. ACCOUNT BINDING REQUIRES AUTHENTICATION */}
                             {manualRequiresAuth && (
                               <div className="p-4 rounded-xl bg-amber-950/80 border border-amber-500/50 space-y-3 text-xs text-amber-200 font-sans animate-in fade-in">
                                 <div className="flex items-start gap-2.5">
                                   <Shield className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                                   <div>
                                     <p className="font-semibold text-amber-300">
-                                      Authorization Found — Reader Sign In Required
+                                      Reader Sign In Required
                                     </p>
                                     <p className="mt-1 leading-relaxed text-amber-200/90">
-                                      {manualSuccess || 'This phone number has been granted access. To complete one-time activation and bind this piece to your library, please sign in.'}
+                                      {manualSuccess || 'Sign in before claiming writer-granted access. A successful first claim permanently binds the grant to that reader account.'}
                                     </p>
                                   </div>
                                 </div>
@@ -1419,7 +1430,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                                       className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-sm transition-colors"
                                     >
                                       <Lock className="w-3 h-3" />
-                                      <span>Sign In to Activate</span>
+                                      <span>Sign In to Claim</span>
                                     </button>
                                   </div>
                                 )}
@@ -1432,7 +1443,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                                 <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                                 <div className="space-y-1">
                                   <p className="font-semibold text-emerald-300">
-                                    Access Confirmed &amp; Activated
+                                    Access Bound to Your Account
                                   </p>
                                   <p>{manualSuccess}</p>
                                 </div>
@@ -1446,7 +1457,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                                   <Shield className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                                   <div>
                                     <p className="font-semibold text-rose-300">
-                                      Access Already Activated
+                                      Phone Already Bound
                                     </p>
                                     <p className="mt-1 leading-relaxed text-rose-200/90">{manualError}</p>
                                   </div>
@@ -1460,7 +1471,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                                       className="px-3.5 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-sm"
                                     >
                                       <Lock className="w-3 h-3" />
-                                      <span>Sign In to Bound Account</span>
+                                      <span>Sign In to Original Account</span>
                                     </button>
                                   )}
 

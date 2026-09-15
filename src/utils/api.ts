@@ -477,6 +477,27 @@ export const api = {
     return res.json();
   },
 
+  async getUserLibrary(): Promise<{
+    success: boolean;
+    library: Array<{
+      articleId: string;
+      articleTitle: string;
+      accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+      createdAt: string;
+      expiresAt: number;
+      receipt?: string;
+      article: Article & { isUnlocked: true };
+    }>;
+    totalCount: number;
+  }> {
+    const res = await fetch('/api/user/library', { credentials: 'include' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || data.message || 'Failed to load your reader library.');
+    }
+    return data;
+  },
+
   async getMpesaConfig(): Promise<MpesaConfig> {
     const res = await fetch('/api/mpesa/config');
     if (!res.ok) throw new Error('Failed to fetch M-Pesa configuration');
@@ -725,7 +746,7 @@ export const api = {
     alreadyActivated?: boolean; 
     requiresAuth?: boolean; 
     isOriginalUser?: boolean; 
-    token?: string; 
+    code?: string;
     articleId?: string; 
     articleTitle?: string; 
     boundUser?: { id: string; email: string; name?: string }; 
@@ -741,18 +762,13 @@ export const api = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err: any = new Error(data.error || data.message || 'No manual access found for this phone number.');
-      err.alreadyActivated = Boolean(data.alreadyActivated || res.status === 409);
+      err.code = data.code;
+      err.alreadyActivated = Boolean(
+        data.alreadyActivated || data.code === 'MANUAL_ACCESS_ALREADY_CLAIMED'
+      );
       err.requiresAuth = Boolean(data.requiresAuth || res.status === 401);
       err.data = data;
       throw err;
-    }
-    if (data.verified && data.token) {
-      if (data.articleId) {
-        savePurchasedToken(data.articleId, data.token, 'MANUAL-GRANT', phone);
-      }
-      if (articleId && articleId !== data.articleId) {
-        savePurchasedToken(articleId, data.token, 'MANUAL-GRANT', phone);
-      }
     }
     return data;
   },
@@ -1375,28 +1391,6 @@ export const api = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to load reader licenses');
-    }
-    return res.json();
-  },
-
-  async grantReaderLicense(data: { articleId: string; phone: string; receipt?: string; durationDays?: number }) {
-    const activeToken = getWriterToken();
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
-    };
-    if (activeToken) {
-      headers['x-admin-token'] = activeToken;
-      headers['Authorization'] = `Bearer ${activeToken}`;
-    }
-    const res = await fetch('/api/admin/readers/grant', {
-      method: 'POST',
-      headers,
-      credentials: 'include',
-      body: JSON.stringify(data)
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to grant reader license');
     }
     return res.json();
   },

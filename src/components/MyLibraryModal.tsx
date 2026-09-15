@@ -11,12 +11,18 @@ import {
 import { Article } from '../types.js';
 import { clearStoredTokens } from '../utils/api.js';
 
+type LibraryArticle = Article & {
+  libraryAccessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+};
+
 interface MyLibraryModalProps {
   isOpen: boolean;
   onClose: () => void;
-  articles: Article[];
+  articles: LibraryArticle[];
   onReadArticle: (article: Article) => void;
   onExploreCatalog: () => void;
+  isLoading?: boolean;
+  error?: string;
 }
 
 export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
@@ -24,7 +30,9 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
   onClose,
   articles,
   onReadArticle,
-  onExploreCatalog
+  onExploreCatalog,
+  isLoading = false,
+  error = ''
 }) => {
   const [clearedNotice, setClearedNotice] = useState(false);
 
@@ -97,7 +105,17 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
 
         {/* Library Content */}
         <div className="p-6 sm:p-7 space-y-4 max-h-[75vh] overflow-y-auto">
-          {articles.length === 0 ? (
+          {isLoading && articles.length === 0 ? (
+            <div className="text-center py-10 space-y-3" role="status" aria-live="polite">
+              <div className="w-8 h-8 rounded-full border-2 border-slate-700 border-t-sky-400 animate-spin mx-auto" />
+              <p className="text-sm text-slate-300">Loading your verified library…</p>
+            </div>
+          ) : error && articles.length === 0 ? (
+            <div className="text-center py-10 space-y-2" role="alert">
+              <p className="text-sm font-semibold text-amber-300">Library temporarily unavailable</p>
+              <p className="text-xs text-slate-400">{error}</p>
+            </div>
+          ) : articles.length === 0 ? (
             <div className="text-center py-10 space-y-4">
               <div className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-800 text-slate-400 flex items-center justify-center mx-auto">
                 <BookOpen className="w-6 h-6" />
@@ -130,7 +148,11 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
                       </span>
                       <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" />
-                        <span>Purchased &amp; Active</span>
+                        <span>
+                          {art.libraryAccessSource === 'MANUAL_GRANT'
+                            ? 'Writer-granted & Active'
+                            : 'Purchased & Active'}
+                        </span>
                       </span>
                     </div>
                     <h4 className="font-display font-bold text-sm sm:text-base text-slate-100">

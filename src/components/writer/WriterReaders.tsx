@@ -9,7 +9,6 @@ import {
   CheckCircle2, 
   AlertCircle, 
   Clock, 
-  FileText, 
   Smartphone, 
   RefreshCw,
   Copy,
@@ -17,7 +16,6 @@ import {
   Shield,
   UserCheck,
   Lock,
-  Unlock,
   Info
 } from 'lucide-react';
 import { ReaderLicense, Article, ManualAccessGrant } from '../../types.js';
@@ -48,17 +46,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  // Token License Modal
-  const [showLicenseModal, setShowLicenseModal] = useState<boolean>(false);
-  const [grantArticleId, setGrantArticleId] = useState<string>('');
-  const [grantPhone, setGrantPhone] = useState<string>('');
-  const [grantReceipt, setGrantReceipt] = useState<string>('');
-  const [grantDurationDays, setGrantDurationDays] = useState<number>(60);
-  const [grantSubmitting, setGrantSubmitting] = useState<boolean>(false);
-  const [grantSuccessMsg, setGrantSuccessMsg] = useState<string | null>(null);
-  const [grantError, setGrantError] = useState<string | null>(null);
-
-  const fetchData = async () => {
+  const fetchData = async (): Promise<boolean> => {
     try {
       setLoading(true);
       const [grantsRes, licensesRes] = await Promise.allSettled([
@@ -72,8 +60,26 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
       if (licensesRes.status === 'fulfilled') {
         setLicenses(licensesRes.value.licenses || []);
       }
+
+      const failedSections = [
+        grantsRes.status === 'rejected' ? 'manual grants' : null,
+        licensesRes.status === 'rejected' ? 'legacy token licenses' : null
+      ].filter((value): value is string => Boolean(value));
+      if (failedSections.length > 0) {
+        setBannerMessage({
+          type: 'error',
+          text: `Could not refresh ${failedSections.join(' and ')}. Existing rows may be stale; use Refresh to retry.`
+        });
+        return false;
+      }
+      return true;
     } catch (err) {
       console.error('Failed to load reader data:', err);
+      setBannerMessage({
+        type: 'error',
+        text: 'Could not refresh reader access data. Existing rows may be stale; use Refresh to retry.'
+      });
+      return false;
     } finally {
       setLoading(false);
     }
@@ -106,7 +112,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
         notes: manualNotes.trim() || undefined,
         grantedBy: 'Jake'
       });
-      setManualSuccessMsg(`Single-session access authorization granted for phone ${manualPhone.trim()}.`);
+      setManualSuccessMsg(`Account-bound access authorization created for phone ${manualPhone.trim()}.`);
       setManualPhone('');
       setManualNotes('');
       await fetchData();
@@ -141,7 +147,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   };
 
   const handleDeleteManualAccess = async (grantId: string, phone: string) => {
-    if (!window.confirm(`PERMANENT DELETE: Remove the manual access grant for ${phone}?\n\nThe grant and its manual token will be removed, but this phone number will remain permanently reserved and cannot be authorized again. Legitimate M-Pesa purchases are not affected.`)) {
+    if (!window.confirm(`PERMANENT DELETE: Remove the manual access grant for ${phone}?\n\nThe grant and any account-bound entitlement will be removed, but this phone number will remain permanently reserved and cannot be authorized again. Legitimate M-Pesa purchases are not affected.`)) {
       return;
     }
 
@@ -160,34 +166,6 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
       });
     } finally {
       setActionLoadingId(null);
-    }
-  };
-
-  const handleGrantTokenLicense = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!grantArticleId || !grantPhone) {
-      setGrantError('Please select a monograph and provide reader phone number.');
-      return;
-    }
-
-    try {
-      setGrantSubmitting(true);
-      setGrantError(null);
-      setGrantSuccessMsg(null);
-      const res = await api.grantReaderLicense({
-        articleId: grantArticleId,
-        phone: grantPhone,
-        receipt: grantReceipt || `MANUAL-${Date.now().toString().slice(-6)}`,
-        durationDays: Number(grantDurationDays) || 60
-      });
-      setGrantSuccessMsg(`License token issued successfully: ${res.token}`);
-      setGrantPhone('');
-      setGrantReceipt('');
-      await fetchData();
-    } catch (err: any) {
-      setGrantError(err.message || 'Failed to grant reader license.');
-    } finally {
-      setGrantSubmitting(false);
     }
   };
 
@@ -236,7 +214,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
         <div>
           <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-sky-400 mb-1">
             <KeyRound className="w-4 h-4" />
-            <span>Access Control &amp; Single-Session Verification</span>
+            <span>Access Control &amp; Account-Bound Verification</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-serif font-bold text-white">
             Reader Access &amp; Licenses
@@ -331,7 +309,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
       </div>
 
       {/* ============================================================== */}
-      {/* TAB 1: SINGLE-SESSION MANUAL ACCESS (SECURITY SYSTEM) */}
+      {/* TAB 1: ACCOUNT-BOUND MANUAL ACCESS (SECURITY SYSTEM) */}
       {/* ============================================================== */}
       {activeTab === 'manual-access' && (
         <div className="space-y-6 animate-in fade-in duration-200">
@@ -571,7 +549,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                             </p>
                           </div>
                         ) : (
-                          <span className="text-slate-500 text-[11px] italic">Unbound (Direct Reader Token)</span>
+                          <span className="text-slate-500 text-[11px] italic">Awaiting first account claim</span>
                         )}
                       </td>
 
@@ -602,7 +580,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                               onClick={() => handleRevokeManualAccess(grant.id, grant.phone)}
                               disabled={actionLoadingId === grant.id}
                               className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-rose-300 hover:text-rose-200 border border-slate-700 transition-colors cursor-pointer disabled:opacity-50"
-                              title="Revoke access (temporarily disable)"
+                              title="Revoke account-bound access"
                             >
                               <Lock className="w-3.5 h-3.5" />
                             </button>
@@ -671,107 +649,6 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
               </span>
             </div>
           </div>
-
-          {/* License Modal / Form */}
-          {showLicenseModal && (
-            <div className="p-6 rounded-2xl bg-[#0b1120] border border-sky-800/80 shadow-2xl space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                <h3 className="font-serif font-bold text-base text-white flex items-center gap-2">
-                  <KeyRound className="w-4 h-4 text-sky-400" />
-                  <span>Issue Monograph Access License Token</span>
-                </h3>
-                <button
-                  onClick={() => setShowLicenseModal(false)}
-                  className="text-slate-400 hover:text-white text-xs font-mono cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
-
-              {grantError && (
-                <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-800 text-rose-300 text-xs flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{grantError}</span>
-                </div>
-              )}
-
-              {grantSuccessMsg && (
-                <div className="p-3 rounded-lg bg-emerald-950/40 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span className="font-mono">{grantSuccessMsg}</span>
-                </div>
-              )}
-
-              <form onSubmit={handleGrantTokenLicense} className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans">
-                <div>
-                  <label className="block text-slate-300 font-mono text-[11px] mb-1">Target Monograph</label>
-                  <select
-                    value={grantArticleId}
-                    onChange={(e) => setGrantArticleId(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-sky-500"
-                  >
-                    <option value="all">★ All Access Pass (Archive-Wide)</option>
-                    {articles.map((art) => (
-                      <option key={art.id} value={art.id}>
-                        {art.title} ({art.priceKes ? `KES ${art.priceKes}` : 'Free'})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-mono text-[11px] mb-1">Reader Phone / Identifier</label>
-                  <input
-                    type="text"
-                    placeholder="254712345678"
-                    value={grantPhone}
-                    onChange={(e) => setGrantPhone(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-sky-500 font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-mono text-[11px] mb-1">Reference / Note (Optional)</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. VIP Gift, Manual MPESA Ref, Editorial Review"
-                    value={grantReceipt}
-                    onChange={(e) => setGrantReceipt(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-sky-500 font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-slate-300 font-mono text-[11px] mb-1">Validity (Days)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="3650"
-                    value={grantDurationDays}
-                    onChange={(e) => setGrantDurationDays(Number(e.target.value))}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-sky-500 font-mono"
-                  />
-                </div>
-
-                <div className="md:col-span-2 flex justify-end gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowLicenseModal(false)}
-                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={grantSubmitting}
-                    className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium font-sans flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    {grantSubmitting ? 'Issuing...' : 'Grant & Issue Token'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
 
           {/* Search & Table */}
           <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-4">
