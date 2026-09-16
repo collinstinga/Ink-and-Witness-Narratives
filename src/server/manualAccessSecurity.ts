@@ -3,6 +3,10 @@ import crypto from 'crypto';
 export const MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION = 'manual_access_phone_reservations';
 export const MANUAL_ACCESS_PHONE_RESERVATION_VERSION = 1 as const;
 export const MANUAL_ACCESS_PHONE_RESERVATION_ID_PATTERN = /^v1_[a-f0-9]{64}$/;
+export const MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION = 2 as const;
+export const MANUAL_ACCESS_PHONE_PIECE_RESERVATION_ID_PATTERN = /^v2_[a-f0-9]{64}$/;
+export const MANUAL_ACCESS_ACTIVATION_TOKEN_PATTERN = /^ma2_[A-Za-z0-9_-]{43}$/;
+export const MANUAL_ACCESS_ACTIVATION_TOKEN_DIGEST_PATTERN = /^v1_[a-f0-9]{64}$/;
 export const MANUAL_ACCESS_ENTITLEMENT_COLLECTION = 'manual_access_entitlements';
 export const MANUAL_ACCESS_ENTITLEMENT_VERSION = 1 as const;
 export const MANUAL_ACCESS_ENTITLEMENT_ID_PATTERN = /^v1_[a-f0-9]{64}$/;
@@ -24,6 +28,20 @@ export interface ManualAccessPhoneReservation {
   claimedAt?: string;
   revokedAt?: string;
   deletedAt?: string;
+  /** Set only when an older pending grant is issued a one-use activation code. */
+  activationTokenDigest?: string;
+}
+
+/**
+ * A v2 reservation is scoped to one canonical piece. The activation token is
+ * shown once to the administrator/reader; only its digest may be persisted.
+ * The digest must be removed in the same transaction that binds the grant.
+ */
+export interface ManualAccessPhonePieceReservation
+  extends Omit<ManualAccessPhoneReservation, 'storageVersion'> {
+  storageVersion: typeof MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION;
+  activationTokenDigest?: string;
+  activationTokenExpiresAt?: number;
 }
 
 export type ManualAccessEntitlementState = 'active' | 'revoked' | 'deleted';
@@ -94,7 +112,7 @@ function resolveStableManualAccessSecret(explicitSecret?: string): Buffer {
 
 function normalizeEntitlementIdentity(
   value: unknown,
-  code: 'MANUAL_ACCESS_INVALID_USER' | 'MANUAL_ACCESS_INVALID_ARTICLE',
+  code: 'MANUAL_ACCESS_INVALID_USER' | 'MANUAL_ACCESS_INVALID_ARTICLE' | 'MANUAL_ACCESS_INVALID_GRANT',
   message: string
 ): string {
   if (
@@ -152,6 +170,118 @@ export function getManualAccessPhoneReservationId(
 
 export function isManualAccessPhoneReservationId(value: unknown): value is string {
   return typeof value === 'string' && MANUAL_ACCESS_PHONE_RESERVATION_ID_PATTERN.test(value);
+}
+
+export function getManualAccessPhonePieceReservationId(
+  phone: unknown,
+  articleId: unknown,
+  explicitSecret?: string
+): string {
+  const normalizedPhone = normalizeManualAccessPhone(phone);
+  if (!normalizedPhone) {
+    throw new ManualAccessError(
+      'MANUAL_ACCESS_INVALID_PHONE',
+      'Please provide a valid phone number.',
+      400
+    );
+  }
+  const normalizedArticleId = normalizeEntitlementIdentity(
+    articleId,
+    'MANUAL_ACCESS_INVALID_ARTICLE',
+    'A valid article is required.'
+  );
+  const articleIdBytes = Buffer.byteLength(normalizedArticleId, 'utf8');
+  const digest = crypto
+    .createHmac('sha256', resolveStableManualAccessSecret(explicitSecret))
+    .update(
+      `manual-access-phone-piece:v2:${normalizedPhone}:${articleIdBytes}:${normalizedArticleId}`,
+      'utf8'
+    )
+    .digest('hex');
+  return `v2_${digest}`;
+}
+
+export function isManualAccessPhonePieceReservationId(value: unknown): value is string {
+  return typeof value === 'string' && MANUAL_ACCESS_PHONE_PIECE_RESERVATION_ID_PATTERN.test(value);
+}
+
+export function isManualAccessActivationToken(value: unknown): value is string {
+  if (typeof value !== 'string' || !MANUAL_ACCESS_ACTIVATION_TOKEN_PATTERN.test(value)) {
+    return false;
+  }
+  const encoded = value.slice('ma2_'.length);
+  const decoded = Buffer.from(encoded, 'base64url');
+  return decoded.length === 32 && decoded.toString('base64url') === encoded;
+}
+
+/** A digest is bound to both the grant and the canonical piece, not just a bearer string. */
+export function getManualAccessActivationTokenDigest(
+  token: unknown,
+  articleId: unknown,
+  grantId: unknown,
+  explicitSecret?: string
+): string {
+  if (!isManualAccessActivationToken(token)) {
+    throw new ManualAccessError(
+      'MANUAL_ACCESS_INVALID_ACTIVATION_TOKEN',
+      'This manual access link is invalid or has expired.',
+      400
+    );
+  }
+  const normalizedArticleId = normalizeEntitlementIdentity(
+    articleId,
+    'MANUAL_ACCESS_INVALID_ARTICLE',
+    'A valid article is required.'
+  );
+  const normalizedGrantId = normalizeEntitlementIdentity(
+    grantId,
+    'MANUAL_ACCESS_INVALID_GRANT',
+    'A valid manual access grant is required.'
+  );
+  const articleIdBytes = Buffer.byteLength(normalizedArticleId, 'utf8');
+  const grantIdBytes = Buffer.byteLength(normalizedGrantId, 'utf8');
+  const digest = crypto
+    .createHmac('sha256', resolveStableManualAccessSecret(explicitSecret))
+    .update(
+      `manual-access-activation:v1:${articleIdBytes}:${normalizedArticleId}:${grantIdBytes}:${normalizedGrantId}:${token}`,
+      'utf8'
+    )
+    .digest('hex');
+  return `v1_${digest}`;
+}
+
+export function createManualAccessActivationToken(
+  articleId: unknown,
+  grantId: unknown,
+  explicitSecret?: string
+): { token: string; tokenDigest: string } {
+  const token = `ma2_${crypto.randomBytes(32).toString('base64url')}`;
+  return {
+    token,
+    tokenDigest: getManualAccessActivationTokenDigest(token, articleId, grantId, explicitSecret)
+  };
+}
+
+export function isMatchingManualAccessActivationToken(
+  token: unknown,
+  articleId: unknown,
+  grantId: unknown,
+  expectedDigest: unknown,
+  explicitSecret?: string
+): boolean {
+  if (
+    !isManualAccessActivationToken(token)
+    || typeof expectedDigest !== 'string'
+    || !MANUAL_ACCESS_ACTIVATION_TOKEN_DIGEST_PATTERN.test(expectedDigest)
+  ) return false;
+
+  const actualDigest = getManualAccessActivationTokenDigest(
+    token,
+    articleId,
+    grantId,
+    explicitSecret
+  );
+  return crypto.timingSafeEqual(Buffer.from(actualDigest), Buffer.from(expectedDigest));
 }
 
 export function getManualAccessEntitlementId(
@@ -303,7 +433,7 @@ export function normalizeManualAccessEntitlement(
 export function createManualAccessPhoneAlreadyUsedError(): ManualAccessError {
   return new ManualAccessError(
     'MANUAL_ACCESS_PHONE_ALREADY_USED',
-    'This phone number has already been used for manual access and cannot be authorized again.',
+    'This phone number has already been used for manual access to this piece.',
     409
   );
 }

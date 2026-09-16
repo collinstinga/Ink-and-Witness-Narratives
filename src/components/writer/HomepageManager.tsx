@@ -277,6 +277,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       persistedConfigUpdatedAtRef.current = response.config.updatedAt;
       setIsDirty(JSON.stringify(configRef.current) !== configSnapshotToSave);
       setLastSavedAt(response.config.lastSavedAt || response.config.updatedAt);
+      window.dispatchEvent(new Event('ink-homepage-updated'));
+      try {
+        window.localStorage.setItem('ink-homepage-version', response.config.updatedAt);
+      } catch {
+        // Storage can be disabled; same-tab updates still use the event above.
+      }
       if (onRefreshArticles) onRefreshArticles();
     } catch (err: any) {
       if (requestSequence !== saveRequestSequenceRef.current) return;

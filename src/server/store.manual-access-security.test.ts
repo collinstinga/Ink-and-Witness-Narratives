@@ -4,8 +4,11 @@ import {
   MANUAL_ACCESS_ENTITLEMENT_COLLECTION,
   MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION,
   getManualAccessEntitlementId,
-  getManualAccessPhoneReservationId
+  getManualAccessPhoneReservationId,
+  getManualAccessPhonePieceReservationId,
+  normalizeManualAccessPhone
 } from './manualAccessSecurity.js';
+import { getAuthSessionDocumentId } from './sessionSecurity.js';
 
 type FakeRef = {
   collectionName: string;
@@ -303,11 +306,20 @@ vi.mock('./affiliateStore.js', () => ({
 describe('single-use manual access transactions', () => {
   let store: typeof import('./store.js').store;
   let startupManualScans = 0;
+  const issuedTokens = new Map<string, string>();
+  const verifyGrant = (articleId: string, phone: string, user: typeof users[number] | null, token?: string) =>
+    store.verifyManualAccess(
+      articleId,
+      phone,
+      token ?? issuedTokens.get(`${normalizeManualAccessPhone(phone)}|${articleId}`) ?? '',
+      user
+    );
 
   beforeAll(async () => {
     process.env.VERCEL = '1';
     process.env.NODE_ENV = 'test';
     process.env.MANUAL_ACCESS_PHONE_RESERVATION_SECRET = TEST_SECRET;
+    process.env.SESSION_SIGNING_SECRET = TEST_SECRET;
     process.env.INITIAL_ADMIN_EMAIL = '';
     process.env.INITIAL_ADMIN_PASSWORD = '';
     process.env.ADMIN_EMAIL = '';
@@ -319,18 +331,27 @@ describe('single-use manual access transactions', () => {
 
     ({ store } = await import('./store.js'));
     await store.init();
+    const originalGrant = store.grantManualAccess.bind(store);
+    vi.spyOn(store, 'grantManualAccess').mockImplementation(async (...args) => {
+      const created = await originalGrant(...args);
+      issuedTokens.set(`${normalizeManualAccessPhone(args[1])}|${created.grant.articleId}`, created.activationToken);
+      return created;
+    });
     startupManualScans = firestoreMock.getAllFirestoreDocs.mock.calls
       .filter(([collectionName]) => collectionName === 'manual_access')
       .length;
   }, 60_000);
 
   beforeEach(() => {
+    issuedTokens.clear();
     for (const key of Array.from(firestoreMock.documents.keys())) {
       if (
         key.startsWith('manual_access/')
         || key.startsWith(`${MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION}/`)
         || key.startsWith(`${MANUAL_ACCESS_ENTITLEMENT_COLLECTION}/`)
         || key.startsWith('reader_licenses/')
+        || key.startsWith('sessions/')
+        || key.startsWith('active_reader_sessions/')
       ) {
         firestoreMock.documents.delete(key);
       }
@@ -344,7 +365,7 @@ describe('single-use manual access transactions', () => {
   it('does not enumerate grants or touch Firestore for an unauthenticated claim', async () => {
     expect(startupManualScans).toBe(0);
 
-    await expect(store.verifyManualAccess('article-one', FIRST_PHONE, null)).resolves.toMatchObject({
+    await expect(verifyGrant('article-one', FIRST_PHONE, null, `ma2_${'A'.repeat(43)}`)).resolves.toMatchObject({
       success: false,
       verified: false,
       requiresAuth: true,
@@ -353,7 +374,36 @@ describe('single-use manual access transactions', () => {
     expect(firestoreMock.transactionRuns).not.toHaveBeenCalled();
   });
 
-  it('binds one normalized phone to one account, remains idempotent, and keeps its tombstone', async () => {
+  it('keeps only one active reader session and fails closed if its pointer disappears', async () => {
+    const first = await store.createAuthSession(users[0] as any);
+    const firstId = getAuthSessionDocumentId(first);
+    expect(firstId).toBeTruthy();
+    expect(firestoreMock.documents.has(`sessions/${firstId}`)).toBe(true);
+
+    const second = await store.createAuthSession(users[0] as any);
+    const secondId = getAuthSessionDocumentId(second);
+    expect(secondId).not.toBe(firstId);
+    expect(firestoreMock.documents.has(`sessions/${firstId}`)).toBe(false);
+    await expect(store.getAuthSession(first)).resolves.toBeNull();
+    await expect(store.getAuthSession(second)).resolves.toMatchObject({
+      userId: users[0].id,
+      activeReaderSession: true
+    });
+
+    const pointerKey = Array.from(firestoreMock.documents.keys())
+      .find(key => key.startsWith('active_reader_sessions/'));
+    expect(pointerKey).toBeTruthy();
+    firestoreMock.documents.delete(pointerKey!);
+    const future = Date.now() + 16_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(future);
+    try {
+      await expect(store.getAuthSession(second)).resolves.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('binds one phone/piece grant to one account, consumes its code, and allows another piece', async () => {
     const created = await store.grantManualAccess(
       'article-one',
       '0712 345 678',
@@ -361,15 +411,16 @@ describe('single-use manual access transactions', () => {
       'Complimentary review'
     );
     const grantId = created.grant.id;
-    const reservationId = getManualAccessPhoneReservationId(FIRST_PHONE, TEST_SECRET);
+    const reservationId = getManualAccessPhonePieceReservationId(FIRST_PHONE, 'article-one', TEST_SECRET);
     expect(created.grant).not.toHaveProperty('token');
+    expect(created.activationToken).toMatch(/^ma2_/);
     expect(created.grant).not.toHaveProperty('phoneReservationId');
     expect(firestoreMock.documents.get(`manual_access/${grantId}`)).not.toHaveProperty('token');
     expect(firestoreMock.documents.get(
       `${MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION}/${reservationId}`
     )).toMatchObject({ grantId, articleId: 'article-one', state: 'unclaimed' });
 
-    const firstClaim = await store.verifyManualAccess(
+    const firstClaim = await verifyGrant(
       'article-one',
       '+254 712 345 678',
       users[0]
@@ -399,29 +450,43 @@ describe('single-use manual access transactions', () => {
       articleId: 'article-one',
       state: 'active'
     });
+    expect(firestoreMock.documents.get(
+      `${MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION}/${reservationId}`
+    )).not.toHaveProperty('activationTokenDigest');
     await expect(store.isArticlePurchasedByUser('article-one', users[0])).resolves.toBe(true);
 
     firestoreMock.transactionWrites.mockClear();
-    await expect(store.verifyManualAccess('article-one', '712345678', users[0])).resolves.toMatchObject({
-      success: true,
-      verified: true,
-      alreadyActivated: true
+    await expect(verifyGrant('article-one', '712345678', users[0])).resolves.toMatchObject({
+      success: false,
+      verified: false,
+      code: 'MANUAL_ACCESS_NOT_FOUND'
     });
     expect(firestoreMock.transactionWrites).not.toHaveBeenCalled();
 
-    await expect(store.verifyManualAccess('article-one', '00254712345678', users[1])).resolves.toMatchObject({
+    await expect(verifyGrant('article-one', '00254712345678', users[1])).resolves.toMatchObject({
       success: false,
       verified: false,
-      alreadyActivated: true,
-      code: 'MANUAL_ACCESS_ALREADY_CLAIMED',
-      message: expect.stringMatching(/already been used/i)
+      code: 'MANUAL_ACCESS_NOT_FOUND'
     });
 
-    await expect(store.grantManualAccess('article-two', FIRST_PHONE, 'Writer')).rejects.toMatchObject({
+    await expect(store.grantManualAccess('article-one', FIRST_PHONE, 'Writer')).rejects.toMatchObject({
       code: 'MANUAL_ACCESS_PHONE_ALREADY_USED',
       statusCode: 409,
       message: expect.stringMatching(/already been used/i)
     });
+    const secondPieceGrant = await store.grantManualAccess('article-two', FIRST_PHONE, 'Writer');
+    expect(secondPieceGrant.grant.id).not.toBe(grantId);
+    expect(secondPieceGrant.activationToken).not.toBe(created.activationToken);
+    await expect(verifyGrant('article-two', FIRST_PHONE, users[0], created.activationToken)).resolves.toMatchObject({
+      success: false,
+      code: 'MANUAL_ACCESS_NOT_FOUND'
+    });
+    await expect(verifyGrant('article-two', FIRST_PHONE, users[0])).resolves.toMatchObject({
+      success: true,
+      verified: true,
+      articleId: 'article-two'
+    });
+    await expect(store.isArticlePurchasedByUser('article-two', users[0])).resolves.toBe(true);
 
     const paidToken = `ink_1788782400000_${'d'.repeat(64)}`;
     firestoreMock.documents.set(`reader_licenses/${paidToken}`, {
@@ -439,6 +504,7 @@ describe('single-use manual access transactions', () => {
       `${MANUAL_ACCESS_ENTITLEMENT_COLLECTION}/${entitlementId}`
     )).toMatchObject({ state: 'revoked' });
     await expect(store.isArticlePurchasedByUser('article-one', users[0])).resolves.toBe(false);
+    await expect(store.isArticlePurchasedByUser('article-two', users[0])).resolves.toBe(true);
 
     await expect(store.deleteManualAccess(grantId)).resolves.toBe(true);
     expect(firestoreMock.documents.get(`manual_access/${grantId}`)).toMatchObject({ status: 'deleted' });
@@ -448,8 +514,59 @@ describe('single-use manual access transactions', () => {
     expect(firestoreMock.documents.get(
       `${MANUAL_ACCESS_ENTITLEMENT_COLLECTION}/${entitlementId}`
     )).toMatchObject({ state: 'deleted' });
-    await expect(store.grantManualAccess('article-two', FIRST_PHONE, 'Writer')).rejects.toMatchObject({
+    await expect(store.grantManualAccess('article-one', FIRST_PHONE, 'Writer')).rejects.toMatchObject({
       code: 'MANUAL_ACCESS_PHONE_ALREADY_USED'
+    });
+  });
+
+  it('invalidates a replaced pending code without changing the phone/piece reservation', async () => {
+    const phone = '254788888899';
+    const created = await store.grantManualAccess('article-one', phone, 'Writer');
+    const rotated = await store.reissueManualAccessActivationToken(created.grant.id);
+    expect(rotated.activationToken).not.toBe(created.activationToken);
+    await expect(verifyGrant('article-one', phone, users[0], created.activationToken)).resolves.toMatchObject({
+      success: false,
+      code: 'MANUAL_ACCESS_NOT_FOUND'
+    });
+    await expect(verifyGrant('article-one', phone, users[0], rotated.activationToken)).resolves.toMatchObject({
+      success: true,
+      verified: true
+    });
+    await expect(store.reissueManualAccessActivationToken(created.grant.id)).rejects.toMatchObject({
+      code: 'MANUAL_ACCESS_NOT_PENDING',
+      statusCode: 409
+    });
+  });
+
+  it('allows a new piece even if the phone has an older global reservation for a different piece', async () => {
+    const phone = '254788888898';
+    const legacyId = 'legacy_global_phone_grant';
+    const legacyReservationId = getManualAccessPhoneReservationId(phone, TEST_SECRET);
+    firestoreMock.documents.set(`manual_access/${legacyId}`, {
+      id: legacyId,
+      articleId: 'article-one',
+      phone,
+      phoneReservationId: legacyReservationId,
+      status: 'active',
+      activated: false,
+      grantedAt: '2026-09-15T01:00:00.000Z',
+      grantedBy: 'Writer',
+      accessType: 'manual'
+    });
+    firestoreMock.documents.set(`${MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION}/${legacyReservationId}`, {
+      storageVersion: 1,
+      grantId: legacyId,
+      articleId: 'article-one',
+      state: 'unclaimed',
+      createdAt: '2026-09-15T01:00:00.000Z',
+      updatedAt: '2026-09-15T01:00:00.000Z'
+    });
+    await expect(store.grantManualAccess('article-one', phone, 'Writer')).rejects.toMatchObject({
+      code: 'MANUAL_ACCESS_PHONE_ALREADY_USED'
+    });
+    await expect(store.grantManualAccess('article-two', phone, 'Writer')).resolves.toMatchObject({
+      success: true,
+      grant: { articleId: 'article-two', phone }
     });
   });
 
@@ -469,7 +586,8 @@ describe('single-use manual access transactions', () => {
       accessSource: 'MANUAL_GRANT'
     });
 
-    await expect(store.verifyManualAccess('article-one', phone, users[0])).resolves.toMatchObject({
+    const reissued = await store.reissueManualAccessActivationToken(grantId);
+    await expect(verifyGrant('article-one', phone, users[0], reissued.activationToken)).resolves.toMatchObject({
       success: true,
       verified: true,
       articleId: 'article-one'
@@ -498,9 +616,9 @@ describe('single-use manual access transactions', () => {
       grantedBy: 'Writer',
       accessType: 'manual'
     });
-    await expect(store.verifyManualAccess('article-one', '0744444444', users[0])).rejects.toMatchObject({
-      code: 'MANUAL_ACCESS_LEGACY_RECONCILIATION_REQUIRED',
-      statusCode: 409
+    await expect(verifyGrant('article-one', '0744444444', users[0])).resolves.toMatchObject({
+      success: false,
+      code: 'MANUAL_ACCESS_INVALID_ACTIVATION_TOKEN'
     });
 
     const corruptGrantId = 'legacy_corrupt_expiry';
@@ -515,7 +633,8 @@ describe('single-use manual access transactions', () => {
       accessType: 'manual',
       expiresAt: 'never'
     });
-    await expect(store.verifyManualAccess('article-one', '0755555555', users[0])).rejects.toMatchObject({
+    const reissued = await store.reissueManualAccessActivationToken(corruptGrantId);
+    await expect(verifyGrant('article-one', '0755555555', users[0], reissued.activationToken)).rejects.toMatchObject({
       code: 'MANUAL_ACCESS_EXPIRY_CORRUPT',
       statusCode: 503
     });
@@ -523,7 +642,7 @@ describe('single-use manual access transactions', () => {
 
   it('does not reserve a phone or report success when the transaction commit fails', async () => {
     const phone = '254766666666';
-    const reservationId = getManualAccessPhoneReservationId(phone, TEST_SECRET);
+    const reservationId = getManualAccessPhonePieceReservationId(phone, 'article-one', TEST_SECRET);
     const beforeFailure = snapshotManualAccessDocuments();
     firestoreMock.failNextTransaction();
 
@@ -547,7 +666,7 @@ describe('single-use manual access transactions', () => {
   it('rejects a corrupt entitlement without rewriting the durable binding', async () => {
     const phone = '254777777777';
     const created = await store.grantManualAccess('article-one', phone, 'Writer');
-    await store.verifyManualAccess('article-one', phone, users[0]);
+    await verifyGrant('article-one', phone, users[0]);
     const entitlementId = getManualAccessEntitlementId('reader_one', 'article-one', TEST_SECRET);
     const key = `${MANUAL_ACCESS_ENTITLEMENT_COLLECTION}/${entitlementId}`;
     firestoreMock.documents.set(key, {
@@ -557,7 +676,7 @@ describe('single-use manual access transactions', () => {
     const durableGrant = clone(firestoreMock.documents.get(`manual_access/${created.grant.id}`));
     firestoreMock.transactionWrites.mockClear();
 
-    await expect(store.verifyManualAccess('article-one', phone, users[0])).rejects.toMatchObject({
+    await expect(store.revokeManualAccess(created.grant.id)).rejects.toMatchObject({
       code: 'MANUAL_ACCESS_ENTITLEMENT_MISMATCH',
       statusCode: 503
     });
@@ -575,7 +694,7 @@ describe('single-use manual access transactions', () => {
       expiresAt
     });
 
-    await expect(store.verifyManualAccess('article-one', phone, users[0])).resolves.toMatchObject({
+    await expect(verifyGrant('article-one', phone, users[0])).resolves.toMatchObject({
       success: true,
       verified: true
     });
@@ -598,7 +717,7 @@ describe('single-use manual access transactions', () => {
   it('repairs a dangling pointer and revokes the one real entitlement', async () => {
     const phone = '254788888882';
     const created = await store.grantManualAccess('article-one', phone, 'Writer');
-    await store.verifyManualAccess('article-one', phone, users[0]);
+    await verifyGrant('article-one', phone, users[0]);
     const realEntitlementId = getManualAccessEntitlementId('reader_one', 'article-one', TEST_SECRET);
     const danglingEntitlementId = getManualAccessEntitlementId('reader_two', 'article-two', TEST_SECRET);
     const grantKey = `manual_access/${created.grant.id}`;
@@ -624,7 +743,7 @@ describe('single-use manual access transactions', () => {
   it('rejects duplicate entitlements for one grant without changing durable state', async () => {
     const phone = '254788888883';
     const created = await store.grantManualAccess('article-one', phone, 'Writer');
-    await store.verifyManualAccess('article-one', phone, users[0]);
+    await verifyGrant('article-one', phone, users[0]);
     const duplicateEntitlementId = getManualAccessEntitlementId('reader_two', 'article-two', TEST_SECRET);
     const createdAt = new Date().toISOString();
     firestoreMock.documents.set(
@@ -653,9 +772,9 @@ describe('single-use manual access transactions', () => {
   it('recovers an entitlement by grantId when all grant and reservation pointers are missing', async () => {
     const phone = '254788888884';
     const created = await store.grantManualAccess('article-one', phone, 'Writer');
-    await store.verifyManualAccess('article-one', phone, users[0]);
+    await verifyGrant('article-one', phone, users[0]);
     const entitlementId = getManualAccessEntitlementId('reader_one', 'article-one', TEST_SECRET);
-    const reservationId = getManualAccessPhoneReservationId(phone, TEST_SECRET);
+    const reservationId = getManualAccessPhonePieceReservationId(phone, 'article-one', TEST_SECRET);
     const grantKey = `manual_access/${created.grant.id}`;
     const {
       entitlementId: _entitlementPointer,
@@ -693,9 +812,9 @@ describe('single-use manual access transactions', () => {
   it('monotonically repairs an active entitlement when grant and reservation are already deleted', async () => {
     const phone = '254788888885';
     const created = await store.grantManualAccess('article-one', phone, 'Writer');
-    await store.verifyManualAccess('article-one', phone, users[0]);
+    await verifyGrant('article-one', phone, users[0]);
     const entitlementId = getManualAccessEntitlementId('reader_one', 'article-one', TEST_SECRET);
-    const reservationId = getManualAccessPhoneReservationId(phone, TEST_SECRET);
+    const reservationId = getManualAccessPhonePieceReservationId(phone, 'article-one', TEST_SECRET);
     const grantKey = `manual_access/${created.grant.id}`;
     const reservationKey = `${MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION}/${reservationId}`;
     const deletedAt = new Date().toISOString();
@@ -747,7 +866,8 @@ describe('single-use manual access transactions', () => {
       accessSource: 'MANUAL_GRANT'
     });
 
-    await expect(store.verifyManualAccess('article-one', phone, users[0])).resolves.toMatchObject({
+    const reissued = await store.reissueManualAccessActivationToken(grantId);
+    await expect(verifyGrant('article-one', phone, users[0], reissued.activationToken)).resolves.toMatchObject({
       success: true,
       verified: true,
       articleId: 'article-one'
@@ -766,7 +886,7 @@ describe('single-use manual access transactions', () => {
   it('preserves a same-phone, same-article M-Pesa license exactly across manual revoke and delete', async () => {
     const phone = '254788888887';
     const created = await store.grantManualAccess('article-one', phone, 'Writer');
-    await store.verifyManualAccess('article-one', phone, users[1]);
+    await verifyGrant('article-one', phone, users[1]);
     const paidToken = `ink_1788782400010_${'e'.repeat(64)}`;
     const paidLicense = {
       token: paidToken,
@@ -859,7 +979,7 @@ describe('single-use manual access transactions', () => {
     const beforeClaim = snapshotManualAccessDocuments();
     firestoreMock.failNextTransaction();
 
-    await expect(store.verifyManualAccess('article-one', phone, users[0])).rejects.toThrow(
+    await expect(verifyGrant('article-one', phone, users[0])).rejects.toThrow(
       /injected transaction commit failure/i
     );
     expect(snapshotManualAccessDocuments()).toEqual(beforeClaim);
@@ -867,7 +987,7 @@ describe('single-use manual access transactions', () => {
       key => key.startsWith(`${MANUAL_ACCESS_ENTITLEMENT_COLLECTION}/`)
     )).toBe(false);
 
-    await expect(store.verifyManualAccess('article-one', phone, users[0])).resolves.toMatchObject({
+    await expect(verifyGrant('article-one', phone, users[0])).resolves.toMatchObject({
       success: true,
       verified: true
     });

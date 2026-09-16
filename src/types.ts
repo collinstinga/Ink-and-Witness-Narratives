@@ -1026,6 +1026,8 @@ export interface AuthSession {
   name: string;
   createdAt: number;
   expiresAt: number;
+  /** New reader sessions must match the server-side active-session pointer. */
+  activeReaderSession?: true;
 }
 
 export interface AuthResponse {

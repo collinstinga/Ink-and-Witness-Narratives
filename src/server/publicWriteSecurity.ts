@@ -183,7 +183,8 @@ export const publicWriteValidators = {
 
   manualAccess: validateJsonBody({
     articleId: { ...optionalId, required: true },
-    phone: { ...optionalPhone, required: true }
+    phone: { ...optionalPhone, required: true },
+    activationToken: { kind: 'string', required: true, maxLength: 48, pattern: /^ma2_[A-Za-z0-9_-]{43}$/ }
   }, { maxBytes: 2_048 }),
 
   stkPush: validateJsonBody({

@@ -112,6 +112,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const [lockedTab, setLockedTab] = useState<'preview' | 'synopsis'>(activeTab || 'preview');
 
   const [manualPhone, setManualPhone] = useState('');
+  const [manualActivationToken, setManualActivationToken] = useState('');
   const [manualVerifying, setManualVerifying] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
   const [manualSuccess, setManualSuccess] = useState<string | null>(null);
@@ -128,6 +129,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     setManualRequiresAuth(false);
     setManualError(null);
     setManualSuccess(null);
+    setManualActivationToken('');
   }, [article?.id]);
 
   const handleVerifyManualAccess = async (e?: React.FormEvent) => {
@@ -147,6 +149,10 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       setManualError('Enter the phone number the writer authorized for this grant.');
       return;
     }
+    if (!manualActivationToken.trim()) {
+      setManualError('Enter the one-time activation code the writer gave you for this piece.');
+      return;
+    }
 
     setManualVerifying(true);
     setManualError(null);
@@ -155,7 +161,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     setManualRequiresAuth(false);
 
     try {
-      const res = await api.verifyManualAccess(article.id, cleanPhone);
+      const res = await api.verifyManualAccess(article.id, cleanPhone, manualActivationToken.trim());
       if (res.requiresAuth) {
         setManualRequiresAuth(true);
         setManualError(null);
@@ -163,6 +169,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
         return;
       }
       if (res.verified) {
+        setManualActivationToken('');
         setIsLocallyUnlocked(true);
         setManualRequiresAuth(false);
         setManualAlreadyActivated(false);
@@ -171,7 +178,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
           onAccessUnlocked(article.id);
         }
       } else {
-        setManualError(res.message || 'No manual access was found for this phone number. If you believe this is an error, please contact the Support Desk.');
+        setManualError(res.message || 'This activation code is invalid or has already been used. Contact the writer if you need help.');
       }
     } catch (err: any) {
       if (err.alreadyActivated || err.code === 'MANUAL_ACCESS_ALREADY_CLAIMED') {
@@ -185,7 +192,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       } else {
         setManualAlreadyActivated(false);
         setManualRequiresAuth(false);
-        setManualError(err.message || 'No manual access was found for this phone number. If you believe this is an error, please contact the Support Desk.');
+        setManualError(err.message || 'This activation code is invalid or has already been used. Contact the writer if you need help.');
       }
     } finally {
       setManualVerifying(false);
@@ -1368,7 +1375,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                         </div>
 
                         <p className="text-xs text-slate-300 font-sans leading-relaxed">
-                          Use this form only if Jake personally granted complimentary access to your phone number. M-PESA purchases are unlocked from their confirmed payment record; use receipt recovery or the Support Desk for a purchase issue.
+                          Use this form only if Jake gave you a one-time activation code for this piece and phone number. Sign in first; after activation, access belongs to your account. M-PESA purchases unlock from confirmed payment records.
                         </p>
 
                         <form onSubmit={handleVerifyManualAccess} className="space-y-3 pt-2">
@@ -1387,10 +1394,22 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                                 />
                               </div>
 
+                              <input
+                                type="text"
+                                id="manual-access-code-input"
+                                value={manualActivationToken}
+                                onChange={(e) => setManualActivationToken(e.target.value)}
+                                placeholder="One-time activation code"
+                                autoComplete="off"
+                                spellCheck={false}
+                                aria-label="One-time activation code"
+                                className="flex-1 px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-slate-100 text-xs font-mono placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
+                              />
+
                               <button
                                 type="submit"
                                 id="btn-verify-manual-access"
-                                disabled={manualVerifying || !manualPhone.trim()}
+                                disabled={manualVerifying || !manualPhone.trim() || !manualActivationToken.trim()}
                                 className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-mono font-bold tracking-wide transition-all shadow-md shadow-sky-950/70 flex items-center justify-center gap-2 cursor-pointer shrink-0"
                               >
                                 {manualVerifying ? (

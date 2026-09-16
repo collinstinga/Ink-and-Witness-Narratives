@@ -680,7 +680,7 @@ export async function createApp() {
   // reads. Authenticated and token-bearing requests are never shared-cached.
   const cacheablePublicPaths = new Set([
     '/api/health', '/api/author', '/api/articles', '/api/categories',
-    '/api/topics', '/api/homepage'
+    '/api/topics'
   ]);
   app.use((req: Request, res: Response, next: NextFunction) => {
     const hasCredentials = Boolean(
@@ -745,17 +745,21 @@ export async function createApp() {
   });
 
   // Public Homepage Configuration & Curated Sections
-  app.get("/api/homepage", (_req: Request, res: Response) => {
-    const homepage = store.getHomepageConfig();
-    const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
-    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=300');
-    res.json({
-      config: homepage.config,
-      mostSellingPieces: homepage.mostSellingPieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
-      pieceOfTheWeek: homepage.pieceOfTheWeek
-        ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
-        : undefined
-    });
+  app.get("/api/homepage", async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    try {
+      const homepage = await store.getFreshHomepageConfig();
+      const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
+      res.json({
+        config: homepage.config,
+        mostSellingPieces: homepage.mostSellingPieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
+        pieceOfTheWeek: homepage.pieceOfTheWeek
+          ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
+          : undefined
+      });
+    } catch {
+      res.status(503).json({ error: 'Homepage settings are temporarily unavailable.' });
+    }
   });
 
   // Public Custom Categories (Dynamically managed by writer Jake)
@@ -1125,15 +1129,18 @@ export async function createApp() {
   });
 
   // Manual Access / Self-Unlock verification for Readers with One-Time Activation & Account Binding
-  app.post("/api/manual-access/verify", publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/manual-access/verify", (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  }, publicWriteLimiter, verifyAccessLimiter, publicWriteValidators.manualAccess, requireAuth, async (req: Request, res: Response) => {
     try {
-      const { articleId, phone } = req.body;
+      const { articleId, phone, activationToken } = req.body;
       const currentUser = (req as any).user || null;
-      if (!articleId || !phone) {
+      if (!articleId || !phone || !activationToken) {
         return res.status(400).json({ 
           success: false, 
           verified: false, 
-          error: "Piece ID and phone number are required." 
+          error: "Piece, phone number, and activation code are required."
         });
       }
       if (currentUser.role !== 'client') {
@@ -1145,7 +1152,7 @@ export async function createApp() {
         });
       }
 
-      const result = await store.verifyManualAccess(articleId, phone, currentUser);
+      const result = await store.verifyManualAccess(articleId, phone, activationToken, currentUser);
 
       if (result.success && result.verified) {
         return res.json({
@@ -2368,6 +2375,7 @@ export async function createApp() {
 
   // Writer: Grant Manual Access
   app.post("/api/admin/manual-access/grant", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
       const { articleId, phone, notes, grantedBy } = req.body;
       if (!articleId || !phone) {
@@ -2375,6 +2383,21 @@ export async function createApp() {
       }
       const result = await store.grantManualAccess(articleId, phone, grantedBy || 'Jake', notes);
       res.json({ success: true, ...result, message: "Manual access authorization granted successfully." });
+    } catch (err: any) {
+      const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
+      res.status(status).json({
+        success: false,
+        code: err?.code || 'MANUAL_ACCESS_UNAVAILABLE',
+        error: status >= 500 ? 'Manual access is temporarily unavailable.' : err.message
+      });
+    }
+  });
+
+  app.post("/api/admin/manual-access/:grantId/reissue-code", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const result = await store.reissueManualAccessActivationToken(req.params.grantId);
+      res.json({ success: true, ...result });
     } catch (err: any) {
       const status = Number.isInteger(err?.statusCode) ? err.statusCode : 503;
       res.status(status).json({

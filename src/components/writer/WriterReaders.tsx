@@ -40,6 +40,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   const [manualNotes, setManualNotes] = useState<string>('');
   const [manualSubmitting, setManualSubmitting] = useState<boolean>(false);
   const [manualSuccessMsg, setManualSuccessMsg] = useState<string | null>(null);
+  const [issuedActivationToken, setIssuedActivationToken] = useState<string | null>(null);
   const [manualError, setManualError] = useState<string | null>(null);
 
   // Reset / Action state
@@ -106,13 +107,14 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
       setManualSubmitting(true);
       setManualError(null);
       setManualSuccessMsg(null);
-      await api.grantManualAccess({
+      const result = await api.grantManualAccess({
         articleId: manualArticleId,
         phone: manualPhone.trim(),
         notes: manualNotes.trim() || undefined,
         grantedBy: 'Jake'
       });
-      setManualSuccessMsg(`Account-bound access authorization created for phone ${manualPhone.trim()}.`);
+      setIssuedActivationToken(result.activationToken || null);
+      setManualSuccessMsg(`Grant created for ${manualPhone.trim()} and this piece. Give the one-time code below privately to the intended reader.`);
       setManualPhone('');
       setManualNotes('');
       await fetchData();
@@ -124,7 +126,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   };
 
   const handleRevokeManualAccess = async (grantId: string, phone: string) => {
-    if (!window.confirm(`Revoke manual access for ${phone}? Access will stop, and this single-use phone number will remain permanently reserved.`)) {
+    if (!window.confirm(`Revoke manual access for ${phone}? Access will stop, and this phone/piece pair will remain reserved.`)) {
       return;
     }
 
@@ -146,8 +148,27 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
     }
   };
 
+  const handleReissueCode = async (grant: ManualAccessGrant) => {
+    if (!window.confirm(`Issue a new one-time code for ${grant.phone} and ${grant.articleTitle || grant.articleId}? Any previous unused code will stop working.`)) return;
+    try {
+      setActionLoadingId(grant.id);
+      const result = await api.reissueManualAccessActivationToken(grant.id);
+      setManualArticleId(grant.articleId);
+      setManualPhone(grant.phone);
+      setIssuedActivationToken(result.activationToken);
+      setManualSuccessMsg('New code issued. Copy it now and share it privately with the intended reader.');
+      setManualError(null);
+      setShowManualGrantModal(true);
+      await fetchData();
+    } catch (err: any) {
+      setBannerMessage({ type: 'error', text: err.message || 'Could not issue a new code.' });
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
   const handleDeleteManualAccess = async (grantId: string, phone: string) => {
-    if (!window.confirm(`PERMANENT DELETE: Remove the manual access grant for ${phone}?\n\nThe grant and any account-bound entitlement will be removed, but this phone number will remain permanently reserved and cannot be authorized again. Legitimate M-Pesa purchases are not affected.`)) {
+    if (!window.confirm(`PERMANENT DELETE: Remove the manual access grant for ${phone}?\n\nThe grant and any account-bound entitlement will be removed. This phone/piece pair remains reserved, but the phone can be used for other pieces. Legitimate M-Pesa purchases are not affected.`)) {
       return;
     }
 
@@ -220,7 +241,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
             Reader Access &amp; Licenses
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 font-sans mt-1">
-            Manage one-time phone authorizations, monitor permanent reader bindings, revoke access, and inspect legacy licenses.
+            Manage piece-specific one-time codes, account-bound access, revocations, and legacy licenses.
           </p>
         </div>
 
@@ -230,6 +251,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
               setActiveTab('manual-access');
               setShowManualGrantModal(true);
               setManualSuccessMsg(null);
+              setIssuedActivationToken(null);
               setManualError(null);
               if (!manualArticleId && articles.length > 0) {
                 setManualArticleId(articles[0].id);
@@ -239,7 +261,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-medium text-xs flex items-center gap-2 shadow-lg shadow-sky-950/50 cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Authorize One-Time Phone</span>
+            <span>Grant Piece Access</span>
           </button>
 
           <button
@@ -342,7 +364,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
             <div className="space-y-1">
               <p className="font-semibold text-sky-300">Single-Use Anti-Sharing Policy Enforced</p>
               <p className="text-slate-300 leading-relaxed">
-                A normalized phone number can be authorized only once. The reader must sign in before the first claim, which permanently binds the grant to that account. Revoke or delete can stop access, but the phone number remains reserved and cannot be reset, transferred, or reused.
+                A phone number may receive grants for different pieces, but only one grant per phone and piece. Each grant issues a code shown once; the signed-in reader activates it once, then access is bound to that account and piece. A used code cannot be transferred or replayed.
               </p>
             </div>
           </div>
@@ -356,7 +378,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                   <span>Authorize Nominated Reader Phone</span>
                 </h3>
                 <button
-                  onClick={() => setShowManualGrantModal(false)}
+                  onClick={() => { setShowManualGrantModal(false); setIssuedActivationToken(null); }}
                   className="text-slate-400 hover:text-white text-xs font-mono cursor-pointer"
                 >
                   Close
@@ -377,7 +399,19 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                 </div>
               )}
 
-              <form onSubmit={handleCreateManualGrant} className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans">
+              {issuedActivationToken && (
+                <div className="p-3 rounded-lg bg-amber-950/50 border border-amber-700 text-amber-200 text-xs space-y-2">
+                  <p>This activation code is shown only now. Copy it and share it privately with the intended reader; it cannot be retrieved later.</p>
+                  <div className="flex items-center gap-2">
+                    <code className="break-all select-all">{issuedActivationToken}</code>
+                    <button type="button" onClick={() => handleCopy(issuedActivationToken)} className="shrink-0 px-2 py-1 rounded bg-amber-800 text-white" aria-label="Copy one-time activation code">
+                      {copiedToken === issuedActivationToken ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!issuedActivationToken && <form onSubmit={handleCreateManualGrant} className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans">
                 <div>
                   <label className="block text-slate-300 font-mono text-[11px] mb-1">Target Monograph</label>
                   <select
@@ -385,7 +419,6 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                     onChange={(e) => setManualArticleId(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-sky-500"
                   >
-                    <option value="all">★ All Access Pass (Archive-Wide Access)</option>
                     {articles.map((art) => (
                       <option key={art.id} value={art.id}>
                         {art.title} ({art.priceKes ? `KES ${art.priceKes}` : 'Free'})
@@ -430,10 +463,10 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                     disabled={manualSubmitting}
                     className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium font-sans flex items-center gap-2 cursor-pointer shadow-md"
                   >
-                    {manualSubmitting ? 'Authorizing...' : 'Grant & Whitelist Phone'}
+                    {manualSubmitting ? 'Authorizing...' : 'Create One-Time Code'}
                   </button>
                 </div>
-              </form>
+              </form>}
             </div>
           )}
 
@@ -573,6 +606,18 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
                       {/* Actions */}
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          {grant.status === 'active' && !grant.activated && (
+                            <button
+                              type="button"
+                              onClick={() => handleReissueCode(grant)}
+                              disabled={actionLoadingId === grant.id}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 disabled:opacity-50"
+                              title="Issue or replace one-time activation code"
+                              aria-label={`Issue activation code for ${grant.articleTitle || grant.articleId}`}
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           {/* Revoke Access Button */}
                           {grant.status !== 'revoked' && (
                             <button

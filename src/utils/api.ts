@@ -729,7 +729,7 @@ export const api = {
     return res.json();
   },
 
-  async verifyManualAccess(articleId: string, phone: string): Promise<{ 
+  async verifyManualAccess(articleId: string, phone: string, activationToken: string): Promise<{
     success: boolean; 
     verified: boolean; 
     activated?: boolean; 
@@ -747,11 +747,11 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ articleId, phone })
+      body: JSON.stringify({ articleId, phone, activationToken })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const err: any = new Error(data.error || data.message || 'No manual access found for this phone number.');
+      const err: any = new Error(data.error || data.message || 'This activation code is invalid or has already been used.');
       err.code = data.code;
       err.alreadyActivated = Boolean(
         data.alreadyActivated || data.code === 'MANUAL_ACCESS_ALREADY_CLAIMED'
@@ -1220,7 +1220,7 @@ export const api = {
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
   }> {
-    const res = await fetch('/api/homepage');
+    const res = await fetch('/api/homepage', { cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to load homepage data');
     return res.json();
   },
@@ -1446,6 +1446,19 @@ export const api = {
       throw new Error(err.error || 'Failed to grant manual access');
     }
     return res.json();
+  },
+
+  async reissueManualAccessActivationToken(grantId: string): Promise<{ success: boolean; activationToken: string }> {
+    const activeToken = getWriterToken();
+    const res = await fetch(`/api/admin/manual-access/${encodeURIComponent(grantId)}/reissue-code`, {
+      method: 'POST',
+      headers: activeToken ? { 'x-admin-token': activeToken, Authorization: `Bearer ${activeToken}` } : {},
+      credentials: 'include',
+      cache: 'no-store'
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not issue a new activation code.');
+    return data;
   },
 
   async revokeManualAccess(grantId: string) {

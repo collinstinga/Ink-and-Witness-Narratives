@@ -55,6 +55,25 @@ const dbMocks = vi.hoisted(() => {
         })
       }))
     })),
+    runTransaction: vi.fn(async (callback: (transaction: {
+      get: (ref: MockDocumentRef) => Promise<{ exists: boolean; data: () => unknown }>;
+      create: (ref: MockDocumentRef, data: unknown) => void;
+      set: (ref: MockDocumentRef, data: unknown) => void;
+      delete: (ref: MockDocumentRef) => void;
+    }) => Promise<unknown>) => {
+      const operations: Array<() => void> = [];
+      const result = await callback({
+        get: async ref => {
+          const value = documents.get(keyFor(ref.collectionName, ref.id));
+          return { exists: value !== undefined, data: () => structuredClone(value) };
+        },
+        create: (ref, data) => operations.push(() => documents.set(keyFor(ref.collectionName, ref.id), structuredClone(data))),
+        set: (ref, data) => operations.push(() => documents.set(keyFor(ref.collectionName, ref.id), structuredClone(data))),
+        delete: ref => operations.push(() => documents.delete(keyFor(ref.collectionName, ref.id)))
+      });
+      for (const operation of operations) operation();
+      return result;
+    }),
     batch: vi.fn(() => {
       const operations: Array<() => void> = [];
       return {
@@ -138,7 +157,7 @@ describe('lazy hashed primary sessions', () => {
 
   beforeEach(() => {
     for (const key of Array.from(dbMocks.documents.keys())) {
-      if (key.startsWith('sessions/')) dbMocks.documents.delete(key);
+      if (key.startsWith('sessions/') || key.startsWith('active_reader_sessions/')) dbMocks.documents.delete(key);
     }
     dbMocks.getFirestoreDoc.mockClear();
     dbMocks.setFirestoreDoc.mockClear();
@@ -213,9 +232,13 @@ describe('lazy hashed primary sessions', () => {
     });
     const documentId = getAuthSessionDocumentId(token)!;
 
-    expect(dbMocks.setFirestoreDoc).toHaveBeenCalledTimes(1);
-    expect(dbMocks.setFirestoreDoc).toHaveBeenCalledWith('sessions', documentId, expect.any(Object));
+    expect(dbMocks.setFirestoreDoc).not.toHaveBeenCalled();
+    expect(dbMocks.db.runTransaction).toHaveBeenCalled();
     const saved = dbMocks.documents.get(dbMocks.keyFor('sessions', documentId));
+    expect(saved).toMatchObject({ activeReaderSession: true });
+    expect(Array.from(dbMocks.documents.entries()).some(([key, value]) =>
+      key.startsWith('active_reader_sessions/') && value.sessionDocumentId === documentId
+    )).toBe(true);
     expect(saved).not.toHaveProperty('sessionId');
     expect(JSON.stringify(saved)).not.toContain(token);
     expect(dbMocks.documents.has(dbMocks.keyFor('sessions', token))).toBe(false);

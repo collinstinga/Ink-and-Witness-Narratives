@@ -58,27 +58,39 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
   // Fetch homepage curation from backend
   useEffect(() => {
+    let requestSequence = 0;
+    let disposed = false;
     const fetchHomepage = async () => {
+      const requestId = ++requestSequence;
       try {
         setLoadingConfig(true);
         const data = await api.getHomepageData();
-        if (data) {
+        if (!disposed && requestId === requestSequence && data) {
           setHomepageConfig(data.config);
-          if (data.mostSellingPieces && data.mostSellingPieces.length > 0) {
-            setMostSellingPieces(data.mostSellingPieces);
-          }
-          if (data.pieceOfTheWeek) {
-            setPieceOfTheWeek(data.pieceOfTheWeek);
-          }
+          setMostSellingPieces(data.mostSellingPieces || []);
+          setPieceOfTheWeek(data.pieceOfTheWeek || null);
         }
       } catch (err) {
-        console.warn('Could not fetch curated homepage config, using default resolution:', err);
+        if (!disposed && requestId === requestSequence) {
+          console.warn('Could not fetch curated homepage config, using default resolution:', err);
+        }
       } finally {
-        setLoadingConfig(false);
+        if (!disposed && requestId === requestSequence) setLoadingConfig(false);
       }
     };
 
-    fetchHomepage();
+    void fetchHomepage();
+    const refreshAfterSave = () => { void fetchHomepage(); };
+    const refreshOtherTab = (event: StorageEvent) => {
+      if (event.key === 'ink-homepage-version') void fetchHomepage();
+    };
+    window.addEventListener('ink-homepage-updated', refreshAfterSave);
+    window.addEventListener('storage', refreshOtherTab);
+    return () => {
+      disposed = true;
+      window.removeEventListener('ink-homepage-updated', refreshAfterSave);
+      window.removeEventListener('storage', refreshOtherTab);
+    };
   }, [articles]);
 
   // Published articles list

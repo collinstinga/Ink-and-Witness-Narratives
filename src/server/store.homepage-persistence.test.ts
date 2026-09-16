@@ -357,4 +357,44 @@ describe('homepage configuration persistence', () => {
     expect(afterRemove?.updatedAt).not.toBe(afterUpload?.updatedAt);
     expect(firestore.documents.get(legacyKey)).toEqual(afterRemove);
   }, 60_000);
+
+  it('uses the persisted public curation even on a warm instance and resolves a newly published pick', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const canonicalKey = firestore.keyFor('site_configs', 'homepage');
+    firestore.documents.set(canonicalKey, {
+      ...firestore.documents.get(canonicalKey),
+      heroHeadline: 'Published headline',
+      pieceOfTheWeekId: 'new-piece',
+      updatedAt: '2026-09-01T00:00:00.000Z'
+    });
+    firestore.documents.set(firestore.keyFor('articles', 'new-piece'), {
+      id: 'new-piece',
+      slug: 'new-piece',
+      title: 'Freshly published piece',
+      status: 'published',
+      createdAt: '2026-09-16T00:00:00.000Z'
+    });
+
+    const publicHomepage = await store.getFreshHomepageConfig();
+    expect(publicHomepage.config.heroHeadline).toBe('Published headline');
+    expect(publicHomepage.pieceOfTheWeek?.id).toBe('new-piece');
+    expect(firestore.getFirestoreDoc).toHaveBeenCalledWith('site_configs', 'homepage');
+    expect(firestore.getFirestoreDoc).toHaveBeenCalledWith('articles', 'new-piece');
+  }, 60_000);
+
+  it('does not resurrect a removed background from a warm instance or author fallback', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    expect(store.getHomepageConfig().config.welcomeBackground.imageUrl).toBe('/initial-background.jpg');
+    const canonicalKey = firestore.keyFor('site_configs', 'homepage');
+    firestore.documents.set(canonicalKey, {
+      ...firestore.documents.get(canonicalKey),
+      welcomeBackground: { fit: 'cover', savedPermanently: false },
+      updatedAt: '2026-09-16T19:00:00.000Z'
+    });
+    const fresh = await store.getFreshHomepageConfig();
+    expect(fresh.config.welcomeBackground.imageUrl).toBeUndefined();
+    expect(fresh.config.welcomeBackground.savedPermanently).toBe(false);
+  }, 60_000);
 });

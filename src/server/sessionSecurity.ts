@@ -93,6 +93,8 @@ function normalizeSessionFields(record: Record<string, unknown>): AuthSession | 
 
   if (!userId || !email || !name || !isUserRole(record.role)) return null;
   if (!Number.isFinite(createdAt) || !Number.isFinite(expiresAt) || expiresAt <= createdAt) return null;
+  if (record.activeReaderSession !== undefined && record.activeReaderSession !== true) return null;
+  if (record.activeReaderSession === true && record.role !== 'client') return null;
 
   return {
     storageVersion: AUTH_SESSION_STORAGE_VERSION,
@@ -101,7 +103,8 @@ function normalizeSessionFields(record: Record<string, unknown>): AuthSession | 
     email,
     name,
     createdAt,
-    expiresAt
+    expiresAt,
+    ...(record.activeReaderSession === true ? { activeReaderSession: true as const } : {})
   };
 }
 

@@ -6,13 +6,22 @@ import {
   MANUAL_ACCESS_ENTITLEMENT_ID_PATTERN,
   MANUAL_ACCESS_ENTITLEMENT_VERSION,
   MANUAL_ACCESS_PHONE_RESERVATION_ID_PATTERN,
+  MANUAL_ACCESS_PHONE_PIECE_RESERVATION_ID_PATTERN,
+  MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION,
+  MANUAL_ACCESS_ACTIVATION_TOKEN_PATTERN,
   ManualAccessError,
+  createManualAccessActivationToken,
   createManualAccessPhoneAlreadyUsedError,
+  getManualAccessActivationTokenDigest,
   getManualAccessEntitlementId,
+  getManualAccessPhonePieceReservationId,
   getManualAccessPhoneReservationId,
+  isManualAccessActivationToken,
   isManualAccessEntitlementId,
   isManualAccessBearerLicense,
+  isManualAccessPhonePieceReservationId,
   isManualAccessPhoneReservationId,
+  isMatchingManualAccessActivationToken,
   normalizeManualAccessEntitlement,
   normalizeManualAccessPhone
 } from './manualAccessSecurity.js';
@@ -102,6 +111,118 @@ describe('manual-access phone reservation identifiers', () => {
     expect(isManualAccessPhoneReservationId(`v1_${'A'.repeat(64)}`)).toBe(false);
     expect(isManualAccessPhoneReservationId(`v2_${'a'.repeat(64)}`)).toBe(false);
     expect(isManualAccessPhoneReservationId('v1_short')).toBe(false);
+  });
+});
+
+describe('piece-scoped manual-access reservations', () => {
+  it('uses a v2 reservation document for each phone and canonical piece', () => {
+    const first = getManualAccessPhonePieceReservationId(
+      '0712 345 678', ARTICLE_ID, TEST_SECRET
+    );
+    const equivalent = getManualAccessPhonePieceReservationId(
+      NORMALIZED_KENYAN_PHONE, ARTICLE_ID, TEST_SECRET
+    );
+    const otherPiece = getManualAccessPhonePieceReservationId(
+      NORMALIZED_KENYAN_PHONE, 'a-different-piece', TEST_SECRET
+    );
+
+    expect(MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION).toBe(2);
+    expect(first).toBe(equivalent);
+    expect(first).not.toBe(otherPiece);
+    expect(first).toMatch(MANUAL_ACCESS_PHONE_PIECE_RESERVATION_ID_PATTERN);
+    expect(isManualAccessPhonePieceReservationId(first)).toBe(true);
+    expect(isManualAccessPhonePieceReservationId(`v1_${'a'.repeat(64)}`)).toBe(false);
+    expect(first).not.toContain(NORMALIZED_KENYAN_PHONE);
+    expect(first).not.toContain(ARTICLE_ID);
+  });
+
+  it('separates the v2 HMAC domain and fails closed on invalid inputs', () => {
+    const id = getManualAccessPhonePieceReservationId(
+      NORMALIZED_KENYAN_PHONE, ARTICLE_ID, TEST_SECRET
+    );
+    expect(id).not.toBe(getManualAccessPhoneReservationId(NORMALIZED_KENYAN_PHONE, TEST_SECRET));
+    expect(id).not.toBe(getManualAccessPhonePieceReservationId(
+      NORMALIZED_KENYAN_PHONE, ARTICLE_ID, ALTERNATE_TEST_SECRET
+    ));
+    expect(() => getManualAccessPhonePieceReservationId('', ARTICLE_ID, TEST_SECRET))
+      .toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_INVALID_PHONE' }));
+    expect(() => getManualAccessPhonePieceReservationId(
+      NORMALIZED_KENYAN_PHONE, '', TEST_SECRET
+    )).toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_INVALID_ARTICLE' }));
+    expect(() => getManualAccessPhonePieceReservationId(
+      NORMALIZED_KENYAN_PHONE, ARTICLE_ID, ''
+    )).toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_CONFIGURATION_UNAVAILABLE' }));
+  });
+});
+
+describe('piece-specific one-time activation token primitives', () => {
+  it('creates distinct, cryptographically random, canonical 32-byte tokens', () => {
+    const first = createManualAccessActivationToken(ARTICLE_ID, 'grant_1', TEST_SECRET);
+    const second = createManualAccessActivationToken(ARTICLE_ID, 'grant_1', TEST_SECRET);
+
+    expect(first.token).toMatch(MANUAL_ACCESS_ACTIVATION_TOKEN_PATTERN);
+    expect(isManualAccessActivationToken(first.token)).toBe(true);
+    expect(Buffer.from(first.token.slice(4), 'base64url')).toHaveLength(32);
+    expect(first.token).not.toBe(second.token);
+    expect(first.tokenDigest).not.toBe(second.tokenDigest);
+    expect(first.tokenDigest).not.toContain(first.token);
+  });
+
+  it('binds a token digest to both its grant and its piece', () => {
+    const { token, tokenDigest } = createManualAccessActivationToken(
+      ARTICLE_ID, 'grant_1', TEST_SECRET
+    );
+    expect(tokenDigest).toBe(getManualAccessActivationTokenDigest(
+      token, ARTICLE_ID, 'grant_1', TEST_SECRET
+    ));
+    expect(isMatchingManualAccessActivationToken(
+      token, ARTICLE_ID, 'grant_1', tokenDigest, TEST_SECRET
+    )).toBe(true);
+    expect(isMatchingManualAccessActivationToken(
+      token, 'a-different-piece', 'grant_1', tokenDigest, TEST_SECRET
+    )).toBe(false);
+    expect(isMatchingManualAccessActivationToken(
+      token, ARTICLE_ID, 'grant_2', tokenDigest, TEST_SECRET
+    )).toBe(false);
+    expect(isMatchingManualAccessActivationToken(
+      token, ARTICLE_ID, 'grant_1', tokenDigest, ALTERNATE_TEST_SECRET
+    )).toBe(false);
+  });
+
+  it('rejects malformed and noncanonical tokens without deriving a digest', () => {
+    const { token, tokenDigest } = createManualAccessActivationToken(
+      ARTICLE_ID, 'grant_1', TEST_SECRET
+    );
+    const malformed = [
+      token.slice(0, -1),
+      token.replace('ma2_', 'ma1_'),
+      `${token}=`,
+      `ma2_${'A'.repeat(42)}B`,
+      '',
+      null
+    ];
+    for (const candidate of malformed) {
+      expect(isManualAccessActivationToken(candidate)).toBe(false);
+      expect(isMatchingManualAccessActivationToken(
+        candidate, ARTICLE_ID, 'grant_1', tokenDigest, TEST_SECRET
+      )).toBe(false);
+      expect(() => getManualAccessActivationTokenDigest(
+        candidate, ARTICLE_ID, 'grant_1', TEST_SECRET
+      )).toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_INVALID_ACTIVATION_TOKEN' }));
+    }
+    expect(isMatchingManualAccessActivationToken(
+      token, ARTICLE_ID, 'grant_1', 'not-a-digest', TEST_SECRET
+    )).toBe(false);
+  });
+
+  it('requires a valid article, grant, and stable server secret', () => {
+    const { token } = createManualAccessActivationToken(ARTICLE_ID, 'grant_1', TEST_SECRET);
+    expect(() => getManualAccessActivationTokenDigest(token, '', 'grant_1', TEST_SECRET))
+      .toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_INVALID_ARTICLE' }));
+    expect(() => getManualAccessActivationTokenDigest(token, ARTICLE_ID, '', TEST_SECRET))
+      .toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_INVALID_GRANT' }));
+    expect(() => getManualAccessActivationTokenDigest(token, ARTICLE_ID, 'grant_1', ''))
+      .toThrowError(expect.objectContaining({ code: 'MANUAL_ACCESS_CONFIGURATION_UNAVAILABLE' }));
   });
 });
 

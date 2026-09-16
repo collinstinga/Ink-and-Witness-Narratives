@@ -13,13 +13,20 @@ import {
   MANUAL_ACCESS_ENTITLEMENT_VERSION,
   MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION,
   MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+  MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION,
   ManualAccessError,
   type ManualAccessEntitlement,
   type ManualAccessPhoneReservation,
+  type ManualAccessPhonePieceReservation,
+  createManualAccessActivationToken,
   createManualAccessPhoneAlreadyUsedError,
   getManualAccessEntitlementId,
+  getManualAccessPhonePieceReservationId,
   getManualAccessPhoneReservationId,
   isManualAccessEntitlementId,
+  isManualAccessActivationToken,
+  isMatchingManualAccessActivationToken,
+  isManualAccessPhonePieceReservationId,
   isManualAccessBearerLicense,
   normalizeManualAccessEntitlement,
   normalizeManualAccessPhone
@@ -182,6 +189,12 @@ let cachedLikes: PieceLike[] = [];
 let cachedComments: PieceComment[] = [];
 
 const AUTH_SESSION_CACHE_TTL_MS = 60 * 1000;
+const READER_SESSION_CACHE_TTL_MS = 15 * 1000;
+const ACTIVE_READER_SESSION_COLLECTION = 'active_reader_sessions';
+
+function activeReaderSessionPointerId(userId: string): string {
+  return crypto.createHash('sha256').update(`active-reader-session:v1:${userId}`, 'utf8').digest('hex');
+}
 const MISSING_AUTH_SESSION_CACHE_TTL_MS = 30 * 1000;
 const MAX_MISSING_AUTH_SESSION_CACHE_ENTRIES = 1000;
 const READER_LICENSE_CACHE_TTL_MS = 60 * 1000;
@@ -759,7 +772,7 @@ function toManualAccessAdminView(grant: ManualAccessGrant): ManualAccessGrant | 
 
 function getManualAccessBoundUserId(
   grant: ManualAccessGrant,
-  reservation?: Partial<ManualAccessPhoneReservation> | null
+  reservation?: Partial<ManualAccessPhoneReservation | ManualAccessPhonePieceReservation> | null
 ): string | undefined {
   const userIds = new Set(
     [reservation?.boundUserId, grant.boundUserId, grant.claimedUserId]
@@ -779,17 +792,19 @@ function getManualAccessLegacyPhoneValues(normalizedPhone: string): string[] {
 }
 
 function validateManualAccessReservation(
-  reservation: Partial<ManualAccessPhoneReservation>,
+  reservation: Partial<ManualAccessPhoneReservation | ManualAccessPhonePieceReservation>,
   reservationId: string,
   grant: ManualAccessGrant,
   options: {
     allowTerminalRepair?: boolean;
     acceptedArticleIds?: string[];
   } = {}
-): ManualAccessPhoneReservation {
+): ManualAccessPhoneReservation | ManualAccessPhonePieceReservation {
   const acceptedArticleIds = new Set(options.acceptedArticleIds || [grant.articleId]);
   if (
-    reservation.storageVersion !== MANUAL_ACCESS_PHONE_RESERVATION_VERSION
+    reservation.storageVersion !== (isManualAccessPhonePieceReservationId(reservationId)
+      ? MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION
+      : MANUAL_ACCESS_PHONE_RESERVATION_VERSION)
     || reservation.grantId !== grant.id
     || typeof reservation.articleId !== 'string'
     || !acceptedArticleIds.has(reservation.articleId)
@@ -806,7 +821,7 @@ function validateManualAccessReservation(
 
   const boundUserId = getManualAccessBoundUserId(grant, reservation);
   if (options.allowTerminalRepair) {
-    return reservation as ManualAccessPhoneReservation;
+    return reservation as ManualAccessPhoneReservation | ManualAccessPhonePieceReservation;
   }
   if (reservation.state === 'unclaimed') {
     if (boundUserId || grant.status !== 'active' || grant.activated || grant.claimedAt) {
@@ -824,7 +839,7 @@ function validateManualAccessReservation(
     throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_STATE_CONFLICT');
   }
 
-  return reservation as ManualAccessPhoneReservation;
+  return reservation as ManualAccessPhoneReservation | ManualAccessPhonePieceReservation;
 }
 
 function validateManualAccessEntitlementMapping(
@@ -889,8 +904,10 @@ async function transitionManualAccessGrant(
       ...(article?.title ? { articleTitle: article.title } : {})
     };
 
-    const reservationId = getManualAccessPhoneReservationId(normalizedPhone);
-    if (grant.phoneReservationId && grant.phoneReservationId !== reservationId) {
+    const legacyReservationId = getManualAccessPhoneReservationId(normalizedPhone);
+    const pieceReservationId = getManualAccessPhonePieceReservationId(normalizedPhone, canonicalArticleId);
+    const reservationId = grant.phoneReservationId || legacyReservationId;
+    if (reservationId !== legacyReservationId && reservationId !== pieceReservationId) {
       throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
     }
     const reservationRef = db
@@ -1069,8 +1086,10 @@ async function transitionManualAccessGrant(
     const terminalAt = finalState === 'deleted'
       ? cleanedGrant.deletedAt as string
       : cleanedGrant.revokedAt as string;
-    const terminalReservation: ManualAccessPhoneReservation = {
-      storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+    const terminalReservation: ManualAccessPhoneReservation | ManualAccessPhonePieceReservation = {
+      storageVersion: isManualAccessPhonePieceReservationId(reservationId)
+        ? MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION
+        : MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
       grantId: grant.id,
       articleId: canonicalArticleId,
       state: finalState,
@@ -3334,7 +3353,7 @@ export const store = {
     phone: string,
     grantedBy = 'Jake',
     notes = ''
-  ): Promise<{ success: true; grant: ManualAccessGrant }> {
+  ): Promise<{ success: true; grant: ManualAccessGrant; activationToken: string }> {
     const normalizedPhone = this.normalizePhone(phone);
     if (!normalizedPhone) {
       throw new ManualAccessError(
@@ -3343,7 +3362,7 @@ export const store = {
         400
       );
     }
-    if (!articleId) {
+    if (!articleId || articleId === 'all') {
       throw new ManualAccessError(
         'MANUAL_ACCESS_INVALID_PIECE',
         'A valid piece is required to grant manual access.',
@@ -3352,17 +3371,19 @@ export const store = {
     }
 
     const article = cachedArticles.find(a => a.id === articleId || a.slug === articleId);
-    if (!article && articleId !== 'all') {
+    if (!article) {
       throw new ManualAccessError(
         'MANUAL_ACCESS_INVALID_PIECE',
         'The selected piece was not found.',
         400
       );
     }
-    const resolvedArticleId = article ? article.id : articleId;
-    const resolvedArticleTitle = article ? article.title : (articleId === 'all' ? 'All Archive Access' : 'Monograph');
-    const phoneReservationId = getManualAccessPhoneReservationId(normalizedPhone);
+    const resolvedArticleId = article.id;
+    const resolvedArticleTitle = article.title;
+    const phoneReservationId = getManualAccessPhonePieceReservationId(normalizedPhone, resolvedArticleId);
+    const legacyReservationId = getManualAccessPhoneReservationId(normalizedPhone);
     const grantId = `grant_${crypto.randomBytes(16).toString('hex')}`;
+    const { token: activationToken, tokenDigest } = createManualAccessActivationToken(resolvedArticleId, grantId);
     const now = new Date().toISOString();
     const legacyPhoneValues = getManualAccessLegacyPhoneValues(normalizedPhone);
 
@@ -3381,11 +3402,12 @@ export const store = {
       notes: notes ? notes.trim() : ''
     };
 
-    const reservation: ManualAccessPhoneReservation = {
-      storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+    const reservation: ManualAccessPhonePieceReservation = {
+      storageVersion: MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION,
       grantId,
       articleId: resolvedArticleId,
       state: 'unclaimed',
+      activationTokenDigest: tokenDigest,
       createdAt: now,
       updatedAt: now
     };
@@ -3394,17 +3416,32 @@ export const store = {
       const reservations = getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION);
       const manualAccess = getDb().collection('manual_access');
       const reservationRef = reservations.doc(phoneReservationId);
-      const reservationSnapshot = await transaction.get(reservationRef);
+      const [reservationSnapshot, legacyReservationSnapshot] = await Promise.all([
+        transaction.get(reservationRef),
+        transaction.get(reservations.doc(legacyReservationId))
+      ]);
       if (reservationSnapshot.exists) {
         throw createManualAccessPhoneAlreadyUsedError();
+      }
+      if (legacyReservationSnapshot.exists) {
+        const legacyReservation = legacyReservationSnapshot.data() as Partial<ManualAccessPhoneReservation>;
+        if (legacyReservation.articleId === resolvedArticleId || legacyReservation.articleId === article.slug) {
+          throw createManualAccessPhoneAlreadyUsedError();
+        }
       }
 
       // Legacy grants predate the reservation collection. The query remains inside
       // the transaction so a concurrent grant cannot pass the uniqueness check.
       const legacyGrantSnapshot = await transaction.get(
-        manualAccess.where('phone', 'in', legacyPhoneValues).limit(2)
+        manualAccess.where('phone', 'in', legacyPhoneValues).limit(101)
       );
-      if (!legacyGrantSnapshot.empty) {
+      if (legacyGrantSnapshot.size >= 101) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LOOKUP_LIMIT');
+      }
+      if (legacyGrantSnapshot.docs.some(document => {
+        const legacyGrant = document.data() as Partial<ManualAccessGrant>;
+        return legacyGrant.articleId === resolvedArticleId || legacyGrant.articleId === article.slug;
+      })) {
         throw createManualAccessPhoneAlreadyUsedError();
       }
 
@@ -3417,13 +3454,75 @@ export const store = {
 
     console.log(`[ManualAccess] Created one-time grant ${grantId}.`);
     const { phoneReservationId: _reservationId, ...safeGrant } = grant;
-    return { success: true, grant: safeGrant as ManualAccessGrant };
+    return { success: true, grant: safeGrant as ManualAccessGrant, activationToken };
   },
 
   async revokeManualAccess(grantId: string): Promise<boolean> {
     const revoked = await transitionManualAccessGrant(grantId, 'revoked');
     if (revoked) console.log(`[ManualAccess] Revoked one-time grant ${grantId}.`);
     return revoked;
+  },
+
+  async reissueManualAccessActivationToken(grantId: string): Promise<{ activationToken: string }> {
+    if (typeof grantId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(grantId)) {
+      throw new ManualAccessError('MANUAL_ACCESS_INVALID_GRANT', 'A valid grant is required.', 400);
+    }
+    const db = getDb();
+    const grantRef = db.collection('manual_access').doc(grantId);
+    return db.runTransaction(async transaction => {
+      const grantSnapshot = await transaction.get(grantRef);
+      if (!grantSnapshot.exists) {
+        throw new ManualAccessError('MANUAL_ACCESS_NOT_FOUND', 'Grant not found.', 404);
+      }
+      const grant = grantSnapshot.data() as ManualAccessGrant;
+      if (grant.id !== grantId || grant.status !== 'active' || grant.activated || grant.claimedAt || grant.boundUserId) {
+        throw new ManualAccessError('MANUAL_ACCESS_NOT_PENDING', 'Only an unclaimed active grant can receive a new code.', 409);
+      }
+      const normalizedPhone = normalizeManualAccessPhone(grant.phone);
+      const article = cachedArticles.find(candidate => candidate.id === grant.articleId || candidate.slug === grant.articleId);
+      const canonicalArticleId = article?.id || grant.articleId;
+      if (!normalizedPhone || !canonicalArticleId || canonicalArticleId === 'all') {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_GRANT_CORRUPT');
+      }
+      const v1Id = getManualAccessPhoneReservationId(normalizedPhone);
+      const v2Id = getManualAccessPhonePieceReservationId(normalizedPhone, canonicalArticleId);
+      const reservationId = grant.phoneReservationId || v2Id;
+      if (reservationId !== v1Id && reservationId !== v2Id) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
+      }
+      const reservationRef = db.collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION).doc(reservationId);
+      const snapshot = await transaction.get(reservationRef);
+      if (snapshot.exists) {
+        const stored = snapshot.data() as Partial<ManualAccessPhoneReservation | ManualAccessPhonePieceReservation>;
+        if (stored.grantId !== grantId || stored.state !== 'unclaimed') {
+          throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
+        }
+      }
+      const { token, tokenDigest } = createManualAccessActivationToken(canonicalArticleId, grantId);
+      const now = new Date().toISOString();
+      const reservation = {
+        ...(snapshot.exists ? snapshot.data() : {}),
+        storageVersion: reservationId === v2Id
+          ? MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION
+          : MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+        grantId,
+        articleId: canonicalArticleId,
+        state: 'unclaimed',
+        createdAt: (snapshot.exists ? snapshot.data()?.createdAt : null) || grant.grantedAt,
+        updatedAt: now,
+        activationTokenDigest: tokenDigest
+      };
+      if (snapshot.exists) transaction.set(reservationRef, sanitizeForFirestore(reservation));
+      else transaction.create(reservationRef, sanitizeForFirestore(reservation));
+      if (!grant.phoneReservationId || grant.articleId !== canonicalArticleId) {
+        transaction.set(grantRef, sanitizeForFirestore({
+          ...grant,
+          articleId: canonicalArticleId,
+          phoneReservationId: reservationId
+        }));
+      }
+      return { activationToken: token };
+    });
   },
 
   async deleteManualAccess(grantId: string): Promise<boolean> {
@@ -3460,15 +3559,16 @@ export const store = {
 
     return {
       success: false,
-      code: 'MANUAL_ACCESS_PHONE_SINGLE_USE',
-      error: 'This phone number is permanently reserved and cannot be reset or reused.',
-      message: 'Manual-access phone numbers are single-use. Revoke or delete the grant to stop access; authorize a different number for another reader.'
+      code: 'MANUAL_ACCESS_PHONE_PIECE_SINGLE_USE',
+      error: 'This phone number and piece pair is already reserved and cannot be reset.',
+      message: 'Revoke or delete this grant to stop access. The same phone number can be granted a different piece.'
     };
   },
 
   async verifyManualAccess(
     articleId: string,
     phone: string,
+    activationToken: string,
     currentUser?: { id: string; email: string; name?: string } | null
   ): Promise<{
     success: boolean;
@@ -3483,16 +3583,16 @@ export const store = {
     error?: string;
     message: string;
   }> {
-    if (!articleId || !phone) {
+    if (!articleId || !phone || !isManualAccessActivationToken(activationToken)) {
       return {
         success: false,
         verified: false,
-        message: "Article ID and phone number are required for verification."
+        code: 'MANUAL_ACCESS_INVALID_ACTIVATION_TOKEN',
+        message: 'A valid piece-specific activation code is required.'
       };
     }
 
-    // A phone number is only a one-time grant locator. It is never sufficient
-    // authorization by itself and must not reveal whether a grant exists.
+    // Phone identifies the scoped reservation but never authorizes a claim.
     if (!currentUser?.id) {
       return {
         success: false,
@@ -3524,18 +3624,20 @@ export const store = {
     }
     const resolvedArticleId = article ? article.id : articleId;
     const resolvedArticleTitle = article ? article.title : (articleId === 'all' ? 'All Archive Access' : 'Monograph');
-    const phoneReservationId = getManualAccessPhoneReservationId(normalizedPhone);
+    const phoneReservationId = getManualAccessPhonePieceReservationId(normalizedPhone, resolvedArticleId);
+    const legacyReservationId = getManualAccessPhoneReservationId(normalizedPhone);
     const manualAccessCollection = getDb().collection('manual_access');
     const reservationCollection = getDb().collection(MANUAL_ACCESS_PHONE_RESERVATION_COLLECTION);
     const entitlementCollection = getDb().collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION);
     const legacyPhoneValues = getManualAccessLegacyPhoneValues(normalizedPhone);
 
     const transactionResult = await getDb().runTransaction(async transaction => {
-      const reservationRef = reservationCollection.doc(phoneReservationId);
+      let reservationRef = reservationCollection.doc(phoneReservationId);
       const userRef = getDb().collection('users').doc(currentUser.id);
-      const [userSnapshot, reservationSnapshot] = await Promise.all([
+      const [userSnapshot, pieceReservationSnapshot, legacyReservationSnapshot] = await Promise.all([
         transaction.get(userRef),
-        transaction.get(reservationRef)
+        transaction.get(reservationRef),
+        transaction.get(reservationCollection.doc(legacyReservationId))
       ]);
       if (!userSnapshot.exists) {
         throw new ManualAccessError(
@@ -3557,8 +3659,16 @@ export const store = {
           403
         );
       }
-      let reservation = reservationSnapshot.exists
-        ? reservationSnapshot.data() as Partial<ManualAccessPhoneReservation>
+      let reservationSnapshot = pieceReservationSnapshot;
+      if (!reservationSnapshot.exists && legacyReservationSnapshot.exists) {
+        const legacyReservation = legacyReservationSnapshot.data() as Partial<ManualAccessPhoneReservation>;
+        if (legacyReservation.articleId === resolvedArticleId || legacyReservation.articleId === article?.slug) {
+          reservationSnapshot = legacyReservationSnapshot;
+          reservationRef = reservationCollection.doc(legacyReservationId);
+        }
+      }
+      let reservation: Partial<ManualAccessPhoneReservation | ManualAccessPhonePieceReservation> | null = reservationSnapshot.exists
+        ? reservationSnapshot.data() as Partial<ManualAccessPhoneReservation | ManualAccessPhonePieceReservation>
         : null;
       let grantDocument: { id: string; data: () => ManualAccessGrant } | null = null;
 
@@ -3583,22 +3693,29 @@ export const store = {
           data: () => grantSnapshot.data() as ManualAccessGrant
         };
       } else {
-        // Legacy grants are adopted lazily with a bounded equality query. More
-        // than one match is an integrity conflict and is never silently resolved.
+        // Legacy grants are located only for this piece. Phone-only activation
+        // is deliberately disabled below even for an old unclaimed grant.
         const legacySnapshot = await transaction.get(
-          manualAccessCollection.where('phone', 'in', legacyPhoneValues).limit(2)
+          manualAccessCollection.where('phone', 'in', legacyPhoneValues).limit(101)
         );
-        if (legacySnapshot.empty) {
+        if (legacySnapshot.size >= 101) {
+          throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LOOKUP_LIMIT');
+        }
+        const matchingLegacyDocuments = legacySnapshot.docs.filter(document => {
+          const legacyGrant = document.data() as Partial<ManualAccessGrant>;
+          return legacyGrant.articleId === resolvedArticleId || legacyGrant.articleId === article?.slug;
+        });
+        if (matchingLegacyDocuments.length === 0) {
           return { kind: 'not-found' as const };
         }
-        if (legacySnapshot.size !== 1) {
+        if (matchingLegacyDocuments.length !== 1) {
           throw new ManualAccessError(
             'MANUAL_ACCESS_LEGACY_CONFLICT',
             'This phone number has conflicting legacy grants. Contact Support for review.',
             409
           );
         }
-        const legacyDocument = legacySnapshot.docs[0];
+        const legacyDocument = matchingLegacyDocuments[0];
         grantDocument = {
           id: legacyDocument.id,
           data: () => legacyDocument.data() as ManualAccessGrant
@@ -3620,15 +3737,24 @@ export const store = {
           503
         );
       }
-      if (matchedGrant.phoneReservationId && matchedGrant.phoneReservationId !== phoneReservationId) {
+      const activeReservationId = reservationRef.id;
+      if (matchedGrant.phoneReservationId && matchedGrant.phoneReservationId !== activeReservationId) {
         throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_MISMATCH');
       }
       if (reservation) {
         reservation = validateManualAccessReservation(
           reservation,
-          phoneReservationId,
+          activeReservationId,
           matchedGrant
         );
+      }
+      const storedTokenDigest = 'activationTokenDigest' in (reservation || {})
+        ? (reservation as ManualAccessPhonePieceReservation).activationTokenDigest
+        : undefined;
+      if (!storedTokenDigest || !isMatchingManualAccessActivationToken(
+        activationToken, matchedGrant.articleId, matchedGrant.id, storedTokenDigest
+      )) {
+        return { kind: 'not-found' as const };
       }
       const expiresAt = getValidatedManualAccessExpiry(matchedGrant);
 
@@ -3787,7 +3913,7 @@ export const store = {
         articleId: entitledArticleId,
         articleTitle: resolvedArticleTitle,
         phone: normalizedPhone,
-        phoneReservationId,
+        phoneReservationId: activeReservationId,
         entitlementId,
         status: 'claimed',
         activated: true,
@@ -3799,8 +3925,10 @@ export const store = {
         claimedUserEmail: freshUser.email.toLowerCase(),
         claimedUserName: freshUser.name || freshUser.email
       });
-      const claimedReservation: ManualAccessPhoneReservation = {
-        storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
+      const claimedReservation: ManualAccessPhoneReservation | ManualAccessPhonePieceReservation = {
+        storageVersion: isManualAccessPhonePieceReservationId(activeReservationId)
+          ? MANUAL_ACCESS_PHONE_PIECE_RESERVATION_VERSION
+          : MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
         grantId: claimedGrant.id,
         articleId: entitledArticleId,
         state: 'claimed',
@@ -4218,19 +4346,29 @@ export const store = {
     if (!stored) {
       throw new Error('Homepage settings are temporarily unavailable in the database.');
     }
-    const remoteUpdatedAtMs = stored.updatedAt ? Date.parse(stored.updatedAt) : NaN;
-    const cachedUpdatedAtMs = cachedHomepageConfig.updatedAt
-      ? Date.parse(cachedHomepageConfig.updatedAt)
-      : NaN;
-    if (!Number.isFinite(cachedUpdatedAtMs) || !Number.isFinite(remoteUpdatedAtMs) || remoteUpdatedAtMs >= cachedUpdatedAtMs) {
-      cachedHomepageConfig = {
-        ...cachedHomepageConfig,
-        ...stored,
-        welcomeBackground: {
-          ...cachedHomepageConfig.welcomeBackground,
-          ...(stored.welcomeBackground || {})
-        }
-      };
+    // The persisted document is authoritative across serverless instances.
+    // A local timestamp comparison can preserve a divergent warm snapshot.
+    cachedHomepageConfig = {
+      ...cachedHomepageConfig,
+      ...stored,
+      welcomeBackground: stored.welcomeBackground
+        ? { ...stored.welcomeBackground }
+        : { ...cachedHomepageConfig.welcomeBackground }
+    };
+    // Curated piece publish state is part of the public homepage decision.
+    // Resolve only selected IDs (never the full catalogue) from Firestore so
+    // a warm instance cannot show a newly unpublished piece or omit a new one.
+    const selectedIds = new Set([
+      ...(stored.mostSellingMode === 'manual' ? stored.mostSellingPieceIds || [] : []),
+      ...(stored.pieceOfTheWeekId ? [stored.pieceOfTheWeekId] : [])
+    ]);
+    const currentSelected = await Promise.all(Array.from(selectedIds).map(async id => ({
+      id,
+      article: await getFirestoreDoc<Article>('articles', id)
+    })));
+    for (const { id, article } of currentSelected) {
+      cachedArticles = cachedArticles.filter(existing => existing.id !== id);
+      if (article?.id === id) cachedArticles.push(article);
     }
     return this.getHomepageConfig();
   },
@@ -4246,7 +4384,11 @@ export const store = {
     const publishedPieces = this.getArticles(false);
 
     // Sync background photo if author profile has it but homepage config is empty
-    if (cachedAuthor.welcomeBackgroundUrl && !cachedHomepageConfig.welcomeBackground.imageUrl) {
+    if (
+      cachedAuthor.welcomeBackgroundUrl
+      && !cachedHomepageConfig.welcomeBackground.imageUrl
+      && cachedHomepageConfig.welcomeBackground.savedPermanently !== false
+    ) {
       cachedHomepageConfig.welcomeBackground.imageUrl = cachedAuthor.welcomeBackgroundUrl;
     }
 
@@ -6218,13 +6360,39 @@ export const store = {
       email: user.email,
       name: user.name,
       createdAt: now,
-      expiresAt: now + durationMs
+      expiresAt: now + durationMs,
+      ...(user.role === 'client' ? { activeReaderSession: true as const } : {})
     };
 
     // Persist before issuing the cookie so another serverless instance can
     // resolve it immediately. The reusable token is never written as a field or
     // document ID.
-    await setFirestoreDoc('sessions', documentId, session);
+    if (user.role === 'client') {
+      const db = getDb();
+      const pointerRef = db.collection(ACTIVE_READER_SESSION_COLLECTION)
+        .doc(activeReaderSessionPointerId(user.id));
+      let previousDocumentId: string | null = null;
+      await db.runTransaction(async transaction => {
+        const previous = await transaction.get(pointerRef);
+        const storedPreviousDocumentId = previous.exists
+          ? (previous.data() as { sessionDocumentId?: unknown }).sessionDocumentId
+          : null;
+        previousDocumentId = isAuthSessionDocumentId(storedPreviousDocumentId)
+          ? storedPreviousDocumentId
+          : null;
+        transaction.create(db.collection('sessions').doc(documentId), sanitizeForFirestore(session));
+        transaction.set(pointerRef, { sessionDocumentId: documentId, updatedAt: now });
+        if (previousDocumentId && previousDocumentId !== documentId) {
+          transaction.delete(db.collection('sessions').doc(previousDocumentId));
+        }
+      });
+      if (previousDocumentId) {
+        cachedAuthSessions.delete(previousDocumentId);
+        cachedAuthSessionVerifiedAt.delete(previousDocumentId);
+      }
+    } else {
+      await setFirestoreDoc('sessions', documentId, session);
+    }
     cachedAuthSessions.set(documentId, session);
     cachedAuthSessionVerifiedAt.set(documentId, now);
     missingAuthSessions.delete(documentId);
@@ -6245,7 +6413,8 @@ export const store = {
 
     const cached = cachedAuthSessions.get(documentId);
     const verifiedAt = cachedAuthSessionVerifiedAt.get(documentId) || 0;
-    if (cached && cached.expiresAt > now && now - verifiedAt < AUTH_SESSION_CACHE_TTL_MS) return cached;
+    const cacheTtl = cached?.role === 'client' ? READER_SESSION_CACHE_TTL_MS : AUTH_SESSION_CACHE_TTL_MS;
+    if (cached && cached.expiresAt > now && now - verifiedAt < cacheTtl) return cached;
     if (cached) {
       if (cached.expiresAt <= now) {
         cachedAuthSessions.delete(documentId);
@@ -6271,6 +6440,22 @@ export const store = {
           persistAuthSessionCache();
           await deleteFirestoreDoc('sessions', documentId).catch(() => {});
           return null;
+        }
+        if (storedSession.role === 'client') {
+          const activePointer = await getFirestoreDoc<{ sessionDocumentId?: unknown }>(
+            ACTIVE_READER_SESSION_COLLECTION,
+            activeReaderSessionPointerId(storedSession.userId)
+          );
+          if (
+            (storedSession.activeReaderSession && !activePointer)
+            || (activePointer && activePointer.sessionDocumentId !== documentId)
+          ) {
+            cachedAuthSessions.delete(documentId);
+            cachedAuthSessionVerifiedAt.delete(documentId);
+            rememberMissingAuthSession(documentId);
+            persistAuthSessionCache();
+            return null;
+          }
         }
         cachedAuthSessions.set(documentId, storedSession);
         cachedAuthSessionVerifiedAt.set(documentId, Date.now());
