@@ -424,6 +424,7 @@
         "state": { "type": "string", "enum": ["active", "revoked", "deleted"] },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" },
+        "expiresAt": { "type": "number" },
         "revokedAt": { "type": "string" },
         "deletedAt": { "type": "string" }
       },

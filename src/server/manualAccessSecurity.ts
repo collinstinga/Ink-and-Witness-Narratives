@@ -41,6 +41,7 @@ export interface ManualAccessEntitlement {
   state: ManualAccessEntitlementState;
   createdAt: string;
   updatedAt: string;
+  expiresAt?: number;
   revokedAt?: string;
   deletedAt?: string;
 }
@@ -213,6 +214,7 @@ export function normalizeManualAccessEntitlement(
     'state',
     'createdAt',
     'updatedAt',
+    'expiresAt',
     'revokedAt',
     'deletedAt'
   ]);
@@ -245,10 +247,28 @@ export function normalizeManualAccessEntitlement(
   const updatedAtMs = Date.parse(record.updatedAt);
   if (updatedAtMs < createdAtMs) return null;
 
-  const revokedAt = record.revokedAt;
-  const deletedAt = record.deletedAt;
-  if (revokedAt !== undefined && !isIsoTimestamp(revokedAt)) return null;
-  if (deletedAt !== undefined && !isIsoTimestamp(deletedAt)) return null;
+  let expiresAt: number | undefined;
+  if (record.expiresAt !== undefined) {
+    if (
+      typeof record.expiresAt !== 'number'
+      || !Number.isFinite(record.expiresAt)
+      || record.expiresAt <= 0
+    ) {
+      return null;
+    }
+    expiresAt = record.expiresAt;
+  }
+
+  let revokedAt: string | undefined;
+  if (record.revokedAt !== undefined) {
+    if (!isIsoTimestamp(record.revokedAt)) return null;
+    revokedAt = record.revokedAt;
+  }
+  let deletedAt: string | undefined;
+  if (record.deletedAt !== undefined) {
+    if (!isIsoTimestamp(record.deletedAt)) return null;
+    deletedAt = record.deletedAt;
+  }
   if (
     (revokedAt !== undefined
       && (Date.parse(revokedAt) < createdAtMs || Date.parse(revokedAt) > updatedAtMs))
@@ -274,6 +294,7 @@ export function normalizeManualAccessEntitlement(
     state: record.state,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    ...(expiresAt === undefined ? {} : { expiresAt }),
     ...(revokedAt === undefined ? {} : { revokedAt }),
     ...(deletedAt === undefined ? {} : { deletedAt })
   };

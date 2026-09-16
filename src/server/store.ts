@@ -20,6 +20,7 @@ import {
   getManualAccessEntitlementId,
   getManualAccessPhoneReservationId,
   isManualAccessEntitlementId,
+  isManualAccessBearerLicense,
   normalizeManualAccessEntitlement,
   normalizeManualAccessPhone
 } from './manualAccessSecurity.js';
@@ -611,6 +612,87 @@ function manualAccessIntegrityError(code: string): ManualAccessError {
   return new ManualAccessError(code, 'Manual access is temporarily unavailable.', 503);
 }
 
+export class HomepageSaveConflictError extends Error {
+  readonly code = 'HOMEPAGE_SAVE_CONFLICT';
+  readonly statusCode = 409;
+
+  constructor() {
+    super('Homepage settings changed since you loaded them. Reload the latest settings before saving again.');
+  }
+}
+
+async function persistWelcomeBackgroundChange(imageUrl: string | null): Promise<AuthorProfile> {
+  const db = getDb();
+  const homepageRef = db.collection('site_configs').doc('homepage');
+  const legacyHomepageRef = db.collection('site_configs').doc('homepage_config');
+  const authorRef = db.collection('site_configs').doc('author');
+  const legacyAuthorRef = db.collection('site_configs').doc('author_profile');
+  const persisted = await db.runTransaction(async transaction => {
+    const [homepageSnapshot, legacyHomepageSnapshot, authorSnapshot, legacyAuthorSnapshot] = await Promise.all([
+      transaction.get(homepageRef),
+      transaction.get(legacyHomepageRef),
+      transaction.get(authorRef),
+      transaction.get(legacyAuthorRef)
+    ]);
+    const remoteHomepage = homepageSnapshot.exists
+      ? homepageSnapshot.data() as Partial<HomepageConfig>
+      : legacyHomepageSnapshot.exists
+        ? legacyHomepageSnapshot.data() as Partial<HomepageConfig>
+        : {};
+    const remoteAuthor = authorSnapshot.exists
+      ? authorSnapshot.data() as Partial<AuthorProfile>
+      : legacyAuthorSnapshot.exists
+        ? legacyAuthorSnapshot.data() as Partial<AuthorProfile>
+        : {};
+    const priorUpdatedAtMs = remoteHomepage.updatedAt ? Date.parse(remoteHomepage.updatedAt) : NaN;
+    const savedAt = new Date(Number.isFinite(priorUpdatedAtMs)
+      ? Math.max(Date.now(), priorUpdatedAtMs + 1)
+      : Date.now()).toISOString();
+    const priorBackground: WelcomeBackgroundSettings = {
+      ...cachedHomepageConfig.welcomeBackground,
+      ...(remoteHomepage.welcomeBackground || {})
+    };
+    const nextBackground: WelcomeBackgroundSettings = {
+      ...priorBackground,
+      ...(imageUrl === null ? {} : { imageUrl }),
+      savedPermanently: imageUrl !== null,
+      lastSavedAt: savedAt
+    };
+    if (imageUrl === null) delete nextBackground.imageUrl;
+    const nextHomepageConfig: HomepageConfig = {
+      ...cachedHomepageConfig,
+      ...remoteHomepage,
+      welcomeBackground: nextBackground,
+      updatedAt: savedAt,
+      lastSavedAt: savedAt
+    };
+    const nextAuthor: AuthorProfile = {
+      ...cachedAuthor,
+      ...remoteAuthor,
+      ...(imageUrl === null ? {} : { welcomeBackgroundUrl: imageUrl, welcomeBackgroundSavedAt: savedAt }),
+      welcomeBackgroundSavedPermanently: imageUrl !== null
+    };
+    if (imageUrl === null) {
+      delete nextAuthor.welcomeBackgroundUrl;
+      delete nextAuthor.welcomeBackgroundSavedAt;
+    }
+
+    // Full documents are assembled from transaction-fresh state. In particular,
+    // no cached homepage selection can overwrite another writer's changes.
+    transaction.set(homepageRef, sanitizeForFirestore(nextHomepageConfig));
+    transaction.set(legacyHomepageRef, sanitizeForFirestore(nextHomepageConfig));
+    transaction.set(authorRef, sanitizeForFirestore(nextAuthor));
+    transaction.set(legacyAuthorRef, sanitizeForFirestore(nextAuthor));
+    return { nextHomepageConfig, nextAuthor };
+  });
+
+  cachedHomepageConfig = persisted.nextHomepageConfig;
+  cachedAuthor = persisted.nextAuthor;
+  writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
+  writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
+  return cachedAuthor;
+}
+
 function cleanManualAccessGrantForStorage(grant: ManualAccessGrant): ManualAccessGrant {
   const {
     token: _legacyToken,
@@ -699,12 +781,18 @@ function getManualAccessLegacyPhoneValues(normalizedPhone: string): string[] {
 function validateManualAccessReservation(
   reservation: Partial<ManualAccessPhoneReservation>,
   reservationId: string,
-  grant: ManualAccessGrant
+  grant: ManualAccessGrant,
+  options: {
+    allowTerminalRepair?: boolean;
+    acceptedArticleIds?: string[];
+  } = {}
 ): ManualAccessPhoneReservation {
+  const acceptedArticleIds = new Set(options.acceptedArticleIds || [grant.articleId]);
   if (
     reservation.storageVersion !== MANUAL_ACCESS_PHONE_RESERVATION_VERSION
     || reservation.grantId !== grant.id
-    || reservation.articleId !== grant.articleId
+    || typeof reservation.articleId !== 'string'
+    || !acceptedArticleIds.has(reservation.articleId)
     || grant.phoneReservationId !== reservationId
     || !['unclaimed', 'claimed', 'revoked', 'deleted'].includes(String(reservation.state))
     || typeof reservation.createdAt !== 'string'
@@ -717,6 +805,9 @@ function validateManualAccessReservation(
   }
 
   const boundUserId = getManualAccessBoundUserId(grant, reservation);
+  if (options.allowTerminalRepair) {
+    return reservation as ManualAccessPhoneReservation;
+  }
   if (reservation.state === 'unclaimed') {
     if (boundUserId || grant.status !== 'active' || grant.activated || grant.claimedAt) {
       throw manualAccessIntegrityError('MANUAL_ACCESS_RESERVATION_STATE_CONFLICT');
@@ -787,7 +878,16 @@ async function transitionManualAccessGrant(
     if (!normalizedPhone || !grant.articleId || !grant.grantedAt || !Number.isFinite(Date.parse(grant.grantedAt))) {
       throw manualAccessIntegrityError('MANUAL_ACCESS_GRANT_CORRUPT');
     }
-    getValidatedManualAccessExpiry(grant);
+    const grantExpiresAt = getValidatedManualAccessExpiry(grant);
+    const article = grant.articleId === 'all'
+      ? null
+      : cachedArticles.find(candidate => candidate.id === grant.articleId || candidate.slug === grant.articleId);
+    const canonicalArticleId = grant.articleId === 'all' ? 'all' : (article?.id || grant.articleId);
+    const canonicalGrantForEntitlement: ManualAccessGrant = {
+      ...grant,
+      articleId: canonicalArticleId,
+      ...(article?.title ? { articleTitle: article.title } : {})
+    };
 
     const reservationId = getManualAccessPhoneReservationId(normalizedPhone);
     if (grant.phoneReservationId && grant.phoneReservationId !== reservationId) {
@@ -810,85 +910,121 @@ async function transitionManualAccessGrant(
       ? db.collection('reader_licenses').doc(legacyToken)
       : null;
 
-    // All reads precede every write so Firestore can safely retry on contention
-    // with a simultaneous first claim.
+    // All reads precede every write so Firestore can safely retry this terminal
+    // transition when it contends with a simultaneous first claim.
     const reservationSnapshot = await transaction.get(reservationRef);
     const reservation = reservationSnapshot.exists
       ? validateManualAccessReservation(
           reservationSnapshot.data() as Partial<ManualAccessPhoneReservation>,
           reservationId,
-          grant
+          grant,
+          {
+            allowTerminalRepair: true,
+            acceptedArticleIds: Array.from(new Set([grant.articleId, canonicalArticleId]))
+          }
         )
       : null;
-    const initialBoundUserId = getManualAccessBoundUserId(grant, reservation);
-    let entitlementId = storedEntitlementId
-      || (initialBoundUserId ? getManualAccessEntitlementId(initialBoundUserId, grant.articleId) : null);
-    let entitlementRef = entitlementId
-      ? db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(entitlementId)
-      : null;
-    let entitlementSnapshot = entitlementRef ? await transaction.get(entitlementRef) : null;
+    const entitlementQuery = await transaction.get(
+      db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION)
+        .where('grantId', '==', grant.id)
+        .limit(2)
+    );
+    if (entitlementQuery.size > 1) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+    }
 
-    if (!entitlementRef) {
-      const entitlementQuery = await transaction.get(
-        db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION)
-          .where('grantId', '==', grant.id)
-          .limit(2)
+    const storedEntitlementRef = storedEntitlementId
+      ? db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(storedEntitlementId)
+      : null;
+    const storedEntitlementSnapshot = storedEntitlementRef
+      ? await transaction.get(storedEntitlementRef)
+      : null;
+    const legacyLicenseSnapshot = legacyLicenseRef
+      ? await transaction.get(legacyLicenseRef)
+      : null;
+
+    const queryDocument = entitlementQuery.size === 1 ? entitlementQuery.docs[0] : null;
+    let queryEntitlement: ManualAccessEntitlement | null = null;
+    if (queryDocument) {
+      const normalized = normalizeManualAccessEntitlement(queryDocument.data());
+      if (!normalized) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+      }
+      queryEntitlement = validateManualAccessEntitlementMapping(
+        normalized,
+        queryDocument.id,
+        canonicalGrantForEntitlement,
+        normalized.userId
       );
-      if (entitlementQuery.size > 1) {
-        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
-      }
-      if (entitlementQuery.size === 1) {
-        entitlementSnapshot = entitlementQuery.docs[0];
-        entitlementId = entitlementSnapshot.id;
-        entitlementRef = db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(entitlementId);
-      }
     }
 
-    const normalizedEntitlement = entitlementSnapshot?.exists
-      ? normalizeManualAccessEntitlement(entitlementSnapshot.data())
-      : null;
-    if (entitlementSnapshot?.exists && !normalizedEntitlement) {
-      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
-    }
+    const initialBoundUserId = getManualAccessBoundUserId(grant, reservation);
     const boundUserIds = new Set(
-      [initialBoundUserId, normalizedEntitlement?.userId]
+      [initialBoundUserId, queryEntitlement?.userId]
         .filter((value): value is string => typeof value === 'string' && value.length > 0)
     );
     if (boundUserIds.size > 1) {
       throw manualAccessIntegrityError('MANUAL_ACCESS_BINDING_CONFLICT');
     }
-    const boundUserId = boundUserIds.values().next().value as string | undefined;
-    const existingEntitlement = normalizedEntitlement && entitlementId && boundUserId
-      ? validateManualAccessEntitlementMapping(
-          normalizedEntitlement,
-          entitlementId,
-          grant,
-          boundUserId
-        )
+    let boundUserId = boundUserIds.values().next().value as string | undefined;
+    let entitlementId = boundUserId
+      ? getManualAccessEntitlementId(boundUserId, canonicalArticleId)
       : null;
-    if (storedEntitlementId && entitlementId !== storedEntitlementId) {
-      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+
+    let exactEntitlementSnapshot = entitlementId && queryDocument?.id === entitlementId
+      ? queryDocument
+      : entitlementId && storedEntitlementId === entitlementId
+        ? storedEntitlementSnapshot
+        : null;
+    if (entitlementId && !exactEntitlementSnapshot) {
+      exactEntitlementSnapshot = await transaction.get(
+        db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(entitlementId)
+      );
     }
 
-    const legacyLicenseSnapshot = legacyLicenseRef
-      ? await transaction.get(legacyLicenseRef)
+    let exactEntitlement: ManualAccessEntitlement | null = null;
+    if (exactEntitlementSnapshot?.exists && entitlementId && boundUserId) {
+      const normalized = normalizeManualAccessEntitlement(exactEntitlementSnapshot.data());
+      if (!normalized || normalized.grantId !== grant.id) {
+        // Never overwrite a deterministic user/article entitlement belonging to
+        // a different grant. This is an integrity conflict, not a repair target.
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+      }
+      exactEntitlement = validateManualAccessEntitlementMapping(
+        normalized,
+        entitlementId,
+        canonicalGrantForEntitlement,
+        boundUserId
+      );
+    }
+
+    if (queryEntitlement && exactEntitlement && queryDocument?.id !== entitlementId) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+    }
+    if (queryEntitlement && !boundUserId) {
+      boundUserId = queryEntitlement.userId;
+      entitlementId = queryDocument?.id || null;
+    }
+    if (queryEntitlement && entitlementId !== queryDocument?.id) {
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+    }
+
+    const storedPointerData = storedEntitlementSnapshot?.exists
+      ? storedEntitlementSnapshot.data() as Partial<ManualAccessEntitlement>
       : null;
     if (
-      existingEntitlement?.state === 'active'
-      && (grant.status !== 'claimed' || !grant.activated)
+      storedEntitlementId
+      && storedEntitlementId !== entitlementId
+      && storedPointerData?.grantId === grant.id
     ) {
-      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
+      // A second document claiming the same grant must never be silently
+      // abandoned while a terminal action reports success.
+      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
     }
-    if (
-      existingEntitlement?.state === 'revoked'
-      && grant.status !== 'revoked'
-      && grant.status !== 'deleted'
-    ) {
-      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
-    }
-    if (existingEntitlement?.state === 'deleted' && grant.status !== 'deleted') {
-      throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
-    }
+    const existingEntitlement = exactEntitlement || queryEntitlement;
+    const entitlementRef = entitlementId
+      ? db.collection(MANUAL_ACCESS_ENTITLEMENT_COLLECTION).doc(entitlementId)
+      : null;
 
     if (legacyLicenseSnapshot?.exists && legacyToken) {
       const legacyLicense = normalizeStoredReaderLicense(
@@ -898,7 +1034,7 @@ async function transitionManualAccessGrant(
       if (
         !legacyLicense
         || legacyLicense.accessSource !== 'MANUAL_GRANT'
-        || legacyLicense.articleId !== grant.articleId
+        || !new Set([grant.articleId, canonicalArticleId]).has(legacyLicense.articleId)
         || normalizeManualAccessPhone(legacyLicense.phone) !== normalizedPhone
       ) {
         throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LICENSE_MISMATCH');
@@ -906,11 +1042,18 @@ async function transitionManualAccessGrant(
     }
 
     const now = new Date().toISOString();
-    const finalState = grant.status === 'deleted' || reservation?.state === 'deleted'
+    const finalState = requestedState === 'deleted'
+      || grant.status === 'deleted'
+      || reservation?.state === 'deleted'
+      || existingEntitlement?.state === 'deleted'
       ? 'deleted'
-      : requestedState;
+      : 'revoked';
+    const {
+      entitlementId: _storedEntitlementPointer,
+      ...grantWithoutEntitlementPointer
+    } = canonicalGrantForEntitlement;
     const cleanedGrant = cleanManualAccessGrantForStorage({
-      ...grant,
+      ...grantWithoutEntitlementPointer,
       phone: normalizedPhone,
       phoneReservationId: reservationId,
       ...(entitlementId ? { entitlementId } : {}),
@@ -929,7 +1072,7 @@ async function transitionManualAccessGrant(
     const terminalReservation: ManualAccessPhoneReservation = {
       storageVersion: MANUAL_ACCESS_PHONE_RESERVATION_VERSION,
       grantId: grant.id,
-      articleId: grant.articleId,
+      articleId: canonicalArticleId,
       state: finalState,
       createdAt: reservation?.createdAt || grant.grantedAt,
       updatedAt: terminalAt,
@@ -947,17 +1090,23 @@ async function transitionManualAccessGrant(
 
     if (boundUserId && entitlementRef && entitlementId) {
       const createdAt = existingEntitlement?.createdAt || grant.claimedAt || grant.grantedAt;
+      const entitlementExpiresAt = grantExpiresAt === undefined
+        ? existingEntitlement?.expiresAt
+        : existingEntitlement?.expiresAt === undefined
+          ? grantExpiresAt
+          : Math.min(grantExpiresAt, existingEntitlement.expiresAt);
       const terminalEntitlement: ManualAccessEntitlement = {
         storageVersion: MANUAL_ACCESS_ENTITLEMENT_VERSION,
         grantId: grant.id,
         userId: boundUserId,
-        articleId: grant.articleId,
+        articleId: canonicalArticleId,
         state: finalState,
         createdAt,
         updatedAt: terminalAt,
+        ...(entitlementExpiresAt === undefined ? {} : { expiresAt: entitlementExpiresAt }),
         ...(finalState === 'revoked' ? { revokedAt: terminalAt } : { deletedAt: terminalAt })
       };
-      if (entitlementSnapshot?.exists) {
+      if (exactEntitlementSnapshot?.exists || queryDocument?.exists) {
         transaction.set(entitlementRef, sanitizeForFirestore(terminalEntitlement));
       } else {
         transaction.create(entitlementRef, sanitizeForFirestore(terminalEntitlement));
@@ -2918,6 +3067,9 @@ export const store = {
     const seenArticles = new Set<string>();
 
     for (const [token, data] of cachedTokens.entries()) {
+      // Legacy manual bearers are never account authorization. The only
+      // supported manual path is the bound, server-verified entitlement below.
+      if (isManualAccessBearerLicense(token, data)) continue;
       const matchUserId = user && data.userId === user.id;
       const matchEmail = user && !data.userId && data.email?.toLowerCase() === userEmail;
       const matchPhone = userPhone && data.phone && this.phonesMatch(userPhone, data.phone);
@@ -2943,10 +3095,12 @@ export const store = {
 
     const manualSnapshot = await manualEntitlementsPromise;
     const publishedArticles = this.getArticles(false);
+    const now = Date.now();
     for (const document of manualSnapshot?.docs || []) {
       const entitlement = normalizeManualAccessEntitlement(document.data());
       if (!entitlement || entitlement.userId !== user?.id || entitlement.state !== 'active') continue;
       if (document.id !== getManualAccessEntitlementId(entitlement.userId, entitlement.articleId)) continue;
+      if (entitlement.expiresAt !== undefined && entitlement.expiresAt <= now) continue;
 
       const entitledArticles = entitlement.articleId === 'all'
         ? publishedArticles
@@ -2958,7 +3112,7 @@ export const store = {
           articleId: article.id,
           receipt: 'COMPLIMENTARY ACCESS',
           createdAt: entitlement.createdAt,
-          expiresAt: 253402300799999,
+          expiresAt: entitlement.expiresAt ?? 253402300799999,
           articleTitle: article.title,
           accessSource: 'MANUAL_GRANT'
         });
@@ -2971,7 +3125,8 @@ export const store = {
   async isArticlePurchasedByUser(articleId: string, user?: { id: string; email: string } | null): Promise<boolean> {
     if (!user) return false;
     await loadReaderLicensesForUser(user);
-    for (const data of cachedTokens.values()) {
+    for (const [token, data] of cachedTokens.entries()) {
+      if (isManualAccessBearerLicense(token, data)) continue;
       if (Number(data.expiresAt) > Date.now() && (data.articleId === articleId || data.articleId === 'all')) {
         if (isReaderLicenseBoundToUser(data, user)) {
           return true;
@@ -2995,6 +3150,7 @@ export const store = {
       if (
         entitlement
         && entitlement.state === 'active'
+        && (entitlement.expiresAt === undefined || entitlement.expiresAt > Date.now())
         && entitlement.userId === user.id
         && entitlement.articleId === entitlementArticles[index]
         && snapshot.id === getManualAccessEntitlementId(user.id, entitlement.articleId)
@@ -3026,7 +3182,11 @@ export const store = {
         token,
         snapshot.exists ? snapshot.data() as CachedReaderLicense : null
       );
-      if (!license || Number(license.expiresAt) <= Date.now()) return undefined;
+      if (
+        !license
+        || isManualAccessBearerLicense(token, license)
+        || Number(license.expiresAt) <= Date.now()
+      ) return undefined;
       if (license.userId && license.userId !== user.id) return undefined;
       if (license.email && license.email.toLowerCase() !== user.email.toLowerCase()) return undefined;
 
@@ -3524,6 +3684,12 @@ export const store = {
         : { ...matchedGrant, articleId: entitledArticleId, articleTitle: resolvedArticleTitle };
       const entitlementId = getManualAccessEntitlementId(freshUser.id, entitledArticleId);
       const entitlementRef = entitlementCollection.doc(entitlementId);
+      if (
+        matchedGrant.entitlementId !== undefined
+        && !isManualAccessEntitlementId(matchedGrant.entitlementId)
+      ) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_MISMATCH');
+      }
       const legacyToken = typeof matchedGrant.token === 'string' && matchedGrant.token.length > 0
         ? matchedGrant.token
         : null;
@@ -3533,10 +3699,24 @@ export const store = {
       const legacyLicenseRef = legacyToken
         ? getDb().collection('reader_licenses').doc(legacyToken)
         : null;
-      const [entitlementSnapshot, legacyLicenseSnapshot] = await Promise.all([
+      const [entitlementSnapshot, grantEntitlementSnapshot, legacyLicenseSnapshot] = await Promise.all([
         transaction.get(entitlementRef),
+        transaction.get(
+          entitlementCollection
+            .where('grantId', '==', matchedGrant.id)
+            .limit(2)
+        ),
         legacyLicenseRef ? transaction.get(legacyLicenseRef) : Promise.resolve(null)
       ]);
+      if (grantEntitlementSnapshot.size > 1) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+      }
+      if (
+        grantEntitlementSnapshot.size === 1
+        && grantEntitlementSnapshot.docs[0].id !== entitlementId
+      ) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+      }
       const existingEntitlement = entitlementSnapshot.exists
         ? validateManualAccessEntitlementMapping(
             entitlementSnapshot.data(),
@@ -3545,10 +3725,23 @@ export const store = {
             freshUser.id
           )
         : null;
+      if (
+        grantEntitlementSnapshot.size === 1
+        && !entitlementSnapshot.exists
+      ) {
+        throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_CONFLICT');
+      }
       if (existingEntitlement && !existingBoundUserId) {
         throw manualAccessIntegrityError('MANUAL_ACCESS_ENTITLEMENT_STATE_CONFLICT');
       }
-      if (existingEntitlement?.state === 'revoked' || existingEntitlement?.state === 'deleted') {
+      if (
+        existingEntitlement?.state === 'revoked'
+        || existingEntitlement?.state === 'deleted'
+        || (
+          existingEntitlement?.expiresAt !== undefined
+          && existingEntitlement.expiresAt <= Date.now()
+        )
+      ) {
         return {
           kind: 'blocked' as const,
           code: 'MANUAL_ACCESS_REVOKED',
@@ -3563,7 +3756,7 @@ export const store = {
         if (
           !legacyLicense
           || legacyLicense.accessSource !== 'MANUAL_GRANT'
-          || legacyLicense.articleId !== matchedGrant.articleId
+          || !new Set([matchedGrant.articleId, entitledArticleId]).has(legacyLicense.articleId)
           || normalizeManualAccessPhone(legacyLicense.phone) !== normalizedPhone
         ) {
           throw manualAccessIntegrityError('MANUAL_ACCESS_LEGACY_LICENSE_MISMATCH');
@@ -3571,10 +3764,17 @@ export const store = {
       }
 
       const alreadyOwned = existingBoundUserId === freshUser.id && hasClaimedState;
+      const entitlementExpiresAt = expiresAt === undefined
+        ? existingEntitlement?.expiresAt
+        : existingEntitlement?.expiresAt === undefined
+          ? expiresAt
+          : Math.min(expiresAt, existingEntitlement.expiresAt);
       if (
         alreadyOwned
         && reservation
         && existingEntitlement?.state === 'active'
+        && matchedGrant.entitlementId === entitlementId
+        && existingEntitlement.expiresAt === entitlementExpiresAt
         && !legacyToken
       ) {
         return { kind: 'owned' as const, grant: matchedGrant, freshUser };
@@ -3616,7 +3816,8 @@ export const store = {
         articleId: claimedGrant.articleId,
         state: 'active',
         createdAt: existingEntitlement?.createdAt || claimedAt,
-        updatedAt: now
+        updatedAt: now,
+        ...(entitlementExpiresAt === undefined ? {} : { expiresAt: entitlementExpiresAt })
       };
 
       transaction.set(manualAccessCollection.doc(claimedGrant.id), sanitizeForFirestore(claimedGrant));
@@ -3800,27 +4001,9 @@ export const store = {
     let updatedRecord: any = null;
 
     if (params.target === 'welcome_background') {
-      cachedAuthor.welcomeBackgroundUrl = finalUrl;
-      cachedAuthor.welcomeBackgroundSavedPermanently = true;
-      cachedAuthor.welcomeBackgroundSavedAt = nowIso;
-      
-      cachedHomepageConfig.welcomeBackground = {
-        ...cachedHomepageConfig.welcomeBackground,
-        imageUrl: finalUrl,
-        savedPermanently: true,
-        lastSavedAt: nowIso
-      };
-
-      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-      writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
-      await Promise.all([
-        setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {}),
-        setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {}),
-        setFirestoreDoc('site_configs', 'homepage', cachedHomepageConfig).catch(() => {}),
-        setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig).catch(() => {})
-      ]);
+      const author = await persistWelcomeBackgroundChange(finalUrl);
       updatedRecord = {
-        author: this.getAuthorProfile(),
+        author,
         homepage: cachedHomepageConfig
       };
     } else if (params.target === 'author_avatar') {
@@ -3956,37 +4139,12 @@ export const store = {
     return this.getAuthorProfile();
   },
 
-  updateWelcomeBackground(welcomeBackgroundUrl: string): AuthorProfile {
-    cachedAuthor.welcomeBackgroundUrl = welcomeBackgroundUrl;
-    cachedAuthor.welcomeBackgroundSavedPermanently = true;
-    cachedAuthor.welcomeBackgroundSavedAt = new Date().toISOString();
-    cachedHomepageConfig.welcomeBackground = {
-      ...cachedHomepageConfig.welcomeBackground,
-      imageUrl: welcomeBackgroundUrl,
-      savedPermanently: true,
-      lastSavedAt: new Date().toISOString()
-    };
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'homepage', cachedHomepageConfig).catch(() => {});
-    setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig).catch(() => {});
-    return this.getAuthorProfile();
+  async updateWelcomeBackground(welcomeBackgroundUrl: string): Promise<AuthorProfile> {
+    return persistWelcomeBackgroundChange(welcomeBackgroundUrl);
   },
 
-  removeWelcomeBackground(): AuthorProfile {
-    delete cachedAuthor.welcomeBackgroundUrl;
-    cachedAuthor.welcomeBackgroundSavedPermanently = false;
-    delete cachedHomepageConfig.welcomeBackground.imageUrl;
-    cachedHomepageConfig.welcomeBackground.savedPermanently = false;
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'homepage', cachedHomepageConfig).catch(() => {});
-    setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig).catch(() => {});
-    return this.getAuthorProfile();
+  async removeWelcomeBackground(): Promise<AuthorProfile> {
+    return persistWelcomeBackgroundChange(null);
   },
 
   updateWebsiteFavicon(faviconUrl: string): AuthorProfile {
@@ -4051,6 +4209,32 @@ export const store = {
   },
 
   // HOMEPAGE MANAGEMENT
+  async getFreshHomepageConfig() {
+    // The admin editor must see a strongly current version, not a warm
+    // serverless instance's startup cache. Otherwise a 409 conflict could be
+    // impossible to resolve by reloading on that same instance.
+    const stored = await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage')
+      || await getFirestoreDoc<HomepageConfig>('site_configs', 'homepage_config');
+    if (!stored) {
+      throw new Error('Homepage settings are temporarily unavailable in the database.');
+    }
+    const remoteUpdatedAtMs = stored.updatedAt ? Date.parse(stored.updatedAt) : NaN;
+    const cachedUpdatedAtMs = cachedHomepageConfig.updatedAt
+      ? Date.parse(cachedHomepageConfig.updatedAt)
+      : NaN;
+    if (!Number.isFinite(cachedUpdatedAtMs) || !Number.isFinite(remoteUpdatedAtMs) || remoteUpdatedAtMs >= cachedUpdatedAtMs) {
+      cachedHomepageConfig = {
+        ...cachedHomepageConfig,
+        ...stored,
+        welcomeBackground: {
+          ...cachedHomepageConfig.welcomeBackground,
+          ...(stored.welcomeBackground || {})
+        }
+      };
+    }
+    return this.getHomepageConfig();
+  },
+
   getHomepageConfig(): {
     config: HomepageConfig;
     startHerePieces: Article[];
@@ -4148,7 +4332,7 @@ export const store = {
     };
   },
 
-  async saveHomepageConfig(partial: Partial<HomepageConfig>): Promise<{
+  async saveHomepageConfig(partial: Partial<HomepageConfig>, expectedUpdatedAt: string | null): Promise<{
     config: HomepageConfig;
     startHerePieces: Article[];
     mostSellingPieces: Article[];
@@ -4156,67 +4340,108 @@ export const store = {
     autoRankedPieces: Article[];
     categories: Category[];
   }> {
-    const nextHomepageConfig: HomepageConfig = {
-      ...cachedHomepageConfig,
-      ...partial,
-      welcomeBackground: {
-        ...cachedHomepageConfig.welcomeBackground,
-        ...(partial.welcomeBackground || {})
-      },
-      startHerePieceIds: partial.startHerePieceIds !== undefined ? partial.startHerePieceIds : (cachedHomepageConfig.startHerePieceIds || ['art-01', 'art-02', 'art-03']),
-      startHereHeading: partial.startHereHeading !== undefined ? partial.startHereHeading : cachedHomepageConfig.startHereHeading,
-      startHereSubtitle: partial.startHereSubtitle !== undefined ? partial.startHereSubtitle : cachedHomepageConfig.startHereSubtitle,
-      theWritingHeading: partial.theWritingHeading !== undefined ? partial.theWritingHeading : cachedHomepageConfig.theWritingHeading,
-      theWritingSubtitle: partial.theWritingSubtitle !== undefined ? partial.theWritingSubtitle : cachedHomepageConfig.theWritingSubtitle,
-      aboutTheWritingHeading: partial.aboutTheWritingHeading !== undefined ? partial.aboutTheWritingHeading : cachedHomepageConfig.aboutTheWritingHeading,
-      aboutTheWritingStatement: partial.aboutTheWritingStatement !== undefined ? partial.aboutTheWritingStatement : cachedHomepageConfig.aboutTheWritingStatement,
-      aboutTheWritingPurpose: partial.aboutTheWritingPurpose !== undefined ? partial.aboutTheWritingPurpose : cachedHomepageConfig.aboutTheWritingPurpose,
-      aboutTheWritingButtonText: partial.aboutTheWritingButtonText !== undefined ? partial.aboutTheWritingButtonText : cachedHomepageConfig.aboutTheWritingButtonText,
-      heroHeadline: partial.heroHeadline !== undefined ? partial.heroHeadline : cachedHomepageConfig.heroHeadline,
-      heroSubheadline: partial.heroSubheadline !== undefined ? partial.heroSubheadline : cachedHomepageConfig.heroSubheadline,
-      heroQuote: partial.heroQuote !== undefined ? partial.heroQuote : cachedHomepageConfig.heroQuote,
-      heroBadge: partial.heroBadge !== undefined ? partial.heroBadge : cachedHomepageConfig.heroBadge,
-      heroCtaText: partial.heroCtaText !== undefined ? partial.heroCtaText : cachedHomepageConfig.heroCtaText,
-      banners: partial.banners !== undefined ? partial.banners : (cachedHomepageConfig.banners || []),
-      sections: partial.sections !== undefined ? partial.sections : (cachedHomepageConfig.sections || []),
-      updatedAt: new Date().toISOString(),
-      lastSavedAt: new Date().toISOString(),
-      version: '1.2.0'
-    };
-
-    const shouldUpdateAuthorBackground =
-      nextHomepageConfig.welcomeBackground?.imageUrl !== undefined &&
-      nextHomepageConfig.welcomeBackground.imageUrl !== cachedAuthor.welcomeBackgroundUrl;
-    const nextAuthor = shouldUpdateAuthorBackground
-      ? {
-          ...cachedAuthor,
-          welcomeBackgroundUrl: nextHomepageConfig.welcomeBackground.imageUrl
-        }
-      : cachedAuthor;
-
-    // A cold runtime reads `homepage` first and keeps `homepage_config` only as
-    // a legacy fallback. Persist both documents in one awaited batch so the API
-    // cannot acknowledge a save that a fresh runtime would later replace with
-    // stale canonical data.
     const db = getDb();
-    const batch = db.batch();
-    const persistedHomepage = sanitizeForFirestore(nextHomepageConfig);
-    batch.set(db.collection('site_configs').doc('homepage'), persistedHomepage, { merge: true });
-    batch.set(db.collection('site_configs').doc('homepage_config'), persistedHomepage, { merge: true });
-    if (shouldUpdateAuthorBackground) {
-      const persistedAuthor = sanitizeForFirestore(nextAuthor);
-      batch.set(db.collection('site_configs').doc('author'), persistedAuthor, { merge: true });
-      batch.set(db.collection('site_configs').doc('author_profile'), persistedAuthor, { merge: true });
-    }
-    await batch.commit();
+    const homepageRef = db.collection('site_configs').doc('homepage');
+    const legacyHomepageRef = db.collection('site_configs').doc('homepage_config');
+    const authorRef = db.collection('site_configs').doc('author');
+    const legacyAuthorRef = db.collection('site_configs').doc('author_profile');
+    const persisted = await db.runTransaction(async transaction => {
+      // Read both canonical and legacy documents before writing. Reading the
+      // canonical document gives concurrent admin saves a Firestore precondition:
+      // one transaction retries and merges the other instead of silently losing it.
+      const [homepageSnapshot, legacyHomepageSnapshot, authorSnapshot, legacyAuthorSnapshot] = await Promise.all([
+        transaction.get(homepageRef),
+        transaction.get(legacyHomepageRef),
+        transaction.get(authorRef),
+        transaction.get(legacyAuthorRef)
+      ]);
+      const remoteHomepage = homepageSnapshot.exists
+        ? homepageSnapshot.data() as Partial<HomepageConfig>
+        : legacyHomepageSnapshot.exists
+          ? legacyHomepageSnapshot.data() as Partial<HomepageConfig>
+          : {};
+      const remoteUpdatedAt = typeof remoteHomepage.updatedAt === 'string'
+        ? remoteHomepage.updatedAt
+        : null;
+      if (remoteUpdatedAt !== expectedUpdatedAt) {
+        throw new HomepageSaveConflictError();
+      }
+      const baseHomepage: HomepageConfig = {
+        ...cachedHomepageConfig,
+        ...remoteHomepage,
+        welcomeBackground: {
+          ...cachedHomepageConfig.welcomeBackground,
+          ...(remoteHomepage.welcomeBackground || {})
+        }
+      };
+      const remoteUpdatedAtMs = remoteUpdatedAt ? Date.parse(remoteUpdatedAt) : NaN;
+      const savedAt = new Date(Number.isFinite(remoteUpdatedAtMs)
+        ? Math.max(Date.now(), remoteUpdatedAtMs + 1)
+        : Date.now()).toISOString();
+      const nextHomepageConfig: HomepageConfig = {
+        ...baseHomepage,
+        ...partial,
+        welcomeBackground: {
+          ...baseHomepage.welcomeBackground,
+          ...(partial.welcomeBackground || {})
+        },
+        startHerePieceIds: partial.startHerePieceIds !== undefined ? partial.startHerePieceIds : (baseHomepage.startHerePieceIds || ['art-01', 'art-02', 'art-03']),
+        startHereHeading: partial.startHereHeading !== undefined ? partial.startHereHeading : baseHomepage.startHereHeading,
+        startHereSubtitle: partial.startHereSubtitle !== undefined ? partial.startHereSubtitle : baseHomepage.startHereSubtitle,
+        theWritingHeading: partial.theWritingHeading !== undefined ? partial.theWritingHeading : baseHomepage.theWritingHeading,
+        theWritingSubtitle: partial.theWritingSubtitle !== undefined ? partial.theWritingSubtitle : baseHomepage.theWritingSubtitle,
+        aboutTheWritingHeading: partial.aboutTheWritingHeading !== undefined ? partial.aboutTheWritingHeading : baseHomepage.aboutTheWritingHeading,
+        aboutTheWritingStatement: partial.aboutTheWritingStatement !== undefined ? partial.aboutTheWritingStatement : baseHomepage.aboutTheWritingStatement,
+        aboutTheWritingPurpose: partial.aboutTheWritingPurpose !== undefined ? partial.aboutTheWritingPurpose : baseHomepage.aboutTheWritingPurpose,
+        aboutTheWritingButtonText: partial.aboutTheWritingButtonText !== undefined ? partial.aboutTheWritingButtonText : baseHomepage.aboutTheWritingButtonText,
+        heroHeadline: partial.heroHeadline !== undefined ? partial.heroHeadline : baseHomepage.heroHeadline,
+        heroSubheadline: partial.heroSubheadline !== undefined ? partial.heroSubheadline : baseHomepage.heroSubheadline,
+        heroQuote: partial.heroQuote !== undefined ? partial.heroQuote : baseHomepage.heroQuote,
+        heroBadge: partial.heroBadge !== undefined ? partial.heroBadge : baseHomepage.heroBadge,
+        heroCtaText: partial.heroCtaText !== undefined ? partial.heroCtaText : baseHomepage.heroCtaText,
+        banners: partial.banners !== undefined ? partial.banners : (baseHomepage.banners || []),
+        sections: partial.sections !== undefined ? partial.sections : (baseHomepage.sections || []),
+        updatedAt: savedAt,
+        lastSavedAt: savedAt,
+        version: '1.2.0'
+      };
+      const remoteAuthor = authorSnapshot.exists
+        ? authorSnapshot.data() as Partial<AuthorProfile>
+        : legacyAuthorSnapshot.exists
+          ? legacyAuthorSnapshot.data() as Partial<AuthorProfile>
+          : {};
+      const baseAuthor: AuthorProfile = { ...cachedAuthor, ...remoteAuthor };
+      const shouldUpdateAuthorBackground =
+        nextHomepageConfig.welcomeBackground?.imageUrl !== undefined
+        && nextHomepageConfig.welcomeBackground.imageUrl !== baseAuthor.welcomeBackgroundUrl;
+      const nextAuthor = shouldUpdateAuthorBackground
+        ? {
+            ...baseAuthor,
+            welcomeBackgroundUrl: nextHomepageConfig.welcomeBackground.imageUrl
+          }
+        : baseAuthor;
 
-    cachedHomepageConfig = nextHomepageConfig;
-    if (shouldUpdateAuthorBackground) {
-      cachedAuthor = nextAuthor;
+      const persistedHomepage = sanitizeForFirestore(nextHomepageConfig);
+      transaction.set(homepageRef, persistedHomepage, { merge: true });
+      transaction.set(legacyHomepageRef, persistedHomepage, { merge: true });
+      if (shouldUpdateAuthorBackground) {
+        const persistedAuthor = sanitizeForFirestore(nextAuthor);
+        transaction.set(authorRef, persistedAuthor, { merge: true });
+        transaction.set(legacyAuthorRef, persistedAuthor, { merge: true });
+      }
+      return { nextHomepageConfig, nextAuthor, shouldUpdateAuthorBackground };
+    });
+
+    cachedHomepageConfig = persisted.nextHomepageConfig;
+    if (persisted.shouldUpdateAuthorBackground) {
+      cachedAuthor = persisted.nextAuthor;
       writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
     }
     writeJsonFileSync(HOMEPAGE_FILE, cachedHomepageConfig);
-    return this.getHomepageConfig();
+    return {
+      ...this.getHomepageConfig(),
+      config: persisted.nextHomepageConfig
+    };
   },
 
   // MPESA SETTINGS

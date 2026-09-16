@@ -89,7 +89,16 @@ const storeMocks = vi.hoisted(() => {
   });
 });
 
-vi.mock('./src/server/store.js', () => ({ store: storeMocks }));
+vi.mock('./src/server/store.js', () => ({
+  store: storeMocks,
+  HomepageSaveConflictError: class HomepageSaveConflictError extends Error {
+    readonly code = 'HOMEPAGE_SAVE_CONFLICT';
+
+    constructor() {
+      super('Homepage settings changed since you loaded them. Reload the latest settings before saving again.');
+    }
+  }
+}));
 vi.mock('./src/server/affiliateStore.js', () => ({
   affiliateStore: affiliateMocks,
   sanitizeAffiliateForResponse: (value: Record<string, unknown>) => {
@@ -185,6 +194,7 @@ describe('affiliate session route boundaries', () => {
       autoRankedPieces: [{ ...publicArticleFixture }],
       categories: []
     });
+    storeMocks.getFreshHomepageConfig.mockImplementation(async () => storeMocks.getHomepageConfig());
     affiliateMocks.getAffiliateDashboard.mockReturnValue({
       affiliate: {
         id: privateAffiliate.id,
@@ -434,5 +444,146 @@ describe('affiliate session route boundaries', () => {
     expect(homepage.mostSellingPieces[0]).toMatchObject({ content: '', isUnlocked: false });
     expect(homepage.mostSellingPieces[0]).not.toHaveProperty('coverImageOriginal');
     expect(JSON.stringify(homepage)).not.toContain(publicArticleFixture.content);
+  });
+
+  it('keeps the admin homepage GET response compact with oversized article bodies and image bytes', async () => {
+    const privateBody = `PRIVATE_HOMEPAGE_BODY_${'x'.repeat(400_000)}`;
+    const inlineCover = `data:image/jpeg;base64,INLINE_COVER_${'A'.repeat(400_000)}`;
+    const originalCover = `data:image/jpeg;base64,PRIVATE_ORIGINAL_${'B'.repeat(400_000)}`;
+    const largeArticle = {
+      ...publicArticleFixture,
+      content: privateBody,
+      coverImage: inlineCover,
+      coverImageOriginal: originalCover
+    };
+    storeMocks.getArticles.mockReturnValue([largeArticle]);
+    storeMocks.getHomepageConfig.mockReturnValue({
+      config: {
+        welcomeBackground: {},
+        mostSellingPieceIds: [largeArticle.id],
+        pieceOfTheWeekId: largeArticle.id,
+        updatedAt: '2026-09-09T01:00:00.000Z'
+      },
+      startHerePieces: [largeArticle],
+      mostSellingPieces: [largeArticle],
+      pieceOfTheWeek: largeArticle,
+      autoRankedPieces: [largeArticle],
+      categories: []
+    });
+
+    const response = await fetch(`${baseUrl}/api/admin/homepage`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    const responseText = await response.text();
+    const body = JSON.parse(responseText) as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(responseText.length).toBeLessThan(20_000);
+    expect(responseText).not.toContain('PRIVATE_HOMEPAGE_BODY_');
+    expect(responseText).not.toContain('INLINE_COVER_');
+    expect(responseText).not.toContain('PRIVATE_ORIGINAL_');
+    for (const article of [
+      ...body.startHerePieces,
+      ...body.mostSellingPieces,
+      body.pieceOfTheWeek,
+      ...body.autoRankedPieces,
+      ...body.allPublishedPieces
+    ]) {
+      expect(article.content).toBe('');
+      expect(article).not.toHaveProperty('coverImageOriginal');
+      expect(article.coverImage).toMatch(/^\/api\/articles\/art-public-1\/cover\?v=/);
+    }
+  });
+
+  it('keeps the admin homepage PUT success response compact after a versioned partial save', async () => {
+    const largeArticle = {
+      ...publicArticleFixture,
+      content: `PRIVATE_SAVED_BODY_${'x'.repeat(400_000)}`,
+      coverImage: `data:image/jpeg;base64,INLINE_SAVED_COVER_${'A'.repeat(400_000)}`,
+      coverImageOriginal: `data:image/jpeg;base64,PRIVATE_SAVED_ORIGINAL_${'B'.repeat(400_000)}`
+    };
+    const savedHomepage = {
+      config: {
+        welcomeBackground: {},
+        mostSellingPieceIds: [largeArticle.id],
+        pieceOfTheWeekId: largeArticle.id,
+        updatedAt: '2026-09-09T02:00:00.000Z'
+      },
+      startHerePieces: [largeArticle],
+      mostSellingPieces: [largeArticle],
+      pieceOfTheWeek: largeArticle,
+      autoRankedPieces: [largeArticle],
+      categories: []
+    };
+    storeMocks.getArticles.mockReturnValue([largeArticle]);
+    storeMocks.saveHomepageConfig.mockResolvedValueOnce(savedHomepage);
+
+    const response = await fetch(`${baseUrl}/api/admin/homepage`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        config: { pieceOfTheWeekId: largeArticle.id },
+        expectedUpdatedAt: '2026-09-09T01:00:00.000Z'
+      })
+    });
+    const responseText = await response.text();
+    const body = JSON.parse(responseText) as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.saveHomepageConfig).toHaveBeenCalledWith(
+      { pieceOfTheWeekId: largeArticle.id },
+      '2026-09-09T01:00:00.000Z'
+    );
+    expect(responseText.length).toBeLessThan(20_000);
+    expect(responseText).not.toContain('PRIVATE_SAVED_BODY_');
+    expect(responseText).not.toContain('INLINE_SAVED_COVER_');
+    expect(responseText).not.toContain('PRIVATE_SAVED_ORIGINAL_');
+    expect(body).toMatchObject({ success: true, config: savedHomepage.config });
+    for (const article of [
+      ...body.startHerePieces,
+      ...body.mostSellingPieces,
+      body.pieceOfTheWeek,
+      ...body.autoRankedPieces,
+      ...body.allPublishedPieces
+    ]) {
+      expect(article.content).toBe('');
+      expect(article).not.toHaveProperty('coverImageOriginal');
+      expect(article.coverImage).toMatch(/^\/api\/articles\/art-public-1\/cover\?v=/);
+    }
+  });
+
+  it('returns 409 for a stale admin homepage save instead of a successful acknowledgement', async () => {
+    const { HomepageSaveConflictError } = await import('./src/server/store.js');
+    storeMocks.saveHomepageConfig.mockRejectedValueOnce(new HomepageSaveConflictError());
+
+    const response = await fetch(`${baseUrl}/api/admin/homepage`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        config: { pieceOfTheWeekId: publicArticleFixture.id },
+        expectedUpdatedAt: '2026-09-09T00:00:00.000Z'
+      })
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: 'HOMEPAGE_SAVE_CONFLICT',
+      error: expect.stringMatching(/reload the latest settings/i)
+    });
+    expect(storeMocks.saveHomepageConfig).toHaveBeenCalledWith(
+      { pieceOfTheWeekId: publicArticleFixture.id },
+      '2026-09-09T00:00:00.000Z'
+    );
   });
 });

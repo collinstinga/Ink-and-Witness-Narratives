@@ -205,6 +205,30 @@ describe('manual-access entitlement records', () => {
     expect(normalizeManualAccessEntitlement(activeRecord)).toEqual(activeRecord);
   });
 
+  it('preserves an optional finite positive entitlement expiry', () => {
+    const expiresAt = Date.parse('2026-10-09T08:00:00.000Z');
+    expect(normalizeManualAccessEntitlement({
+      ...activeRecord,
+      expiresAt
+    })).toEqual({
+      ...activeRecord,
+      expiresAt
+    });
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['not finite', Number.POSITIVE_INFINITY],
+    ['not a number', '1791532800000'],
+    ['null', null]
+  ])('rejects a %s entitlement expiry', (_label, expiresAt) => {
+    expect(normalizeManualAccessEntitlement({
+      ...activeRecord,
+      expiresAt
+    })).toBeNull();
+  });
+
   it('normalizes valid revoked and deleted tombstones', () => {
     const revoked = {
       ...activeRecord,
@@ -220,6 +244,19 @@ describe('manual-access entitlement records', () => {
 
     expect(normalizeManualAccessEntitlement(revoked)).toEqual(revoked);
     expect(normalizeManualAccessEntitlement(deleted)).toEqual(deleted);
+  });
+
+  it('preserves expiry while normalizing terminal tombstones', () => {
+    const expiresAt = Date.parse('2026-10-09T08:00:00.000Z');
+    const revoked = {
+      ...activeRecord,
+      state: 'revoked',
+      updatedAt: laterAt,
+      expiresAt,
+      revokedAt: laterAt
+    } as const;
+
+    expect(normalizeManualAccessEntitlement(revoked)).toEqual(revoked);
   });
 
   it.each([

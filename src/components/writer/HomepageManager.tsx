@@ -92,6 +92,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
 
   const [publishedPieces, setPublishedPieces] = useState<Article[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedConfig, setHasLoadedConfig] = useState(false);
   const [saving, setSaving] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -99,7 +100,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
   const [savingPermanent, setSavingPermanent] = useState(false);
   const [permanentSaved, setPermanentSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const isInitialLoad = useRef(true);
+  const configRef = useRef(config);
+  const persistedConfigSnapshotRef = useRef<string | null>(null);
+  const persistedConfigUpdatedAtRef = useRef<string | null>(null);
+  const loadRequestSequenceRef = useRef(0);
+  const saveRequestSequenceRef = useRef(0);
+  configRef.current = config;
 
   // Picker modal state
   const [activePickerSlot, setActivePickerSlot] = useState<{
@@ -115,10 +121,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
 
   // Track changes to mark dirty
   useEffect(() => {
-    if (isInitialLoad.current) {
+    const persistedSnapshot = persistedConfigSnapshotRef.current;
+    if (persistedSnapshot === null) {
       return;
     }
-    setIsDirty(true);
+
+    setIsDirty(JSON.stringify(config) !== persistedSnapshot);
   }, [config]);
 
   useEffect(() => {
@@ -128,25 +136,41 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
   }, [isDirty, onDirtyChange]);
 
   // Load admin homepage config from server
-  const loadHomepageData = async () => {
+  const loadHomepageData = React.useCallback(async () => {
+    const requestSequence = ++loadRequestSequenceRef.current;
+    const configSnapshotAtRequestStart = JSON.stringify(configRef.current);
+
     try {
       setLoading(true);
       setError(null);
       const data = await api.getAdminHomepageData();
-      if (data && data.config) {
-        setConfig({
+
+      if (requestSequence !== loadRequestSequenceRef.current) {
+        return;
+      }
+
+      if (!data?.config) {
+        throw new Error('The homepage response did not include its configuration.');
+      }
+
+      if (data.config) {
+        const loadedConfig: HomepageConfig = {
+          // Keep every persisted field, including headings, ordering, and
+          // metadata that this editor does not render or directly change.
+          ...data.config,
           welcomeBackground: {
-            imageUrl: data.config.welcomeBackground?.imageUrl || '',
-            fit: data.config.welcomeBackground?.fit || 'cover',
+            ...data.config.welcomeBackground,
+            imageUrl: data.config.welcomeBackground?.imageUrl ?? '',
+            fit: data.config.welcomeBackground?.fit ?? 'cover',
             positionX: typeof data.config.welcomeBackground?.positionX === 'number' ? data.config.welcomeBackground.positionX : 50,
             positionY: typeof data.config.welcomeBackground?.positionY === 'number' ? data.config.welcomeBackground.positionY : 50,
             zoom: typeof data.config.welcomeBackground?.zoom === 'number' ? data.config.welcomeBackground.zoom : 100,
             overlayStrength: typeof data.config.welcomeBackground?.overlayStrength === 'number' ? data.config.welcomeBackground.overlayStrength : 25,
           },
-          mostSellingPieceIds: data.config.mostSellingPieceIds || [],
-          pieceOfTheWeekId: data.config.pieceOfTheWeekId || '',
-          mostSellingMode: data.config.mostSellingMode || 'auto',
-          banners: data.config.banners && data.config.banners.length > 0 ? data.config.banners : [
+          mostSellingPieceIds: Array.isArray(data.config.mostSellingPieceIds) ? data.config.mostSellingPieceIds : [],
+          pieceOfTheWeekId: data.config.pieceOfTheWeekId ?? '',
+          mostSellingMode: data.config.mostSellingMode ?? 'auto',
+          banners: Array.isArray(data.config.banners) ? data.config.banners : [
             {
               id: 'banner-01',
               text: 'New Monograph: The Architecture of Sovereignty is now live.',
@@ -156,19 +180,48 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
               isVisible: false
             }
           ],
-          heroHeadline: data.config.heroHeadline || 'INK & WITNESS',
-          heroQuote: data.config.heroQuote || '“I write because the heart keeps a ledger the tongue is too proud to read.”',
-          heroSubheadline: data.config.heroSubheadline || 'An archive of lived experience, intimacy, power, and memory authored by Jake.',
-          heroBadge: data.config.heroBadge || 'Ink & Witness Narratives',
-          sections: data.config.sections && data.config.sections.length > 0 ? data.config.sections : [
+          heroHeadline: data.config.heroHeadline ?? 'INK & WITNESS',
+          heroQuote: data.config.heroQuote ?? '“I write because the heart keeps a ledger the tongue is too proud to read.”',
+          heroSubheadline: data.config.heroSubheadline ?? 'An archive of lived experience, intimacy, power, and memory authored by Jake.',
+          heroBadge: data.config.heroBadge ?? 'Ink & Witness Narratives',
+          sections: Array.isArray(data.config.sections) ? data.config.sections : [
             { id: 'piece_of_the_week', title: 'Piece of the Week', isVisible: true, order: 1 },
             { id: 'most_selling', title: 'Most Selling Pieces', isVisible: true, order: 2 },
             { id: 'latest', title: 'Latest from the Ink', isVisible: true, order: 3 },
             { id: 'catalogue', title: 'Explore Full Catalogue', isVisible: true, order: 4 },
             { id: 'patronage', title: 'Patronage & Reader Support', isVisible: true, order: 5 }
           ]
-        });
-        setLastSavedAt(data.config.lastSavedAt || data.config.updatedAt || null);
+        };
+        const currentConfigSnapshot = JSON.stringify(configRef.current);
+        const persistedConfigSnapshot = persistedConfigSnapshotRef.current;
+        const configChangedDuringLoad = currentConfigSnapshot !== configSnapshotAtRequestStart;
+        const hasUnsavedChanges = configChangedDuringLoad || (
+          persistedConfigSnapshot !== null &&
+          currentConfigSnapshot !== persistedConfigSnapshot
+        );
+
+        // Article refreshes also reload this endpoint. Do not let that response
+        // overwrite edits which were made after the last successful hydration/save.
+        const loadedConfigSnapshot = JSON.stringify(loadedConfig);
+        if (!hasUnsavedChanges) {
+          persistedConfigSnapshotRef.current = loadedConfigSnapshot;
+          persistedConfigUpdatedAtRef.current = data.config.updatedAt ?? null;
+          configRef.current = loadedConfig;
+          setConfig(loadedConfig);
+          setIsDirty(false);
+          setHasLoadedConfig(true);
+        } else if (persistedConfigSnapshot === null) {
+          // A user can begin editing while the initial request is in flight.
+          // Keep that local edit, but establish the server response as its
+          // comparison baseline so the unsaved state remains visible.
+          persistedConfigSnapshotRef.current = loadedConfigSnapshot;
+          persistedConfigUpdatedAtRef.current = data.config.updatedAt ?? null;
+          setIsDirty(currentConfigSnapshot !== loadedConfigSnapshot);
+          setHasLoadedConfig(true);
+        }
+        if (!hasUnsavedChanges || persistedConfigSnapshot === null) {
+          setLastSavedAt(data.config.lastSavedAt || data.config.updatedAt || null);
+        }
       }
       if (data.allPublishedPieces) {
         setPublishedPieces(data.allPublishedPieces);
@@ -176,37 +229,65 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
         // Filter from props
         setPublishedPieces(articles.filter(a => a.status === 'published'));
       }
-      setTimeout(() => {
-        isInitialLoad.current = false;
-        setIsDirty(false);
-      }, 100);
     } catch (err: any) {
+      if (requestSequence !== loadRequestSequenceRef.current) {
+        return;
+      }
+
       console.error('Failed to load homepage settings:', err);
-      setError('Failed to load homepage settings from server.');
+      setError(persistedConfigSnapshotRef.current === null
+        ? 'Failed to load homepage settings from the server. Saving is unavailable until a successful reload.'
+        : 'Could not refresh homepage settings. Your current edits are preserved; a save may require conflict resolution.');
       setPublishedPieces(articles.filter(a => a.status === 'published'));
     } finally {
-      setLoading(false);
+      if (requestSequence === loadRequestSequenceRef.current) {
+        setLoading(false);
+      }
     }
-  };
-
-  useEffect(() => {
-    loadHomepageData();
   }, [articles]);
 
+  useEffect(() => {
+    void loadHomepageData();
+
+    return () => {
+      // Invalidate the in-flight request on dependency change or unmount.
+      loadRequestSequenceRef.current += 1;
+    };
+  }, [loadHomepageData]);
+
   const handleSave = async () => {
+    if (!hasLoadedConfig) {
+      setError('Load the current homepage settings before saving.');
+      return;
+    }
+    const requestSequence = ++saveRequestSequenceRef.current;
+    const configToSave = config;
+    const configSnapshotToSave = JSON.stringify(configToSave);
+    const expectedUpdatedAt = persistedConfigUpdatedAtRef.current;
+
     try {
       setSaving(true);
       setError(null);
-      await api.saveAdminHomepageData(config);
-      setIsDirty(false);
-      const now = new Date().toISOString();
-      setLastSavedAt(now);
+      const response = await api.saveAdminHomepageData(configToSave, expectedUpdatedAt);
+      if (requestSequence !== saveRequestSequenceRef.current) return;
+      if (!response?.config?.updatedAt) {
+        throw new Error('The server did not return the saved homepage version. Reload before saving again.');
+      }
+      persistedConfigSnapshotRef.current = configSnapshotToSave;
+      persistedConfigUpdatedAtRef.current = response.config.updatedAt;
+      setIsDirty(JSON.stringify(configRef.current) !== configSnapshotToSave);
+      setLastSavedAt(response.config.lastSavedAt || response.config.updatedAt);
       if (onRefreshArticles) onRefreshArticles();
     } catch (err: any) {
+      if (requestSequence !== saveRequestSequenceRef.current) return;
       console.error('Error saving homepage configuration:', err);
-      setError(err.message || 'Failed to save homepage settings.');
+      setError((err as { status?: number }).status === 409
+        ? 'The homepage changed in another session. Your edits are still here and were not saved. Copy them before reloading the latest settings.'
+        : err.message || 'Failed to save homepage settings.');
     } finally {
-      setSaving(false);
+      if (requestSequence === saveRequestSequenceRef.current) {
+        setSaving(false);
+      }
     }
   };
 
@@ -406,6 +487,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
             lastSavedAt={lastSavedAt}
             errorMessage={error}
             saveButtonText="SAVE HOMEPAGE"
+            disabled={loading || !hasLoadedConfig}
           />
         </div>
       </div>
@@ -466,6 +548,16 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
         <div className="p-4 rounded-xl bg-rose-950/50 border border-rose-800 text-rose-300 text-xs font-mono">
           {error}
         </div>
+      )}
+      {!hasLoadedConfig && !loading && (
+        <button
+          type="button"
+          onClick={() => void loadHomepageData()}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-sky-700 hover:bg-sky-600 text-white text-xs font-semibold"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Retry loading homepage settings
+        </button>
       )}
 
       {/* ============================================================ */}
@@ -1358,6 +1450,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           lastSavedAt={lastSavedAt}
           errorMessage={error}
           saveButtonText="SAVE HOMEPAGE CHANGES"
+          disabled={loading || !hasLoadedConfig}
         />
       </div>
 
@@ -1477,6 +1570,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           lastSavedAt={lastSavedAt}
           errorMessage={error}
           saveButtonText="SAVE HOMEPAGE CONFIGURATION"
+          disabled={loading || !hasLoadedConfig}
         />
       </div>
 

@@ -1,19 +1,20 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   X, 
   BookmarkCheck, 
   BookOpen, 
   FileText, 
   CheckCircle2, 
-  Trash2,
-  ShieldCheck
+  Trash2
 } from 'lucide-react';
-import { Article } from '../types.js';
+import { Article, LibraryArticle } from '../types.js';
 import { clearStoredTokens } from '../utils/api.js';
 
-type LibraryArticle = Article & {
-  libraryAccessSource?: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
-};
+function getAccessLabel(source: LibraryArticle['libraryAccessSource']): string {
+  if (source === 'MANUAL_GRANT') return 'Writer-granted & Active';
+  if (source === 'SYSTEM') return 'Account-provided & Active';
+  return 'Purchased & Active';
+}
 
 interface MyLibraryModalProps {
   isOpen: boolean;
@@ -35,18 +36,24 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
   error = ''
 }) => {
   const [clearedNotice, setClearedNotice] = useState(false);
+  const reloadTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (reloadTimerRef.current !== null) {
+      window.clearTimeout(reloadTimerRef.current);
+    }
+  }, []);
 
   if (!isOpen) return null;
 
-  const handleClearData = async () => {
+  const handleClearData = () => {
     clearStoredTokens();
-    try {
-      await fetch('/api/reset-data', { method: 'POST' });
-    } catch {
-      // ignore
+    if (reloadTimerRef.current !== null) {
+      window.clearTimeout(reloadTimerRef.current);
     }
     setClearedNotice(true);
-    setTimeout(() => {
+    reloadTimerRef.current = window.setTimeout(() => {
+      reloadTimerRef.current = null;
       setClearedNotice(false);
       window.location.reload();
     }, 1200);
@@ -55,6 +62,9 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
   return (
     <div 
       id="my-library-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="my-library-title"
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md overflow-y-auto"
     >
       <div className="relative w-full max-w-2xl rounded-3xl bg-[#0d1424] border border-slate-700 shadow-2xl overflow-hidden my-6">
@@ -66,7 +76,7 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
               <BookmarkCheck className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="font-display font-bold text-base text-white tracking-wide">
+              <h3 id="my-library-title" className="font-display font-bold text-base text-white tracking-wide">
                 READER LIBRARY
               </h3>
               <p className="text-[11px] font-mono text-slate-400">
@@ -79,8 +89,9 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
             <button
               id="btn-clear-stored-data"
               onClick={handleClearData}
-              title="Clear Local Cached Data"
-              className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/60 border border-slate-800 hover:border-rose-800 text-slate-400 hover:text-rose-300 text-xs font-mono flex items-center gap-1 transition-colors cursor-pointer"
+              disabled={clearedNotice}
+              title="Clear purchase tokens cached only on this device"
+              className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/60 border border-slate-800 hover:border-rose-800 text-slate-400 hover:text-rose-300 text-xs font-mono flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Reset Cache</span>
@@ -88,6 +99,7 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
 
             <button
               onClick={onClose}
+              aria-label="Close reader library"
               className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
@@ -99,22 +111,32 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
         {clearedNotice && (
           <div className="bg-emerald-950/90 border-b border-emerald-800 text-emerald-300 text-xs font-mono p-3 text-center flex items-center justify-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            <span>M-Pesa details &amp; stored cache have been cleared successfully. Refreshing...</span>
+            <span>Local purchase cache cleared. Account-synced access is unchanged. Refreshing...</span>
           </div>
         )}
 
         {/* Library Content */}
         <div className="p-6 sm:p-7 space-y-4 max-h-[75vh] overflow-y-auto">
+          {isLoading && articles.length > 0 && (
+            <p className="text-center text-xs text-sky-300" role="status" aria-live="polite">
+              Verifying account-synced access… locally stored purchases are shown below.
+            </p>
+          )}
+          {error && (
+            <div className="rounded-xl border border-amber-800/70 bg-amber-950/40 px-4 py-3 text-center" role="alert">
+              <p className="text-sm font-semibold text-amber-300">Account library temporarily unavailable</p>
+              <p className="mt-1 text-xs text-slate-300">{error}</p>
+            </div>
+          )}
           {isLoading && articles.length === 0 ? (
             <div className="text-center py-10 space-y-3" role="status" aria-live="polite">
               <div className="w-8 h-8 rounded-full border-2 border-slate-700 border-t-sky-400 animate-spin mx-auto" />
               <p className="text-sm text-slate-300">Loading your verified library…</p>
             </div>
           ) : error && articles.length === 0 ? (
-            <div className="text-center py-10 space-y-2" role="alert">
-              <p className="text-sm font-semibold text-amber-300">Library temporarily unavailable</p>
-              <p className="text-xs text-slate-400">{error}</p>
-            </div>
+            <p className="py-4 text-center text-xs text-slate-400">
+              Account-backed pieces remain hidden until verification succeeds.
+            </p>
           ) : articles.length === 0 ? (
             <div className="text-center py-10 space-y-4">
               <div className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-800 text-slate-400 flex items-center justify-center mx-auto">
@@ -149,9 +171,7 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
                       <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3" />
                         <span>
-                          {art.libraryAccessSource === 'MANUAL_GRANT'
-                            ? 'Writer-granted & Active'
-                            : 'Purchased & Active'}
+                          {getAccessLabel(art.libraryAccessSource)}
                         </span>
                       </span>
                     </div>

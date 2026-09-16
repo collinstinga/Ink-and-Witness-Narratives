@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   Award, 
   Flame, 
@@ -13,7 +13,7 @@ import {
   ChevronRight,
   Sliders
 } from 'lucide-react';
-import { HomepagePerformanceItem, Article, HomepageConfig } from '../../../types.js';
+import { HomepagePerformanceItem, Article } from '../../../types.js';
 import { api } from '../../../utils/api.js';
 
 interface HomepageEditorialControlProps {
@@ -46,27 +46,64 @@ export const HomepageEditorialControl: React.FC<HomepageEditorialControlProps> =
 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [hasUnsavedSelections, setHasUnsavedSelections] = useState(false);
+  const selectionRevisionRef = useRef(0);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (successTimerRef.current !== null) clearTimeout(successTimerRef.current);
+  }, []);
 
   const publishedArticles = articles.filter(a => a.status === 'published');
 
+  const markSelectionChanged = () => {
+    selectionRevisionRef.current += 1;
+    setHasUnsavedSelections(true);
+    setSaveSuccess(false);
+  };
+
   const handleSaveHomepageConfig = async () => {
+    const selectionRevisionAtSave = selectionRevisionRef.current;
     try {
       setSaving(true);
-      // Fetch current config first to preserve background settings
+      setSaveError(null);
+      setSaveSuccess(false);
+      if (successTimerRef.current !== null) clearTimeout(successTimerRef.current);
+
+      // Capture the revision, then update only the editorial fields owned here.
       const current = await api.getAdminHomepageData();
-      const newConfig: HomepageConfig = {
-        ...(current?.config || {}),
+      if (!current?.config) {
+        throw new Error('Could not load the current homepage settings. No placements were saved.');
+      }
+      if (selectionRevisionRef.current !== selectionRevisionAtSave) {
+        setSaveError('Your selections changed while preparing the save. Press Save again to publish the latest choices.');
+        return;
+      }
+      await api.saveAdminHomepageData({
         pieceOfTheWeekId: selectedPotwId,
         mostSellingMode: mode,
-        mostSellingPieceIds: manualSlotIds
-      };
-
-      await api.saveAdminHomepageData(newConfig);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+        mostSellingPieceIds: [...manualSlotIds]
+      }, current.config.updatedAt ?? null);
+      if (selectionRevisionRef.current === selectionRevisionAtSave) {
+        setHasUnsavedSelections(false);
+        setSaveSuccess(true);
+        successTimerRef.current = setTimeout(() => {
+          setSaveSuccess(false);
+          successTimerRef.current = null;
+        }, 3000);
+      } else {
+        setSaveError('The earlier placements were saved, but your newer selection changes remain unsaved. Save again to publish them.');
+      }
       if (onRefresh) onRefresh();
-    } catch (err) {
+    } catch (err: unknown) {
       console.error('Failed to update homepage editorial settings:', err);
+      setSaveSuccess(false);
+      setSaveError(
+        err instanceof Error && 'status' in err && err.status === 409
+          ? 'Homepage settings changed while you were editing. Reload the page, review the latest settings, and save again.'
+          : err instanceof Error ? err.message : 'Failed to save homepage placements. Please try again.'
+      );
     } finally {
       setSaving(false);
     }
@@ -122,6 +159,15 @@ export const HomepageEditorialControl: React.FC<HomepageEditorialControlProps> =
         </button>
       </div>
 
+      {saveError && (
+        <div role="alert" className="p-3 rounded-xl border border-rose-800 bg-rose-950/50 text-rose-200 text-xs font-sans">
+          {saveError}
+        </div>
+      )}
+      {hasUnsavedSelections && !saveError && (
+        <p className="text-xs text-amber-300" role="status">Unsaved placement changes</p>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         
         {/* PIECE OF THE WEEK ROI & CONTROLLER (5 Cols) */}
@@ -142,7 +188,10 @@ export const HomepageEditorialControl: React.FC<HomepageEditorialControlProps> =
               <label className="text-[11px] font-mono text-slate-400">Featured Article:</label>
               <select
                 value={selectedPotwId}
-                onChange={(e) => setSelectedPotwId(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value !== selectedPotwId) markSelectionChanged();
+                  setSelectedPotwId(e.target.value);
+                }}
                 className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs font-sans text-white focus:outline-none focus:border-sky-500"
               >
                 {publishedArticles.map(a => (
@@ -192,7 +241,10 @@ export const HomepageEditorialControl: React.FC<HomepageEditorialControlProps> =
             <div className="flex items-center gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800 text-xs font-mono">
               <button
                 type="button"
-                onClick={() => setMode('auto')}
+                onClick={() => {
+                  if (mode !== 'auto') markSelectionChanged();
+                  setMode('auto');
+                }}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
                   mode === 'auto'
                     ? 'bg-sky-600 text-white font-bold'
@@ -203,7 +255,10 @@ export const HomepageEditorialControl: React.FC<HomepageEditorialControlProps> =
               </button>
               <button
                 type="button"
-                onClick={() => setMode('manual')}
+                onClick={() => {
+                  if (mode !== 'manual') markSelectionChanged();
+                  setMode('manual');
+                }}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
                   mode === 'manual'
                     ? 'bg-sky-600 text-white font-bold'
@@ -257,6 +312,7 @@ export const HomepageEditorialControl: React.FC<HomepageEditorialControlProps> =
                           onChange={(e) => {
                             const updated = [...manualSlotIds];
                             updated[slotIdx] = e.target.value;
+                            if (manualSlotIds[slotIdx] !== e.target.value) markSelectionChanged();
                             setManualSlotIds(updated);
                           }}
                           className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-xs font-sans text-white focus:outline-none focus:border-sky-500 truncate"

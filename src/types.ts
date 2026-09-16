@@ -157,6 +157,28 @@ export interface ReaderLicense {
   checkoutRequestId?: string;
 }
 
+export type LibraryAccessSource = 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+
+export type LibraryArticle = Article & {
+  libraryAccessSource?: LibraryAccessSource;
+};
+
+export interface UserLibraryEntry {
+  articleId: string;
+  articleTitle: string;
+  accessSource: LibraryAccessSource;
+  createdAt: string;
+  expiresAt: number;
+  receipt?: string;
+  article: Article & { isUnlocked: true };
+}
+
+export interface UserLibraryResponse {
+  success: boolean;
+  library: UserLibraryEntry[];
+  totalCount: number;
+}
+
 export interface ManualAccessGrant {
   id: string;
   articleId: string;

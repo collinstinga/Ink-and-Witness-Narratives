@@ -19,7 +19,9 @@ import {
   AffiliateSettings,
   AffiliateAuditLogEntry,
   AdminAffiliatesSummary,
-  ReaderLicense
+  ReaderLicense,
+  UserLibraryResponse,
+  HomepageConfig
 } from '../types.js';
 import { getActiveReferral } from './affiliateReferral.js';
 
@@ -477,19 +479,7 @@ export const api = {
     return res.json();
   },
 
-  async getUserLibrary(): Promise<{
-    success: boolean;
-    library: Array<{
-      articleId: string;
-      articleTitle: string;
-      accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
-      createdAt: string;
-      expiresAt: number;
-      receipt?: string;
-      article: Article & { isUnlocked: true };
-    }>;
-    totalCount: number;
-  }> {
+  async getUserLibrary(): Promise<UserLibraryResponse> {
     const res = await fetch('/api/user/library', { credentials: 'include' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -1236,7 +1226,7 @@ export const api = {
   },
 
   async getAdminHomepageData(): Promise<{
-    config: any;
+    config: HomepageConfig;
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
     allPublishedPieces: Article[];
@@ -1249,7 +1239,10 @@ export const api = {
     return res.json();
   },
 
-  async saveAdminHomepageData(data: any): Promise<any> {
+  async saveAdminHomepageData(
+    config: Partial<HomepageConfig>,
+    expectedUpdatedAt: string | null
+  ): Promise<{ success: boolean; config: HomepageConfig }> {
     const activeToken = getWriterToken();
     const res = await fetch('/api/admin/homepage', {
       method: 'PUT',
@@ -1257,11 +1250,14 @@ export const api = {
         'Content-Type': 'application/json',
         'x-admin-token': activeToken || ''
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify({ config, expectedUpdatedAt })
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to save homepage settings');
+      throw Object.assign(
+        new Error(err.error || 'Failed to save homepage settings'),
+        { status: res.status }
+      );
     }
     return res.json();
   },

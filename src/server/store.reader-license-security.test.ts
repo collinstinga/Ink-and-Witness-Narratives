@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type FakeRef = {
   collectionName: string;
@@ -185,6 +185,7 @@ vi.mock('./affiliateStore.js', () => ({
 
 describe('reader-license query and ownership security', () => {
   let store: typeof import('./store.js').store;
+  const originalManualAccessSecret = process.env.MANUAL_ACCESS_PHONE_RESERVATION_SECRET;
 
   const license = (articleId: string, overrides: Record<string, unknown> = {}) => ({
     articleId,
@@ -208,10 +209,19 @@ describe('reader-license query and ownership security', () => {
     delete process.env.MPESA_CONSUMER_SECRET;
     delete process.env.MPESA_PASSKEY;
     delete process.env.MPESA_SECRET_MIGRATION_APPROVED;
+    process.env.MANUAL_ACCESS_PHONE_RESERVATION_SECRET = '0123456789abcdef'.repeat(4);
 
     ({ store } = await import('./store.js'));
     await store.init();
   }, 60_000);
+
+  afterAll(() => {
+    if (originalManualAccessSecret === undefined) {
+      delete process.env.MANUAL_ACCESS_PHONE_RESERVATION_SECRET;
+    } else {
+      process.env.MANUAL_ACCESS_PHONE_RESERVATION_SECRET = originalManualAccessSecret;
+    }
+  });
 
   beforeEach(() => {
     for (const key of Array.from(firestoreMock.documents.keys())) {
@@ -238,14 +248,18 @@ describe('reader-license query and ownership security', () => {
       expect.objectContaining({ articleId: 'article_bounded', token })
     ]);
     expect(second).toBe(true);
-    expect(firestoreMock.queryCalls).toHaveBeenCalledTimes(1);
+    expect(firestoreMock.queryCalls.mock.calls.filter(
+      ([collectionName]) => collectionName === 'reader_licenses'
+    )).toHaveLength(1);
     expect(firestoreMock.queryCalls).toHaveBeenCalledWith(
       'reader_licenses',
       'userId',
       '==',
       'reader_query'
     );
-    expect(firestoreMock.limitCalls).toHaveBeenCalledExactlyOnceWith('reader_licenses', 200);
+    expect(firestoreMock.limitCalls.mock.calls.filter(
+      ([collectionName]) => collectionName === 'reader_licenses'
+    )).toEqual([['reader_licenses', 200]]);
     expect(firestoreMock.getAllFirestoreDocs.mock.calls
       .filter(([collectionName]) => collectionName === 'reader_licenses')).toHaveLength(0);
   });

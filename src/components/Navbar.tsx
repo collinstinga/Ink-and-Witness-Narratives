@@ -49,6 +49,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const showLibraryLink = unlockedCount > 0 || currentUser?.role === 'client';
 
   useEffect(() => {
     const handleScroll = () => {
@@ -156,7 +157,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {unlockedCount > 0 && onOpenLibrary && (
+          {showLibraryLink && onOpenLibrary && (
             <button
               id="nav-unlocked-library-btn"
               onClick={onOpenLibrary}
@@ -235,9 +236,12 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {unlockedCount > 0 && onOpenLibrary && (
+          {showLibraryLink && onOpenLibrary && (
             <button
-              onClick={onOpenLibrary}
+              onClick={() => {
+                onOpenLibrary();
+                setMobileMenuOpen(false);
+              }}
               className="p-2 rounded-xl bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs font-mono flex items-center gap-1"
             >
               <BookmarkCheck className="w-4 h-4 text-emerald-400" />
@@ -293,7 +297,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {unlockedCount > 0 && onOpenLibrary && (
+            {showLibraryLink && onOpenLibrary && (
               <button
                 onClick={() => {
                   onOpenLibrary();
@@ -302,7 +306,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 className="text-left px-4 py-3 rounded-xl text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 flex items-center gap-2 mt-2 cursor-pointer font-semibold"
               >
                 <BookmarkCheck className="w-4 h-4" />
-                <span>My Unlocked Library ({unlockedCount})</span>
+                <span>My Library ({unlockedCount})</span>
               </button>
             )}
 

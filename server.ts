@@ -8,8 +8,8 @@ import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
-import { store } from "./src/server/store.js";
-import { Article, PaymentTransaction, User } from "./src/types.js";
+import { HomepageSaveConflictError, store } from "./src/server/store.js";
+import { Article, HomepageConfig, PaymentTransaction, User } from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import { sanitizeAffiliateForResponse } from "./src/server/affiliateStore.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
@@ -148,6 +148,47 @@ function toPublicArticleSummary(article: Article, defaultPriceKes: number, isUnl
     previewParagraphs: article.previewParagraphs || [],
     tags: article.tags || [],
     isUnlocked: !isPaid || isUnlocked
+  };
+}
+
+function toHomepageAdminArticleSummary(article: Article): Article {
+  // The homepage picker needs metadata, never article bodies or inline image
+  // bytes. Keeping this response compact also prevents an acknowledged save
+  // from appearing to fail while returning a very large catalogue payload.
+  return {
+    id: article.id,
+    title: (article.title || '').slice(0, 300),
+    subtitle: (article.subtitle || '').slice(0, 500),
+    slug: article.slug,
+    excerpt: (article.excerpt || '').slice(0, 800),
+    content: '',
+    category: article.category,
+    categories: [],
+    topics: [],
+    status: article.status,
+    isPaid: article.isPaid,
+    priceKes: article.priceKes,
+    readTimeMinutes: article.readTimeMinutes,
+    publishedAt: article.publishedAt,
+    createdAt: article.createdAt,
+    updatedAt: article.updatedAt,
+    coverImage: publicCoverUrl(article),
+    downloadsCount: article.downloadsCount || 0,
+    previewParagraphs: [],
+    tags: []
+  };
+}
+
+function toHomepageAdminResponse(homepage: ReturnType<typeof store.getHomepageConfig>) {
+  const summarize = (article: Article) => toHomepageAdminArticleSummary(article);
+  return {
+    config: homepage.config,
+    startHerePieces: homepage.startHerePieces.map(summarize),
+    mostSellingPieces: homepage.mostSellingPieces.map(summarize),
+    pieceOfTheWeek: homepage.pieceOfTheWeek ? summarize(homepage.pieceOfTheWeek) : undefined,
+    autoRankedPieces: homepage.autoRankedPieces.map(summarize),
+    categories: homepage.categories,
+    allPublishedPieces: store.getArticles(false).map(summarize)
   };
 }
 
@@ -2609,7 +2650,7 @@ export async function createApp() {
       } else if (target === 'author_cover') {
         updatedRecord = store.updateAuthorCoverPhoto(saved.url);
       } else if (target === 'welcome_background') {
-        updatedRecord = store.updateWelcomeBackground(saved.url);
+        updatedRecord = await store.updateWelcomeBackground(saved.url);
       } else if (target === 'favicon') {
         updatedRecord = store.updateWebsiteFavicon(saved.url);
       } else if (target === 'logo') {
@@ -2645,7 +2686,7 @@ export async function createApp() {
       } else if (target === 'author_cover') {
         updatedRecord = store.removeAuthorCoverPhoto();
       } else if (target === 'welcome_background') {
-        updatedRecord = store.removeWelcomeBackground();
+        updatedRecord = await store.removeWelcomeBackground();
       } else if (target === 'favicon') {
         updatedRecord = store.removeWebsiteFavicon();
       } else if (target === 'logo') {
@@ -2822,14 +2863,10 @@ export async function createApp() {
   });
 
   // Writer: Get Homepage Management Data
-  app.get("/api/admin/homepage", requireAdminAuth, (_req: Request, res: Response) => {
+  app.get("/api/admin/homepage", requireAdminAuth, async (_req: Request, res: Response) => {
     try {
-      const data = store.getHomepageConfig();
-      const allPublished = store.getArticles(false);
-      res.json({
-        ...data,
-        allPublishedPieces: allPublished
-      });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(toHomepageAdminResponse(await store.getFreshHomepageConfig()));
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch homepage data." });
     }
@@ -2838,15 +2875,44 @@ export async function createApp() {
   // Writer: Save Homepage Management Data
   app.put("/api/admin/homepage", requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const result = await store.saveHomepageConfig(req.body);
-      const allPublished = store.getArticles(false);
+      const payload = req.body as Record<string, unknown> | null;
+      const config = payload?.config;
+      const expectedUpdatedAt = payload?.expectedUpdatedAt;
+      const allowedFields = new Set<keyof HomepageConfig>([
+        'welcomeBackground', 'startHerePieceIds', 'startHereHeading', 'startHereSubtitle',
+        'theWritingHeading', 'theWritingSubtitle', 'aboutTheWritingHeading',
+        'aboutTheWritingStatement', 'aboutTheWritingPurpose', 'aboutTheWritingButtonText',
+        'mostSellingPieceIds', 'pieceOfTheWeekId', 'mostSellingMode', 'banners',
+        'heroHeadline', 'heroSubheadline', 'heroQuote', 'heroBadge', 'heroCtaText',
+        'sections', 'sectionOrder', 'pieceOrdering', 'updatedAt', 'lastSavedAt', 'version'
+      ]);
+      if (
+        !payload
+        || typeof payload !== 'object'
+        || Array.isArray(payload)
+        || !Object.hasOwn(payload, 'expectedUpdatedAt')
+        || (expectedUpdatedAt !== null && (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.length > 128))
+        || !config
+        || typeof config !== 'object'
+        || Array.isArray(config)
+        || Object.keys(config).some(key => !allowedFields.has(key as keyof HomepageConfig))
+      ) {
+        return res.status(400).json({ error: 'A valid versioned homepage configuration is required.' });
+      }
+      const result = await store.saveHomepageConfig(
+        config as Partial<HomepageConfig>,
+        expectedUpdatedAt as string | null
+      );
+      res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
-        ...result,
-        allPublishedPieces: allPublished,
+        ...toHomepageAdminResponse(result),
         message: "Homepage settings and curated sections saved successfully."
       });
     } catch (err: any) {
+      if (err instanceof HomepageSaveConflictError) {
+        return res.status(409).json({ code: err.code, error: err.message });
+      }
       console.error("Save homepage error:", err);
       res.status(500).json({ error: err.message || "Failed to save homepage settings." });
     }

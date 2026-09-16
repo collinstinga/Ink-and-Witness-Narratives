@@ -9,7 +9,7 @@ import {
   ArrowRight,
   LifeBuoy
 } from 'lucide-react';
-import { Article, AuthorProfile, Category, WriterNavTab, User } from './types.js';
+import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle } from './types.js';
 import { api, getStoredTokens } from './utils/api.js';
 import { applyFavicon } from './utils/favicon.js';
 
@@ -52,9 +52,6 @@ export interface NavState {
   readerScrollTop?: number;
 }
 
-type LibraryAccessSource = 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
-type LibraryArticle = Article & { libraryAccessSource?: LibraryAccessSource };
-
 export default function App() {
   const [author, setAuthor] = useState<AuthorProfile | null>(null);
   const [articles, setArticles] = useState<Article[]>([]);
@@ -96,7 +93,12 @@ export default function App() {
   const unlockedTokensRef = React.useRef<Record<string, any>>({});
   unlockedTokensRef.current = unlockedTokens;
   const currentUserRef = React.useRef<User | null>(null);
-  currentUserRef.current = currentUser;
+  const accountLibraryRequestIdRef = React.useRef(0);
+  const authSessionRequestIdRef = React.useRef(0);
+
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
 
   const libraryArticles = React.useMemo(() => {
     const unlockedById = new Map<string, LibraryArticle>();
@@ -104,7 +106,10 @@ export default function App() {
       unlockedById.set(article.id, { ...article, isUnlocked: true });
     }
     for (const article of articles) {
-      if (unlockedTokens[article.id] || (article.slug && unlockedTokens[article.slug])) {
+      if (
+        !unlockedById.has(article.id) &&
+        (unlockedTokens[article.id] || (article.slug && unlockedTokens[article.slug]))
+      ) {
         unlockedById.set(article.id, {
           ...article,
           isUnlocked: true,
@@ -566,7 +571,8 @@ export default function App() {
     }, 'push');
   };
 
-  const refreshAccountLibrary = async (user: User | null = currentUser) => {
+  const refreshAccountLibrary = React.useCallback(async (user: User | null) => {
+    const requestId = ++accountLibraryRequestIdRef.current;
     if (!user || user.role !== 'client') {
       setAccountLibraryArticles([]);
       setAccountLibraryLoading(false);
@@ -576,9 +582,15 @@ export default function App() {
 
     setAccountLibraryLoading(true);
     setAccountLibraryError('');
+    // Fail closed while account-backed entitlements are being revalidated.
+    // Locally held purchase tokens remain available through libraryArticles.
+    setAccountLibraryArticles([]);
     try {
       const response = await api.getUserLibrary();
-      if (currentUserRef.current?.id !== user.id) return;
+      if (
+        accountLibraryRequestIdRef.current !== requestId ||
+        currentUserRef.current?.id !== user.id
+      ) return;
       setAccountLibraryArticles(
         response.library
           .map(item => ({
@@ -587,18 +599,25 @@ export default function App() {
           }))
       );
     } catch {
-      if (currentUserRef.current?.id === user.id) {
-        setAccountLibraryError('Your account library is temporarily unavailable. Close and reopen it to retry.');
+      if (
+        accountLibraryRequestIdRef.current === requestId &&
+        currentUserRef.current?.id === user.id
+      ) {
+        setAccountLibraryArticles([]);
+        setAccountLibraryError('Account-synced access could not be verified. Locally stored purchases remain available; close and reopen the library to retry.');
       }
     } finally {
-      if (currentUserRef.current?.id === user.id) {
+      if (
+        accountLibraryRequestIdRef.current === requestId &&
+        currentUserRef.current?.id === user.id
+      ) {
         setAccountLibraryLoading(false);
       }
     }
-  };
+  }, []);
 
   const handleOpenLibrary = () => {
-    void refreshAccountLibrary();
+    void refreshAccountLibrary(currentUserRef.current);
     navigate({ isLibraryOpen: true, isCheckoutOpen: false }, 'push');
   };
 
@@ -683,6 +702,9 @@ export default function App() {
   };
 
   const handleAuthSuccess = (user: User) => {
+    authSessionRequestIdRef.current += 1;
+    accountLibraryRequestIdRef.current += 1;
+    currentUserRef.current = user;
     setCurrentUser(user);
     setAccountLibraryArticles([]);
     setAccountLibraryError('');
@@ -695,9 +717,13 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    authSessionRequestIdRef.current += 1;
+    accountLibraryRequestIdRef.current += 1;
+    setAccountLibraryLoading(false);
     try {
       await api.authLogout();
     } catch {}
+    currentUserRef.current = null;
     setCurrentUser(null);
     setAccountLibraryArticles([]);
     setAccountLibraryLoading(false);
@@ -708,17 +734,34 @@ export default function App() {
 
   // Check current session on mount
   useEffect(() => {
+    const requestId = ++authSessionRequestIdRef.current;
+    let active = true;
     api.authGetMe().then(res => {
-      if (res.authenticated && res.user) {
+      if (
+        active &&
+        authSessionRequestIdRef.current === requestId &&
+        res.authenticated &&
+        res.user
+      ) {
+        currentUserRef.current = res.user;
         setCurrentUser(res.user);
       }
     }).catch(() => {});
+    return () => {
+      active = false;
+      if (authSessionRequestIdRef.current === requestId) {
+        authSessionRequestIdRef.current += 1;
+      }
+    };
   }, []);
 
   useEffect(() => {
     setAccountLibraryArticles([]);
     void refreshAccountLibrary(currentUser);
-  }, [currentUser?.id, currentUser?.role]);
+    return () => {
+      accountLibraryRequestIdRef.current += 1;
+    };
+  }, [currentUser?.id, currentUser?.role, refreshAccountLibrary]);
 
   // Fetch initial data
   const fetchData = async () => {
@@ -848,6 +891,7 @@ export default function App() {
         currentView={currentView}
         onNavigate={handleNavigateView}
         onOpenLibrary={handleOpenLibrary}
+        onOpenWriterStudio={handleOpenWriterStudio}
         onOpenSupport={handleOpenSupport}
         onOpenAffiliates={handleOpenAffiliates}
         onOpenSignIn={() => setIsSignInOpen(true)}
