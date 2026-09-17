@@ -299,11 +299,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   <span className="px-3 py-1 rounded-md bg-sky-950 text-sky-300 border border-sky-800/80 font-medium">
                     {resolvedPieceOfTheWeek.category}
                   </span>
-                  <span className="flex items-center gap-1">
-                    <Clock className="w-3.5 h-3.5 text-slate-400" />
-                    {resolvedPieceOfTheWeek.readTimeMinutes} min read
-                  </span>
-                  <span>•</span>
+                  {resolvedPieceOfTheWeek.showReadTime !== false && (
+                    <>
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                        {resolvedPieceOfTheWeek.readTimeMinutes} min read
+                      </span>
+                      <span>•</span>
+                    </>
+                  )}
                   <span className="flex items-center gap-1">
                     <Calendar className="w-3.5 h-3.5 text-slate-400" />
                     {resolvedPieceOfTheWeek.publishedAt}

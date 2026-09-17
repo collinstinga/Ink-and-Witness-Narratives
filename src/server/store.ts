@@ -2189,6 +2189,9 @@ export const store = {
       currencyOverrides,
       priceHistory,
       readTimeMinutes: Number(article.readTimeMinutes) || Math.max(3, Math.ceil((article.content || '').split(/\s+/).length / 200)),
+      showReadTime: article.showReadTime === undefined
+        ? prevArticle?.showReadTime !== false
+        : article.showReadTime !== false,
       updatedAt: now,
       createdAt: article.createdAt || prevArticle?.createdAt || now,
       publishedAt: article.status === 'published' ? (article.publishedAt || prevArticle?.publishedAt || now.split('T')[0]) : (article.publishedAt || ''),

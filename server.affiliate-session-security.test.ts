@@ -446,6 +446,46 @@ describe('affiliate session route boundaries', () => {
     expect(JSON.stringify(homepage)).not.toContain(publicArticleFixture.content);
   });
 
+  it('keeps legacy reading times visible and carries an explicit hidden setting to public summaries', async () => {
+    storeMocks.getArticles.mockReturnValue([
+      { ...publicArticleFixture },
+      { ...publicArticleFixture, id: 'art-hidden-time', showReadTime: false }
+    ]);
+
+    const response = await fetch(`${baseUrl}/api/articles`);
+    const articles = await response.json() as Record<string, any>[];
+
+    expect(response.status).toBe(200);
+    expect(articles.map(article => article.showReadTime)).toEqual([true, false]);
+  });
+
+  it('accepts a hidden reading time when a writer creates a piece', async () => {
+    storeMocks.saveArticle.mockImplementationOnce(async (article: unknown) => article);
+
+    const response = await fetch(`${baseUrl}/api/admin/articles`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        title: 'An Unhurried Piece',
+        content: 'A short passage.',
+        status: 'draft',
+        showReadTime: false
+      })
+    });
+
+    expect(response.status).toBe(201);
+    expect(storeMocks.saveArticle).toHaveBeenCalledWith(
+      expect.objectContaining({ showReadTime: false }),
+      true,
+      'Initial creation'
+    );
+  });
+
   it('keeps the admin homepage GET response compact with oversized article bodies and image bytes', async () => {
     const privateBody = `PRIVATE_HOMEPAGE_BODY_${'x'.repeat(400_000)}`;
     const inlineCover = `data:image/jpeg;base64,INLINE_COVER_${'A'.repeat(400_000)}`;

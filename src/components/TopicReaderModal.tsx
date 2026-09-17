@@ -235,7 +235,7 @@ export const TopicReaderModal: React.FC<TopicReaderModalProps> = ({
                 <div className={`${currentPiece.coverImage ? 'md:col-span-7' : 'md:col-span-12'} flex flex-col justify-between space-y-4`}>
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center gap-3 text-xs font-mono text-slate-400">
-                      {currentPiece.readTimeMinutes && (
+                      {currentPiece.showReadTime !== false && currentPiece.readTimeMinutes > 0 && (
                         <span className="flex items-center gap-1">
                           <Clock className="w-3.5 h-3.5 text-slate-500" />
                           <span>{currentPiece.readTimeMinutes} min read</span>
@@ -379,7 +379,7 @@ export const TopicReaderModal: React.FC<TopicReaderModalProps> = ({
                     <div className="space-y-2">
                       <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
                         <span>{art.category || 'Monograph'}</span>
-                        <span>{art.readTimeMinutes || 4} min read</span>
+                        {art.showReadTime !== false && <span>{art.readTimeMinutes || 4} min read</span>}
                       </div>
                       <h4 className="font-display text-lg font-bold text-white group-hover:text-sky-300 transition-colors leading-snug">
                         {art.title}

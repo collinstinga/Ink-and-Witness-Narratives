@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Article } from '../types.js';
 
 const firestore = vi.hoisted(() => {
   type StoredDocument = Record<string, unknown>;
@@ -381,6 +382,38 @@ describe('homepage configuration persistence', () => {
     expect(publicHomepage.pieceOfTheWeek?.id).toBe('new-piece');
     expect(firestore.getFirestoreDoc).toHaveBeenCalledWith('site_configs', 'homepage');
     expect(firestore.getFirestoreDoc).toHaveBeenCalledWith('articles', 'new-piece');
+  }, 60_000);
+
+  it('preserves a hidden read-time preference when an article update omits that field', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const article: Article = {
+      id: 'read-time-persistence-test',
+      title: 'A Quiet Chapter',
+      subtitle: '',
+      slug: 'a-quiet-chapter',
+      excerpt: '',
+      content: 'A short piece.',
+      category: 'Essays',
+      status: 'draft',
+      isPaid: false,
+      priceKes: 0,
+      readTimeMinutes: 1,
+      showReadTime: false,
+      publishedAt: '',
+      createdAt: '2026-09-17T00:00:00.000Z',
+      updatedAt: '2026-09-17T00:00:00.000Z',
+      downloadsCount: 0,
+      previewParagraphs: [],
+      tags: []
+    };
+
+    store.saveArticle(article);
+    const updated = store.saveArticle({ ...article, title: 'A Quiet Chapter, Revised', showReadTime: undefined });
+    expect(updated.showReadTime).toBe(false);
+
+    const legacy = store.saveArticle({ ...article, id: 'legacy-read-time-test', showReadTime: undefined });
+    expect(legacy.showReadTime).toBe(true);
   }, 60_000);
 
   it('does not resurrect a removed background from a warm instance or author fallback', async () => {

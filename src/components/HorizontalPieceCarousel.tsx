@@ -301,10 +301,12 @@ export const HorizontalPieceCarousel: React.FC<HorizontalPieceCarouselProps> = (
 
                 {/* Cover Subtle Swipe Indicator on Mobile */}
                 <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-[11px] font-mono text-slate-400 pointer-events-none">
-                  <span className="flex items-center gap-1 bg-slate-950/80 px-2 py-0.5 rounded border border-slate-800/80 backdrop-blur-sm">
-                    <Clock className="w-3 h-3 text-slate-400" />
-                    <span>{activePiece.readTimeMinutes || 5} min read</span>
-                  </span>
+                  {activePiece.showReadTime !== false && (
+                    <span className="flex items-center gap-1 bg-slate-950/80 px-2 py-0.5 rounded border border-slate-800/80 backdrop-blur-sm">
+                      <Clock className="w-3 h-3 text-slate-400" />
+                      <span>{activePiece.readTimeMinutes || 5} min read</span>
+                    </span>
+                  )}
                   <span className="flex items-center gap-1 bg-slate-950/80 px-2 py-0.5 rounded border border-slate-800/80 backdrop-blur-sm">
                     <Calendar className="w-3 h-3 text-slate-400" />
                     <span>{activePiece.publishedAt}</span>

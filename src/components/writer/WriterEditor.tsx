@@ -106,6 +106,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [status, setStatus] = useState<ArticleStatus>(initialArticle?.status || 'draft');
   const [scheduledAt, setScheduledAt] = useState<string>(initialArticle?.scheduledAt || '');
   const [isPaid, setIsPaid] = useState<boolean>(initialArticle?.isPaid !== false);
+  const [showReadTime, setShowReadTime] = useState<boolean>(initialArticle?.showReadTime !== false);
   const [priceKes, setPriceKes] = useState<number>(initialArticle?.priceKes || 1050);
   const [prices, setPrices] = useState<Record<string, number>>(initialArticle?.prices || {});
   const [currencyOverrides, setCurrencyOverrides] = useState<string[]>(initialArticle?.currencyOverrides || []);
@@ -221,6 +222,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     status, 
     scheduledAt, 
     isPaid, 
+    showReadTime,
     priceKes, 
     prices,
     currencyOverrides,
@@ -277,6 +279,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         );
         setStatus(res.article.status);
         setIsPaid(res.article.isPaid !== false);
+        setShowReadTime(res.article.showReadTime !== false);
         setPriceKes(res.article.priceKes || 300);
         setCoverImage(res.article.coverImage || PRESET_COVERS[0].url);
         setTags(res.article.tags || []);
@@ -314,6 +317,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
           prices,
           currencyOverrides,
           readTimeMinutes,
+          showReadTime,
           coverImage,
           tags,
           featured,
@@ -346,6 +350,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     isPaid, 
     priceKes, 
     readTimeMinutes, 
+    showReadTime,
     coverImage, 
     tags, 
     featured, 
@@ -556,6 +561,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         prices,
         currencyOverrides,
         readTimeMinutes,
+        showReadTime,
         coverImage,
         coverImageOriginal,
         coverImageCrop: coverImageCrop ? {
@@ -631,6 +637,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       isPaid,
       priceKes,
       readTimeMinutes,
+      showReadTime,
       publishedAt: new Date().toISOString().split('T')[0],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -1018,6 +1025,19 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               Markdown Enabled
             </span>
           </div>
+
+          <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-[#0b1120] px-4 py-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showReadTime}
+              onChange={(event) => setShowReadTime(event.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-sky-500"
+            />
+            <span className="space-y-1">
+              <span className="block text-sm font-medium text-slate-200">Show estimated reading time to readers</span>
+              <span className="block text-xs text-slate-400">Turn this off to hide the time estimate on this piece. Your private editor estimate stays visible.</span>
+            </span>
+          </label>
 
           {/* Curated Related Pieces Selector */}
           <div className="p-5 rounded-2xl bg-[#0b1120] border border-slate-800 space-y-4">

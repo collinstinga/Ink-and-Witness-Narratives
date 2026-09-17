@@ -1397,8 +1397,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
                 {piece ? (
                   <>
                     <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
-                      <span>{piece.readTimeMinutes} min read</span>
-                      <span>•</span>
+                      {piece.showReadTime !== false && (
+                        <>
+                          <span>{piece.readTimeMinutes} min read</span>
+                          <span>•</span>
+                        </>
+                      )}
                       <span>Published on {piece.publishedAt}</span>
                     </div>
 

@@ -77,6 +77,7 @@ export interface Article {
   currencyOverrides?: string[]; // List of currencies with manual price overrides
   priceHistory?: PriceHistoryEntry[]; // Audit trail of price changes
   readTimeMinutes: number;
+  showReadTime?: boolean; // Defaults to visible for pieces created before this setting.
   publishedAt: string;
   scheduledAt?: string;
   createdAt: string;

@@ -94,11 +94,15 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
         <div>
           {/* Metadata Row */}
           <div className="flex items-center gap-3 text-xs text-slate-400 font-mono mb-3">
-            <span className="flex items-center gap-1">
-              <Clock className="w-3.5 h-3.5 text-slate-400" />
-              {article.readTimeMinutes} min read
-            </span>
-            <span>•</span>
+            {article.showReadTime !== false && (
+              <>
+                <span className="flex items-center gap-1">
+                  <Clock className="w-3.5 h-3.5 text-slate-400" />
+                  {article.readTimeMinutes} min read
+                </span>
+                <span>•</span>
+              </>
+            )}
             <span className="flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
               {article.publishedAt}

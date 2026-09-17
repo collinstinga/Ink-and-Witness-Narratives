@@ -45,6 +45,7 @@ import {
 } from 'lucide-react';
 import { Article, AuthorProfile, User } from '../types.js';
 import { api, getArticleReceipt } from '../utils/api.js';
+import { chooseNarrationVoice, cleanTextForNarration, splitNarrationText } from '../utils/narration.js';
 
 interface ArticleReaderModalProps {
   article: Article | null;
@@ -69,22 +70,7 @@ interface SpeechChunk {
   label: string;
   text: string;
   rawIndex?: number;
-}
-
-// Clean markdown symbols for natural speech synthesis
-function cleanMarkdownForSpeech(text: string): string {
-  return text
-    .replace(/^#{1,6}\s+/gm, '') // headings
-    .replace(/\*\*(.*?)\*\*/g, '$1') // bold
-    .replace(/\*(.*?)\*/g, '$1') // italic
-    .replace(/`(.*?)`/g, '$1') // inline code
-    .replace(/```[\s\S]*?```/g, '') // code blocks
-    .replace(/^>\s*/gm, '') // blockquotes
-    .replace(/\[(.*?)\]\(.*?\)/g, '$1') // links
-    .replace(/^[-*+]\s+/gm, '') // bullets
-    .replace(/^\d+\.\s+/gm, '') // numbered lists
-    .replace(/---+/g, '') // horizontal rules
-    .trim();
+  pauseAfterMs?: number;
 }
 
 export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
@@ -216,16 +202,15 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const [isAudioActive, setIsAudioActive] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
-  const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+  const [playbackRate, setPlaybackRate] = useState<number>(0.9);
   const [autoScroll, setAutoScroll] = useState(true);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>('');
+  const narrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const narrationGenerationRef = useRef(0);
 
   const currentChunkIndexRef = useRef(currentChunkIndex);
   currentChunkIndexRef.current = currentChunkIndex;
-
-  const isPlayingRef = useRef(isPlaying);
-  isPlayingRef.current = isPlaying;
 
   const playbackRateRef = useRef(playbackRate);
   playbackRateRef.current = playbackRate;
@@ -273,14 +258,37 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     if (!article) return [];
     const chunks: SpeechChunk[] = [];
     const authorName = author?.name || 'Jake';
+    const addProseChunks = (
+      type: SpeechChunk['type'],
+      text: string,
+      label: string,
+      rawIndex: number,
+      pauseAfterMs: number
+    ) => {
+      const segments = splitNarrationText(cleanTextForNarration(text), 300);
+      segments.forEach((segment, segmentIndex) => {
+        chunks.push({
+          id: `para-${rawIndex}-${segmentIndex}`,
+          type,
+          label,
+          text: segment,
+          rawIndex,
+          pauseAfterMs: segmentIndex === segments.length - 1 ? pauseAfterMs : 120
+        });
+      });
+    };
 
     // 1. Introduction Chunk
-    const introText = `${article.title}. ${article.subtitle ? article.subtitle + '.' : ''} Curated and authored by ${authorName}. Category: ${article.category}. Estimated reading time: ${article.readTimeMinutes} minutes.`;
+    const introText = [cleanTextForNarration(article.title), article.subtitle && cleanTextForNarration(article.subtitle), `By ${authorName}`]
+      .filter(Boolean)
+      .map(part => /[.!?…]$/.test(part!.trim()) ? part!.trim() : `${part!.trim()}.`)
+      .join(' ');
     chunks.push({
       id: 'intro',
       type: 'intro',
       label: 'Title & Monograph Introduction',
-      text: introText
+      text: introText,
+      pauseAfterMs: 600
     });
 
     if (effectiveUnlocked && article.content) {
@@ -290,33 +298,15 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
         if (!trimmed || trimmed.startsWith('---')) return;
 
         if (trimmed.startsWith('# ') || trimmed.startsWith('## ') || trimmed.startsWith('### ')) {
-          const cleanHeading = cleanMarkdownForSpeech(trimmed);
-          chunks.push({
-            id: `para-${idx}`,
-            type: 'header',
-            label: `Section: ${cleanHeading.slice(0, 30)}...`,
-            text: `Section: ${cleanHeading}`,
-            rawIndex: idx
-          });
+          const cleanHeading = cleanTextForNarration(trimmed);
+          addProseChunks('header', trimmed, `Section: ${cleanHeading.slice(0, 30)}...`, idx, 650);
         } else if (trimmed.startsWith('>')) {
-          const cleanQuote = cleanMarkdownForSpeech(trimmed);
-          chunks.push({
-            id: `para-${idx}`,
-            type: 'quote',
-            label: `Key Quote: ${cleanQuote.slice(0, 30)}...`,
-            text: `Quote: ${cleanQuote}`,
-            rawIndex: idx
-          });
+          const cleanQuote = cleanTextForNarration(trimmed);
+          addProseChunks('quote', trimmed, `Key Quote: ${cleanQuote.slice(0, 30)}...`, idx, 450);
         } else {
-          const cleanText = cleanMarkdownForSpeech(trimmed);
+          const cleanText = cleanTextForNarration(trimmed);
           if (cleanText.length > 5) {
-            chunks.push({
-              id: `para-${idx}`,
-              type: 'paragraph',
-              label: `Paragraph ${idx + 1}`,
-              text: cleanText,
-              rawIndex: idx
-            });
+            addProseChunks('paragraph', trimmed, `Paragraph ${idx + 1}`, idx, 350);
           }
         }
       });
@@ -350,15 +340,15 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
     const updateVoices = () => {
       const voices = window.speechSynthesis.getVoices();
-      const englishVoices = voices.filter(v => v.lang.startsWith('en'));
-      const list = englishVoices.length > 0 ? englishVoices : voices;
+      const list = voices.filter(v => /^en(?:[-_]|$)/i.test(v.lang));
       setAvailableVoices(list);
 
-      if (list.length > 0 && !selectedVoiceURIRef.current) {
-        const preferred = list.find(v => 
-          /google|natural|samantha|daniel|arthur|guy|george|serena/i.test(v.name)
-        ) || list[0];
-        setSelectedVoiceURI(preferred.voiceURI);
+      if (list.length === 0) {
+        setSelectedVoiceURI('');
+        return;
+      }
+      if (list.length > 0 && !list.some(v => v.voiceURI === selectedVoiceURIRef.current)) {
+        setSelectedVoiceURI(chooseNarrationVoice(list)?.voiceURI || list[0].voiceURI);
       }
     };
 
@@ -374,12 +364,20 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
   // Cleanup speech synthesis on unmount, close, or article switch
   useEffect(() => {
+    setIsPlaying(false);
+    setIsAudioActive(false);
+    setCurrentChunkIndex(0);
     return () => {
+      narrationGenerationRef.current += 1;
+      if (narrationTimerRef.current) {
+        clearTimeout(narrationTimerRef.current);
+        narrationTimerRef.current = null;
+      }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
     };
-  }, [article?.id, isOpen]);
+  }, [article?.id, article?.content, effectiveUnlocked, isOpen]);
 
   // Shield keyboard shortcuts for printing, copying, or saving
   useEffect(() => {
@@ -397,6 +395,17 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, effectiveUnlocked]);
 
+  const cancelNarration = () => {
+    narrationGenerationRef.current += 1;
+    if (narrationTimerRef.current) {
+      clearTimeout(narrationTimerRef.current);
+      narrationTimerRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  };
+
   // Core Speech Synthesis Speaker Function
   const speakChunk = (chunkIndex: number, rate?: number, voiceURI?: string) => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -410,29 +419,36 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       return;
     }
 
-    window.speechSynthesis.cancel();
+    cancelNarration();
+    const generation = narrationGenerationRef.current;
 
     const chunk = chunks[chunkIndex];
     const utterance = new SpeechSynthesisUtterance(chunk.text);
     
     const currentRate = rate !== undefined ? rate : playbackRateRef.current;
-    utterance.rate = currentRate;
-    utterance.pitch = 1.0;
+    utterance.rate = chunk.type === 'header' ? currentRate * 0.95 : currentRate;
+    utterance.pitch = chunk.type === 'header' ? 0.98 : 1.0;
 
     // Apply chosen voice
     const currentVoiceURI = voiceURI !== undefined ? voiceURI : selectedVoiceURIRef.current;
-    if (currentVoiceURI) {
-      const voice = window.speechSynthesis.getVoices().find(v => v.voiceURI === currentVoiceURI);
-      if (voice) utterance.voice = voice;
+    const voices = window.speechSynthesis.getVoices().filter(v => /^en(?:[-_]|$)/i.test(v.lang));
+    const voice = voices.find(v => v.voiceURI === currentVoiceURI) || chooseNarrationVoice(voices);
+    if (voice) {
+      utterance.voice = voice;
+      utterance.lang = voice.lang;
+    } else {
+      utterance.lang = 'en';
     }
 
     utterance.onstart = () => {
+      if (generation !== narrationGenerationRef.current) return;
       setIsPlaying(true);
       setCurrentChunkIndex(chunkIndex);
 
       // Auto-scroll to current paragraph if enabled
       if (autoScrollRef.current && chunk.rawIndex !== undefined) {
         setTimeout(() => {
+          if (generation !== narrationGenerationRef.current) return;
           const elem = document.getElementById(`reader-para-${chunk.rawIndex}`);
           if (elem) {
             elem.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -442,12 +458,15 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     };
 
     utterance.onend = () => {
-      if (!isPlayingRef.current) return;
+      if (generation !== narrationGenerationRef.current) return;
 
       if (chunkIndex + 1 < audioChunksRef.current.length) {
         const nextIndex = chunkIndex + 1;
         setCurrentChunkIndex(nextIndex);
-        speakChunk(nextIndex);
+        narrationTimerRef.current = setTimeout(() => {
+          narrationTimerRef.current = null;
+          if (generation === narrationGenerationRef.current) speakChunk(nextIndex);
+        }, chunk.pauseAfterMs ?? 200);
       } else {
         setIsPlaying(false);
         showToast('Monograph audio narration complete.');
@@ -455,6 +474,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     };
 
     utterance.onerror = (e) => {
+      if (generation !== narrationGenerationRef.current) return;
       if (e.error === 'canceled' || e.error === 'interrupted') return;
       console.warn('SpeechSynthesis error:', e);
       setIsPlaying(false);
@@ -464,6 +484,24 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   };
 
   // User Actions for Audio Playback
+  const handlePlayPause = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    if (isPlaying) {
+      if (narrationTimerRef.current) {
+        clearTimeout(narrationTimerRef.current);
+        narrationTimerRef.current = null;
+      } else if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+      }
+      setIsPlaying(false);
+    } else if (window.speechSynthesis.paused && window.speechSynthesis.speaking) {
+      window.speechSynthesis.resume();
+      setIsPlaying(true);
+    } else {
+      speakChunk(currentChunkIndex);
+    }
+  };
+
   const handleToggleAudio = () => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
       showToast('Text-to-Speech is not supported in this browser.');
@@ -475,21 +513,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       speakChunk(currentChunkIndex);
       showToast('Hands-free Audio Narration started');
     } else {
-      if (isPlaying) {
-        window.speechSynthesis.cancel();
-        setIsPlaying(false);
-      } else {
-        speakChunk(currentChunkIndex);
-      }
-    }
-  };
-
-  const handlePlayPause = () => {
-    if (isPlaying) {
-      window.speechSynthesis.cancel();
-      setIsPlaying(false);
-    } else {
-      speakChunk(currentChunkIndex);
+      handlePlayPause();
     }
   };
 
@@ -497,8 +521,10 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     if (currentChunkIndex + 1 < audioChunks.length) {
       const next = currentChunkIndex + 1;
       setCurrentChunkIndex(next);
-      if (isPlaying || isAudioActive) {
+      if (isPlaying) {
         speakChunk(next);
+      } else {
+        cancelNarration();
       }
     }
   };
@@ -507,16 +533,16 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     if (currentChunkIndex > 0) {
       const prev = currentChunkIndex - 1;
       setCurrentChunkIndex(prev);
-      if (isPlaying || isAudioActive) {
+      if (isPlaying) {
         speakChunk(prev);
+      } else {
+        cancelNarration();
       }
     }
   };
 
   const handleStopAudio = () => {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
+    cancelNarration();
     setIsPlaying(false);
     setCurrentChunkIndex(0);
   };
@@ -530,6 +556,8 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     setPlaybackRate(newRate);
     if (isPlaying) {
       speakChunk(currentChunkIndex, newRate);
+    } else if (typeof window !== 'undefined' && window.speechSynthesis?.paused) {
+      cancelNarration();
     }
   };
 
@@ -537,6 +565,8 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     setSelectedVoiceURI(voiceURI);
     if (isPlaying) {
       speakChunk(currentChunkIndex, playbackRate, voiceURI);
+    } else if (typeof window !== 'undefined' && window.speechSynthesis?.paused) {
+      cancelNarration();
     }
   };
 
@@ -834,6 +864,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                 id="reader-close-btn"
                 onClick={onClose}
                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer ml-1 shrink-0"
+                aria-label="Close reader"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -856,6 +887,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   disabled={currentChunkIndex === 0}
                   className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:hover:bg-slate-900 text-slate-300 transition-colors cursor-pointer"
                   title="Previous Paragraph / Section"
+                  aria-label="Previous narration segment"
                 >
                   <SkipBack className="w-3.5 h-3.5" />
                 </button>
@@ -865,6 +897,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   onClick={handlePlayPause}
                   className="p-2 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-all shadow-md shadow-amber-500/30 cursor-pointer flex items-center justify-center"
                   title={isPlaying ? 'Pause Audio' : 'Resume Audio'}
+                  aria-label={isPlaying ? 'Pause narration' : 'Resume narration'}
                 >
                   {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
                 </button>
@@ -875,6 +908,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   disabled={currentChunkIndex >= audioChunks.length - 1}
                   className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:hover:bg-slate-900 text-slate-300 transition-colors cursor-pointer"
                   title="Next Paragraph / Section"
+                  aria-label="Next narration segment"
                 >
                   <SkipForward className="w-3.5 h-3.5" />
                 </button>
@@ -884,6 +918,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   onClick={handleStopAudio}
                   className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
                   title="Reset Narration to Beginning"
+                  aria-label="Reset narration to beginning"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                 </button>
@@ -913,10 +948,12 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
             <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
               {/* Speed Rate Pills */}
               <div className="flex items-center gap-1 bg-slate-900 px-1.5 py-0.5 rounded-lg border border-slate-800 text-[11px]">
-                {[1.0, 1.25, 1.5, 2.0].map((rate) => (
+                {[0.9, 1.0, 1.2, 1.5].map((rate) => (
                   <button
                     key={rate}
                     onClick={() => handleSpeedChange(rate)}
+                    aria-label={`Narration speed ${rate} times`}
+                    aria-pressed={playbackRate === rate}
                     className={`px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
                       playbackRate === rate 
                         ? 'bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40' 
@@ -934,11 +971,12 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   value={selectedVoiceURI}
                   onChange={(e) => handleVoiceChange(e.target.value)}
                   className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-slate-300 hover:text-white focus:outline-none focus:border-amber-500 cursor-pointer max-w-[120px] truncate"
-                  title="Select Voice"
+                  title="Select a narration voice available on this device"
+                  aria-label="Narration voice"
                 >
                   {availableVoices.map((v) => (
                     <option key={v.voiceURI} value={v.voiceURI}>
-                      {v.name.replace(/(Microsoft|Google|Apple|Desktop)\s*/i, '').slice(0, 16)} ({v.lang})
+                      {v.name} ({v.lang})
                     </option>
                   ))}
                 </select>
@@ -963,6 +1001,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                 onClick={handleCloseAudio}
                 className="p-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Close Audio Narration Player"
+                aria-label="Close narration player"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -980,11 +1019,15 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                 <Calendar className="w-3.5 h-3.5" />
                 Published {article.publishedAt}
               </span>
-              <span>•</span>
-              <span className="flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5" />
-                {article.readTimeMinutes} min read
-              </span>
+              {article.showReadTime !== false && (
+                <>
+                  <span>•</span>
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5" />
+                    {article.readTimeMinutes} min read
+                  </span>
+                </>
+              )}
               {receipt && (
                 <>
                   <span>•</span>
@@ -1069,6 +1112,19 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
               </div>
             </div>
           </header>
+
+          {effectiveUnlocked && article.coverImage && (
+            <figure
+              id="reader-unlocked-cover"
+              className="mx-auto max-w-xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-xl"
+            >
+              <img
+                src={article.coverImage}
+                alt={`${article.title} cover`}
+                className="block w-full max-h-[32rem] object-contain"
+              />
+            </figure>
+          )}
 
           {/* Article Body Content */}
           <div className={`prose-editorial ${fontSizeClass} text-slate-200 space-y-6 max-w-none`}>
@@ -1561,7 +1617,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                             <span>Story Synopsis &amp; Thematic Overview</span>
                           </div>
                           <span className="text-[11px] font-mono text-slate-400 px-2 py-0.5 rounded bg-slate-950 border border-slate-800">
-                            ~{article.readTimeMinutes} min read • {article.category}
+                            {article.showReadTime !== false ? `~${article.readTimeMinutes} min read • ` : ''}{article.category}
                           </span>
                         </div>
 
