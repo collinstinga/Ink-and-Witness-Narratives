@@ -9,6 +9,8 @@ vi.hoisted(() => {
 });
 
 const storeMocks = vi.hoisted(() => {
+  const getArticleById = vi.fn((_id: string, _includeDrafts?: boolean): any => ({ id: 'article_1', title: 'Test article' }));
+  const getArticles = vi.fn((_includeDrafts?: boolean): any[] => []);
   const known = {
     init: vi.fn(async () => undefined),
     loadTransaction: vi.fn(),
@@ -18,9 +20,11 @@ const storeMocks = vi.hoisted(() => {
     confirmTransaction: vi.fn(),
     savePurchasedToken: vi.fn(async () => undefined),
     saveTransaction: vi.fn(async (transaction: unknown) => transaction),
-    getArticleById: vi.fn(() => ({ id: 'article_1', title: 'Test article' })),
+    getArticleById,
+    getFreshArticleById: vi.fn(async (id: string, includeDrafts?: boolean, _forceRefresh?: boolean) => getArticleById(id, includeDrafts)),
     getMpesaSettings: vi.fn(() => ({ defaultPriceKes: 300, minTipKes: 300, tippingEnabled: true })),
-    getArticles: vi.fn(() => [])
+    getArticles,
+    getFreshArticles: vi.fn(async (includeDrafts?: boolean, _forceRefresh?: boolean) => getArticles(includeDrafts))
   };
   const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>();
   return new Proxy(known as Record<PropertyKey, any>, {
@@ -255,6 +259,60 @@ describe('public payment route security', () => {
     expect(mpesaMocks.initiateStkPush).not.toHaveBeenCalled();
   });
 
+  it('charges the fresh server price instead of a stale client-submitted amount', async () => {
+    storeMocks.getArticleById.mockReturnValueOnce({
+      id: 'article_1',
+      title: 'Test article',
+      priceKes: 825
+    });
+
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ articleId: 'article_1', phoneNumber: '0712345678', amount: 300 })
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.getFreshArticleById).toHaveBeenCalledWith('article_1', false, true);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      articleId: 'article_1',
+      amount: 825
+    }));
+    expect(body.amount).toBe(825);
+  });
+
+  it.each([
+    ['missing', undefined, true],
+    ['zero', 0, false],
+    ['NaN', Number.NaN, false]
+  ])('keeps a paid article with a %s price locked at the trusted default', async (_label, priceKes, omitPrice) => {
+    const article: Record<string, unknown> = {
+      id: 'article_1',
+      title: 'Test article',
+      content: 'PRIVATE FULL ARTICLE CONTENT',
+      isPaid: true,
+      prices: { KES: priceKes }
+    };
+    if (!omitPrice) article.priceKes = priceKes;
+    storeMocks.getArticleById.mockReturnValueOnce(article);
+
+    const response = await fetch(`${baseUrl}/api/articles/article_1`);
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(storeMocks.getFreshArticleById).toHaveBeenCalledWith('article_1', false, false);
+    expect(body).toMatchObject({
+      isPaid: true,
+      isUnlocked: false,
+      content: '',
+      priceKes: 300,
+      prices: { KES: 300 }
+    });
+    expect(JSON.stringify(body)).not.toContain('PRIVATE FULL ARTICLE CONTENT');
+  });
+
   it('ignores client-supplied affiliate codes when starting M-Pesa', async () => {
     const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
       method: 'POST',
@@ -358,6 +416,33 @@ describe('public payment route security', () => {
       affiliateAttributionAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       affiliateAttributionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)
     }));
+  });
+
+  it('charges a bank order at the fresh server price instead of the client amount', async () => {
+    storeMocks.getArticleById.mockReturnValueOnce({
+      id: 'article_1',
+      title: 'Test article',
+      isPaid: true,
+      priceKes: 975
+    });
+
+    const response = await fetch(`${baseUrl}/api/payments/bank-order`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ articleId: 'article_1', amount: 300 })
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.getFreshArticleById).toHaveBeenCalledWith('article_1', false, true);
+    expect(storeMocks.saveTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      articleId: 'article_1',
+      amount: 975,
+      originalAmount: 975,
+      paymentMethod: 'bank'
+    }));
+    expect(body.bankDetails?.amountKes).toBe(975);
+    expect(body.message).toContain('KES 975');
   });
 
   it('requires the paying phone as second proof for confirmed receipt recovery', async () => {

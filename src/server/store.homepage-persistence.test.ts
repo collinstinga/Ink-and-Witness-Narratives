@@ -408,11 +408,11 @@ describe('homepage configuration persistence', () => {
       tags: []
     };
 
-    store.saveArticle(article);
-    const updated = store.saveArticle({ ...article, title: 'A Quiet Chapter, Revised', showReadTime: undefined });
+    await store.saveArticle(article);
+    const updated = await store.saveArticle({ ...article, title: 'A Quiet Chapter, Revised', showReadTime: undefined });
     expect(updated.showReadTime).toBe(false);
 
-    const legacy = store.saveArticle({ ...article, id: 'legacy-read-time-test', showReadTime: undefined });
+    const legacy = await store.saveArticle({ ...article, id: 'legacy-read-time-test', showReadTime: undefined });
     expect(legacy.showReadTime).toBe(true);
   }, 60_000);
 

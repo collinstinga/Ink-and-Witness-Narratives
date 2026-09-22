@@ -221,8 +221,9 @@ export const api = {
     return res.json();
   },
 
-  async getArticles(): Promise<Article[]> {
-    const res = await fetch('/api/articles');
+  async getArticles(forceFresh = false): Promise<Article[]> {
+    const url = forceFresh ? `/api/articles?refresh=${Date.now()}` : '/api/articles';
+    const res = await fetch(url, forceFresh ? { cache: 'no-store' } : undefined);
     if (!res.ok) throw new Error('Failed to fetch articles');
     return res.json();
   },

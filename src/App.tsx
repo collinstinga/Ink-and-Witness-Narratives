@@ -698,7 +698,7 @@ export default function App() {
       isTipOpen: false,
       view: currentView || 'home'
     }, 'push');
-    fetchData();
+    fetchData(true);
   };
 
   const handleAuthSuccess = (user: User) => {
@@ -764,7 +764,7 @@ export default function App() {
   }, [currentUser?.id, currentUser?.role, refreshAccountLibrary]);
 
   // Fetch initial data
-  const fetchData = async () => {
+  const fetchData = async (forceFreshArticles = false) => {
     try {
       setLoading(true);
       const [authorData, articlesData, categoriesData] = await Promise.all([
@@ -772,7 +772,7 @@ export default function App() {
           console.warn('Author fetch notice:', err);
           return null;
         }),
-        api.getArticles().catch(err => {
+        api.getArticles(forceFreshArticles).catch(err => {
           console.warn('Articles fetch notice:', err);
           return [];
         }),

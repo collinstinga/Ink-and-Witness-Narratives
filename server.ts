@@ -117,8 +117,17 @@ function publicCoverUrl(article: Article): string | undefined {
   return `/api/articles/${encodeURIComponent(article.id)}/cover?v=${version}`;
 }
 
+function resolveArticlePriceKes(article: Article, defaultPriceKes: number): number {
+  if (article.isPaid === false) return 0;
+  const storedPrice = Number(article.priceKes);
+  if (Number.isFinite(storedPrice) && storedPrice >= 1) return storedPrice;
+  const fallbackPrice = Number(defaultPriceKes);
+  return Number.isFinite(fallbackPrice) && fallbackPrice >= 1 ? fallbackPrice : 1050;
+}
+
 function toPublicArticleSummary(article: Article, defaultPriceKes: number, isUnlocked = false): Article {
-  const isPaid = article.isPaid !== false && article.priceKes > 0;
+  const isPaid = article.isPaid !== false;
+  const priceKes = resolveArticlePriceKes(article, defaultPriceKes);
   return {
     id: article.id,
     title: article.title,
@@ -132,8 +141,8 @@ function toPublicArticleSummary(article: Article, defaultPriceKes: number, isUnl
     topics: article.topics || [],
     status: article.status,
     isPaid,
-    priceKes: article.priceKes || defaultPriceKes,
-    prices: article.prices,
+    priceKes,
+    prices: { ...(article.prices || {}), KES: priceKes },
     currencyOverrides: article.currencyOverrides,
     readTimeMinutes: article.readTimeMinutes,
     showReadTime: article.showReadTime !== false,
@@ -842,16 +851,24 @@ export async function createApp() {
   });
 
   // Public Articles List (DRAFTS ARE STRICTLY EXCLUDED)
-  app.get("/api/articles", (_req: Request, res: Response) => {
-    const list = store.getArticles(false);
-    const mpesaSettings = store.getMpesaSettings();
+  app.get("/api/articles", async (req: Request, res: Response) => {
+    try {
+      const forceRefresh = req.query.refresh !== undefined && (req as any).user?.role === 'admin';
+      const list = await store.getFreshArticles(false, forceRefresh);
+      const mpesaSettings = store.getMpesaSettings();
+      const publicArticles = list.map(article =>
+        toPublicArticleSummary(article, mpesaSettings.defaultPriceKes || 1050)
+      );
 
-    const publicArticles = list.map(article =>
-      toPublicArticleSummary(article, mpesaSettings.defaultPriceKes || 1050)
-    );
-
-    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=300');
-    res.json(publicArticles);
+      // Bound stale pricing at the CDN; do not continue serving it for minutes
+      // while revalidating after the writer changes a piece's price.
+      res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, must-revalidate');
+      res.json(publicArticles);
+    } catch (error) {
+      console.error('Public article catalog refresh failed:', error);
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(503).json({ error: 'Pieces are temporarily unavailable. Please retry.' });
+    }
   });
 
   // Public Get Single Article (with server-side paywall & draft protection)
@@ -859,13 +876,20 @@ export async function createApp() {
     const { id } = req.params;
     const isAdmin = (req as any).user?.role === 'admin';
 
-    const article = store.getArticleById(id, isAdmin);
+    let article: Article | undefined;
+    try {
+      article = await store.getFreshArticleById(id, isAdmin, isAdmin);
+    } catch (error) {
+      console.error('Public article refresh failed:', error);
+      return res.status(503).json({ error: 'Piece is temporarily unavailable. Please retry.' });
+    }
     if (!article) {
       return res.status(404).json({ error: "Piece not found or private draft." });
     }
 
     const token = (req.headers['x-download-token'] || req.headers['x-reader-token'] || req.query.token) as string;
-    const isPaid = article.isPaid !== false && (article.priceKes > 0);
+    const isPaid = article.isPaid !== false;
+    const priceKes = resolveArticlePriceKes(article, store.getMpesaSettings().defaultPriceKes || 1050);
     let isUnlocked = !isPaid || isAdmin;
 
     if (!isUnlocked && token) {
@@ -899,12 +923,15 @@ export async function createApp() {
     }
 
     const { coverImageOriginal: _privateOriginal, ...publicArticle } = article;
+    res.setHeader('Cache-Control', 'private, no-store');
     return res.json({
       ...publicArticle,
       coverImage: publicCoverUrl(article),
       content: isUnlocked ? article.content : "",
       isUnlocked,
-      priceKes: article.priceKes || store.getMpesaSettings().defaultPriceKes,
+      isPaid,
+      priceKes,
+      prices: { ...(article.prices || {}), KES: priceKes },
     });
   });
 
@@ -1236,16 +1263,19 @@ export async function createApp() {
         if (!isSafePublicIdentifier(articleId)) {
           return res.status(400).json({ error: "A valid published piece is required for purchase." });
         }
-        const article = store.getArticleById(articleId);
+        const article = await store.getFreshArticleById(articleId, false, true);
         if (!article) {
           return res.status(404).json({ error: "Piece not found or unavailable for purchase." });
+        }
+        if (article.isPaid === false) {
+          return res.status(409).json({ error: 'This piece is now free. Reload it to read without payment.' });
         }
         canonicalArticleId = article.id;
         articleTitle = article.title;
         // Server enforces price for pay-to-read.
-        chargeAmount = article.priceKes || mpesaSettings.defaultPriceKes || 300;
+        chargeAmount = resolveArticlePriceKes(article, mpesaSettings.defaultPriceKes || 1050);
       } else if (articleId && articleId !== "general_tip") {
-        const article = store.getArticleById(articleId);
+        const article = await store.getFreshArticleById(articleId, false, true);
         if (article) {
           canonicalArticleId = article.id;
           articleTitle = article.title;
@@ -1333,13 +1363,16 @@ export async function createApp() {
       if (!isSafePublicIdentifier(articleId)) {
         return res.status(400).json({ error: "A valid published piece is required for purchase." });
       }
-      const article = store.getArticleById(articleId);
+      const article = await store.getFreshArticleById(articleId, false, true);
       if (!article) {
         return res.status(404).json({ error: "Piece not found or unavailable for purchase." });
       }
+      if (article.isPaid === false) {
+        return res.status(409).json({ error: 'This piece is now free. Reload it to read without payment.' });
+      }
       const canonicalArticleId = article.id;
       const articleTitle = article.title;
-      const chargeAmount = article.priceKes || mpesaSettings.defaultPriceKes || 300;
+      const chargeAmount = resolveArticlePriceKes(article, mpesaSettings.defaultPriceKes || 1050);
       const trustedAttribution = verifyAffiliateAttributionCookie(
         (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
         canonicalArticleId
@@ -1920,19 +1953,28 @@ export async function createApp() {
   });
 
   // Writer: Get All Pieces (Drafts and Published with Full Content)
-  app.get("/api/admin/articles", requireAdminAuth, (_req: Request, res: Response) => {
-    const pieces = store.getArticles(true);
-    res.json(pieces);
+  app.get("/api/admin/articles", requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const pieces = await store.getFreshArticles(true, true);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(pieces);
+    } catch (error) {
+      console.error('Writer catalog refresh failed:', error);
+      res.status(503).json({ error: 'Pieces are temporarily unavailable. Please retry.' });
+    }
   });
 
   // Writer: Get Single Piece by ID (Draft or Published)
-  app.get("/api/admin/articles/:id", requireAdminAuth, (req: Request, res: Response) => {
-    const { id } = req.params;
-    const article = store.getArticleById(id, true);
-    if (!article) {
-      return res.status(404).json({ error: "Piece not found." });
+  app.get("/api/admin/articles/:id", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const article = await store.getFreshArticleById(req.params.id, true, true);
+      if (!article) return res.status(404).json({ error: "Piece not found." });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(article);
+    } catch (error) {
+      console.error('Writer piece refresh failed:', error);
+      res.status(503).json({ error: 'Piece is temporarily unavailable. Please retry.' });
     }
-    res.json(article);
   });
 
   // Writer: Create New Piece
@@ -1946,6 +1988,8 @@ export async function createApp() {
         status,
         isPaid,
         priceKes,
+        prices,
+        currencyOverrides,
         readTimeMinutes,
         showReadTime,
         excerpt,
@@ -1984,6 +2028,8 @@ export async function createApp() {
         status: status === 'published' ? 'published' : (status === 'scheduled' ? 'scheduled' : 'draft'),
         isPaid: isPaid !== false,
         priceKes: Number(priceKes) || 300,
+        prices: prices && typeof prices === 'object' && !Array.isArray(prices) ? prices : undefined,
+        currencyOverrides: Array.isArray(currencyOverrides) ? currencyOverrides : undefined,
         readTimeMinutes: Number(readTimeMinutes) || Math.max(3, Math.ceil(content.split(/\s+/).length / 200)),
         showReadTime: showReadTime !== false,
         publishedAt: status === 'published' ? new Date().toISOString().split('T')[0] : "",
@@ -2016,7 +2062,7 @@ export async function createApp() {
   app.put("/api/admin/articles/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const existing = store.getArticleById(id, true);
+      const existing = await store.getFreshArticleById(id, true, true);
       if (!existing) {
         return res.status(404).json({ error: "Piece not found." });
       }
@@ -2046,7 +2092,7 @@ export async function createApp() {
   app.post("/api/admin/articles/:id/autosave", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const existing = store.getArticleById(id, true);
+      const existing = await store.getFreshArticleById(id, true, true);
       if (!existing) {
         return res.status(404).json({ error: "Piece not found." });
       }
@@ -2076,7 +2122,7 @@ export async function createApp() {
   app.post("/api/admin/articles/:id/revisions/restore/:revisionId", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id, revisionId } = req.params;
-      const restored = store.restoreArticleRevision(id, revisionId);
+      const restored = await store.restoreArticleRevision(id, revisionId);
       if (!restored) {
         return res.status(404).json({ error: "Piece or revision not found." });
       }

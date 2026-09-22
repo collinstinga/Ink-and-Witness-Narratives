@@ -74,9 +74,15 @@ const affiliateMocks = vi.hoisted(() => ({
 }));
 
 const storeMocks = vi.hoisted(() => {
+  const getArticles = vi.fn((_includeDrafts?: boolean): any[] => []);
+  const getArticleById = vi.fn((_id: string, _includeDrafts?: boolean): any => undefined);
   const known = {
     init: vi.fn(async () => undefined),
     getAuthSession: vi.fn(),
+    getArticles,
+    getFreshArticles: vi.fn(async (includeDrafts?: boolean, _forceRefresh?: boolean) => getArticles(includeDrafts)),
+    getArticleById,
+    getFreshArticleById: vi.fn(async (id: string, includeDrafts?: boolean, _forceRefresh?: boolean) => getArticleById(id, includeDrafts)),
     affiliates: affiliateMocks
   };
   const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>();

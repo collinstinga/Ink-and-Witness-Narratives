@@ -146,6 +146,9 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [showUnsavedPrompt, setShowUnsavedPrompt] = useState(false);
   const isInitialMount = useRef(true);
+  const editVersionRef = useRef(0);
+  const autosaveInFlightRef = useRef<Promise<void> | null>(null);
+  const manualSaveInProgressRef = useRef(false);
 
   // Revision History State
   const [showRevisionsModal, setShowRevisionsModal] = useState(false);
@@ -210,6 +213,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       isInitialMount.current = false;
       return;
     }
+    editVersionRef.current += 1;
     setIsDirty(true);
   }, [
     title, 
@@ -300,39 +304,49 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     if (!currentArticleId || !isDirty || saving || autosaving) return;
 
     const timer = setTimeout(async () => {
-      if (!isDirty || !title.trim() || !content.trim()) return;
-      try {
-        setAutosaving(true);
-        const payload: Partial<Article> = {
-          title: title.trim(),
-          subtitle: subtitle.trim(),
-          excerpt: excerpt.trim(),
-          synopsis: synopsis.trim(),
-          content: content.trim(),
-          category: category.trim(),
-          status,
-          scheduledAt: scheduledAt || undefined,
-          isPaid,
-          priceKes: isPaid ? (isNaN(Number(priceKes)) || Number(priceKes) < 1 ? 1050 : Number(priceKes)) : 0,
-          prices,
-          currencyOverrides,
-          readTimeMinutes,
-          showReadTime,
-          coverImage,
-          tags,
-          featured,
-          seoTitle: seoTitle || undefined,
-          metaDescription: metaDescription || undefined,
-          manualRelatedPieceIds
-        };
-        await api.autosaveArticle(currentArticleId, payload);
-        setIsDirty(false);
-        setLastSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-      } catch (err) {
-        // silent fail on autosave
-      } finally {
-        setAutosaving(false);
-      }
+      if (!isDirty || !title.trim() || !content.trim() || manualSaveInProgressRef.current || autosaveInFlightRef.current) return;
+      const editVersion = editVersionRef.current;
+      setAutosaving(true);
+      const autosavePromise = (async () => {
+        try {
+          const payload: Partial<Article> = {
+            title: title.trim(),
+            subtitle: subtitle.trim(),
+            excerpt: excerpt.trim(),
+            synopsis: synopsis.trim(),
+            content: content.trim(),
+            category: category.trim(),
+            status,
+            scheduledAt: scheduledAt || undefined,
+            isPaid,
+            priceKes: isPaid ? Number(priceKes) : 0,
+            prices,
+            currencyOverrides,
+            readTimeMinutes,
+            showReadTime,
+            coverImage,
+            tags,
+            featured,
+            seoTitle: seoTitle || undefined,
+            metaDescription: metaDescription || undefined,
+            manualRelatedPieceIds
+          };
+          await api.autosaveArticle(currentArticleId, payload);
+          if (editVersionRef.current === editVersion && !manualSaveInProgressRef.current) {
+            setIsDirty(false);
+            setError(null);
+            setLastSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+          }
+        } catch {
+          if (editVersionRef.current === editVersion && !manualSaveInProgressRef.current) {
+            setError('Autosave failed. Your changes are still unsaved; please save manually.');
+          }
+        } finally {
+          autosaveInFlightRef.current = null;
+          setAutosaving(false);
+        }
+      })();
+      autosaveInFlightRef.current = autosavePromise;
     }, 20000);
 
     return () => clearTimeout(timer);
@@ -349,6 +363,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     scheduledAt, 
     isPaid, 
     priceKes, 
+    prices,
+    currencyOverrides,
     readTimeMinutes, 
     showReadTime,
     coverImage, 
@@ -531,7 +547,13 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       setError('Please write piece content before saving.');
       return;
     }
+    if (isPaid && (!Number.isFinite(priceKes) || priceKes < 1)) {
+      setError('Please enter a valid price for this paid piece (minimum KES 1).');
+      return;
+    }
 
+    manualSaveInProgressRef.current = true;
+    const editVersion = editVersionRef.current;
     setSaving(true);
     setError(null);
 
@@ -557,7 +579,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         status: finalStatus,
         scheduledAt: finalStatus === 'scheduled' ? scheduledAt : undefined,
         isPaid,
-        priceKes: isPaid ? (isNaN(Number(priceKes)) || Number(priceKes) < 1 ? 1050 : Number(priceKes)) : 0,
+        priceKes: isPaid ? Number(priceKes) : 0,
         prices,
         currencyOverrides,
         readTimeMinutes,
@@ -578,10 +600,17 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         manualRelatedPieceIds: manualRelatedPieceIds.length > 0 ? manualRelatedPieceIds : undefined
       };
 
+      // Let an older background request finish before this explicit save.
+      // Otherwise its stale payload can land last and undo the writer's edit.
+      if (autosaveInFlightRef.current) {
+        await autosaveInFlightRef.current;
+      }
       const saved = await onSave(payload);
       setCurrentArticleId(saved.id);
       setStatus(saved.status);
-      setIsDirty(false);
+      if (editVersionRef.current === editVersion) {
+        setIsDirty(false);
+      }
       setLastSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       setSaveSuccessMsg(
         finalStatus === 'published' 
@@ -594,6 +623,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     } catch (err: any) {
       setError(err.message || 'Failed to save piece.');
     } finally {
+      manualSaveInProgressRef.current = false;
       setSaving(false);
     }
   };
