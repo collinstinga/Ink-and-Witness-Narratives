@@ -4,7 +4,7 @@ Date: 2026-09-23 (Africa/Nairobi)
 
 ## Production baseline
 
-- Baseline commit before this upgrade: `59dabe1bb1bcaaaf1dc193d6243e6cc93684992f`.
+- Production baseline for this release: `4fc8c71c19e9870f8aeb3e6deb120001b388cabc`.
 - Firestore remains the production source of truth. Existing collections and document IDs must not be reset or replaced.
 - Existing standalone pieces, reader licenses/libraries, transactions, affiliate accounts, commissions, wallet balances, homepage settings, media, routes, and payment callbacks remain backward compatible.
 - New schemas are additive. Any migration must be idempotent, resumable, and safe to run more than once.
@@ -25,7 +25,7 @@ Completed locally: current collection/payment/access/editor/homepage/auth bounda
 
 ### UP-02 — Newsletter and reader retention
 
-Status: foundation complete; release integration deferred to UP-04/UP-06
+Status: release integration complete locally; production provider activation awaiting owner terms acceptance
 
 - Add consent-based subscriber records with unique normalized-email index, interests, work follows, status, timestamps, and signed unsubscribe flow.
 - Add writer-only subscriber search, segmentation, composition, preview, test-send, resumable campaign sending, and delivery history.
@@ -34,7 +34,9 @@ Status: foundation complete; release integration deferred to UP-04/UP-06
 
 Checkpoint: subscription/unsubscribe security tests, campaign idempotency tests, UI tests, provider-disabled behavior, and no-email-without-explicit-opt-in test.
 
-Completed locally: double-opt-in subscriber storage, signed unsubscribe, server-only Resend adapter, writer subscriber/campaign UI, audience segmentation, preview/test send, deterministic delivery records, resumable sending, and provider-disabled public signup. Remaining release integration: explicit piece/chapter release notification controls in UP-04; provider webhook outcomes and production provider/domain configuration in UP-06.
+Completed locally: double-opt-in subscriber storage, signed unsubscribe, server-only Resend adapter, writer subscriber/campaign UI, audience segmentation, preview/test send, deterministic delivery records, resumable sending, and provider-disabled public signup. Publishing now exposes an off-by-default release checkbox, creates one immutable campaign per piece, sends only to confirmed active subscribers, and can resume from both the editor and Newsletter history without duplicating completed deliveries. Retryable provider errors leave the current delivery queued. Signed Resend webhooks reconcile sent/delivered/failed/bounced/complained/suppressed outcomes, and bounce/complaint/suppression events stop future sends to that subscriber.
+
+External activation checkpoint: the Vercel Marketplace Resend resource is specified as the free plan for `inkandwitness-narratives.co.ke` in `eu-west-1`. Provisioning has not occurred because Vercel requires the account owner to review and accept the Resend Marketplace terms in the browser. No terms were accepted by the agent, no provider resource was created, and no production newsletter environment values were changed.
 
 ### UP-03 — Canonical sales intelligence
 
@@ -85,10 +87,11 @@ An additive chapter-schema checkpoint exists on branch `fix/homepage-manual-gran
 ## Verified local checkpoint — newsletter/editor foundation
 
 - TypeScript: passed (`tsc --noEmit`).
-- Focused tests: 38/38 passed across newsletter security/provider/store, canonical sales helper, safe Markdown rendering, and editor formatting.
+- Full automated suite: 403/403 passed across 43 files using two workers; the newsletter-focused suite passed 18/18 after the final provider-retry classification change.
 - Production build: Vite client and bundled server passed.
 - Diff integrity: `git diff --check` passed (line-ending warnings only).
-- Deployment/provider state: included in the safe release candidate; no Firestore migration or production newsletter writes were performed. Newsletter remains disabled unless server-side provider variables are configured.
+- React review: publish opt-in and delivery-resume changes passed the hooks, state ownership, accessibility, rendering, and TypeScript checklist.
+- Deployment/provider state: no Firestore migration, subscriber send, or production environment write was performed. Newsletter remains disabled until the Resend resource/domain, sender identity, API key, and webhook signing secret are configured.
 
 ## Affiliate payout threshold durability hotfix
 
@@ -132,4 +135,4 @@ Status: pending
 
 ## Resume instructions
 
-Resume at UP-04. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing. Do not run the newsletter provider setup or sales backfill until the UP-06 production snapshot and release gate.
+Resume by completing the UP-02 external activation gate: accept the Vercel Marketplace terms, provision the specified free Resend resource, verify the sender domain, configure the production sender and signed webhook, deploy the verified release commit, and exercise double opt-in plus a controlled test delivery. Then resume UP-04 from its isolated chapter-schema checkpoint. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing. Do not run the sales backfill until the UP-06 production snapshot and release gate.

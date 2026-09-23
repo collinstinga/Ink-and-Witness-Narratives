@@ -59,10 +59,15 @@ import {
 import {
   buildNewsletterCampaignEmail,
   buildNewsletterConfirmationEmail,
+  isRetryableNewsletterProviderError,
   isNewsletterProviderConfigured,
   NewsletterProviderConfigurationError,
   sendNewsletterEmail
 } from "./src/server/newsletterEmail.js";
+import {
+  newsletterOutcomeForResendEvent,
+  verifyResendWebhook
+} from "./src/server/newsletterWebhook.js";
 import {
   buildBuyerSnapshot,
   enrichSalesTransaction,
@@ -154,6 +159,7 @@ function resolvePublicBaseUrl(req: Request): string {
   const configured = (
     process.env.PUBLIC_BASE_URL
     || process.env.APP_BASE_URL
+    || process.env.APP_URL
     || process.env.VITE_PUBLIC_BASE_URL
     || ''
   ).trim();
@@ -266,6 +272,36 @@ function publicCoverUrl(article: Article): string | undefined {
   if (!article.coverImage?.startsWith('data:image')) return article.coverImage;
   const version = encodeURIComponent(article.updatedAt || article.id);
   return `/api/articles/${encodeURIComponent(article.id)}/cover?v=${version}`;
+}
+
+function releaseNewsletterBody(article: Article): string {
+  const description = (article.synopsis || article.excerpt || article.subtitle || '').trim();
+  const introduction = `A new piece, “${article.title.trim()},” has just been published.`;
+  const invitation = 'Read the preview and unlock the complete piece on Ink & Witness Narratives.';
+  return description
+    ? `${introduction}\n\n${description.slice(0, 4_000)}\n\n${invitation}`
+    : `${introduction}\n\n${invitation}`;
+}
+
+async function ensureArticleReleaseNewsletter(req: Request, article: Article) {
+  const baseUrl = resolvePublicBaseUrl(req);
+  const coverPath = publicCoverUrl(article);
+  const coverImageUrl = coverPath ? new URL(coverPath, baseUrl).toString() : undefined;
+  return newsletterStore.ensureReleaseCampaign({
+    pieceId: article.id,
+    content: {
+      subject: `New release: ${article.title}`.slice(0, 200),
+      preheader: (article.excerpt || article.synopsis || 'A new piece from Ink & Witness Narratives.').slice(0, 300),
+      heading: article.title.slice(0, 200),
+      body: releaseNewsletterBody(article),
+      ctaLabel: article.isPaid === false ? 'Read the new piece' : 'Preview / Unlock the piece',
+      ctaUrl: `${baseUrl}/?article=${encodeURIComponent(article.slug || article.id)}`,
+      pieceId: article.id,
+      ...(coverImageUrl ? { coverImageUrl } : {})
+    },
+    audience: { type: 'all' },
+    createdBy: String((req as any).user?.id || (req as any).user?.email || 'admin')
+  });
 }
 
 function resolveArticlePriceKes(article: Article, defaultPriceKes: number): number {
@@ -705,7 +741,14 @@ export async function createApp() {
   app.use(largeAdminBodyRoutes, express.json({ limit: '2mb' }));
   app.use(largeAdminBodyRoutes, express.urlencoded({ extended: true, limit: '2mb' }));
   app.use('/api/mpesa/callback', express.json({ limit: '64kb' }));
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({
+    limit: '1mb',
+    verify: (req, _res, buffer) => {
+      if (String((req as any).originalUrl || '').startsWith('/api/newsletter/webhooks/resend')) {
+        (req as any).newsletterRawBody = buffer.toString('utf8');
+      }
+    }
+  }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     if (err?.type === 'entity.too.large') {
@@ -949,6 +992,57 @@ export async function createApp() {
       consentVersion: NEWSLETTER_CONSENT_VERSION,
       doubleOptIn: true
     });
+  });
+
+  app.post('/api/newsletter/webhooks/resend', async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const webhookSecret = process.env.RESEND_WEBHOOK_SECRET?.trim();
+    if (!webhookSecret) {
+      return res.status(503).json({ accepted: false });
+    }
+
+    const payload = (req as any).newsletterRawBody;
+    const headers = {
+      id: req.get('webhook-id') || req.get('svix-id') || '',
+      timestamp: req.get('webhook-timestamp') || req.get('svix-timestamp') || '',
+      signature: req.get('webhook-signature') || req.get('svix-signature') || ''
+    };
+    if (typeof payload !== 'string' || !headers.id || !headers.timestamp || !headers.signature) {
+      return res.status(400).json({ accepted: false });
+    }
+
+    let outcome;
+    try {
+      const event = verifyResendWebhook({ payload, headers, webhookSecret });
+      outcome = newsletterOutcomeForResendEvent(event);
+    } catch {
+      return res.status(400).json({ accepted: false });
+    }
+    if (!outcome) return res.status(200).json({ accepted: true });
+
+    try {
+      let delivery = await newsletterStore.findDeliveryByProviderMessageId(
+        outcome.providerMessageId
+      );
+      if (!delivery && outcome.deliveryId) {
+        delivery = await newsletterStore.getDelivery(outcome.deliveryId);
+      }
+      // Confirmation and test messages intentionally have no campaign delivery.
+      if (!delivery) return res.status(200).json({ accepted: true });
+      await newsletterStore.recordDeliveryOutcome(delivery.id, {
+        status: outcome.status,
+        providerMessageId: outcome.providerMessageId,
+        error: outcome.error
+      });
+      return res.status(200).json({ accepted: true });
+    } catch (error) {
+      // A verified duplicate or stale provider event is safe to acknowledge.
+      if (error instanceof NewsletterStateError) {
+        return res.status(200).json({ accepted: true });
+      }
+      console.error('[Newsletter] Verified webhook outcome could not be recorded.', error);
+      return res.status(503).json({ accepted: false });
+    }
   });
 
   app.post(
@@ -2418,6 +2512,7 @@ export async function createApp() {
       });
       const baseUrl = resolvePublicBaseUrl(req);
       let processed = 0;
+      let transientProviderFailure: Error | null = null;
       for (const subscriber of page.subscribers) {
         if (!newsletterAudienceMatches(subscriber, campaign.audience)) continue;
         const delivery = await newsletterStore.queueDelivery(campaign.id, subscriber.id);
@@ -2435,19 +2530,38 @@ export async function createApp() {
             to: subscriber.email,
             ...rendered,
             unsubscribeUrl,
-            idempotencyKey: `${campaign.id}-${subscriber.id}`
+            idempotencyKey: `${campaign.id}-${subscriber.id}`,
+            deliveryId: delivery.id
           });
           await newsletterStore.recordDeliveryOutcome(delivery.id, {
             status: 'sent',
             providerMessageId: sent.providerMessageId
           });
         } catch (error) {
+          if (isRetryableNewsletterProviderError(error)) {
+            transientProviderFailure = error instanceof Error
+              ? error
+              : new Error('Temporary email provider failure.');
+            break;
+          }
           await newsletterStore.recordDeliveryOutcome(delivery.id, {
             status: 'failed',
             error: error instanceof Error ? error.message : 'Provider send failed.'
           });
         }
         processed += 1;
+      }
+
+      if (transientProviderFailure) {
+        console.warn('[Newsletter] Delivery paused at a retryable provider checkpoint.');
+        campaign = (await newsletterStore.getCampaign(campaign.id)) || campaign;
+        return res.status(503).json({
+          error: 'Email delivery paused at a safe checkpoint. Retry to resume without duplicating completed sends.',
+          retryable: true,
+          campaign,
+          processed,
+          complete: false
+        });
       }
 
       if (!page.nextCursor) {
@@ -2514,11 +2628,18 @@ export async function createApp() {
         scheduledAt,
         seoTitle,
         metaDescription,
-        manualRelatedPieceIds
+        manualRelatedPieceIds,
+        notifyNewsletterSubscribers
       } = req.body;
 
       if (!title || !content) {
         return res.status(400).json({ error: "Title and content are required." });
+      }
+      if (notifyNewsletterSubscribers === true && status !== 'published') {
+        return res.status(400).json({ error: 'Subscriber notification requires a published piece.' });
+      }
+      if (notifyNewsletterSubscribers === true && !newsletterFeatureEnabled()) {
+        return res.status(503).json({ error: 'Email delivery is not configured yet. Publish without notification or configure the newsletter provider.' });
       }
 
       const slug = title
@@ -2563,7 +2684,24 @@ export async function createApp() {
       };
 
       const saved = await store.saveArticle(newArticle, true, "Initial creation");
-      res.status(201).json({ success: true, article: saved });
+      let newsletter;
+      if (notifyNewsletterSubscribers === true) {
+        try {
+          newsletter = {
+            requested: true as const,
+            status: 'ready' as const,
+            campaign: await ensureArticleReleaseNewsletter(req, saved)
+          };
+        } catch (error) {
+          console.error('[Newsletter] Piece published, but release campaign setup paused.', error);
+          newsletter = {
+            requested: true as const,
+            status: 'paused' as const,
+            message: 'The piece is live, but subscriber notification setup paused safely. Retry from this editor or the Newsletter tab.'
+          };
+        }
+      }
+      res.status(201).json({ success: true, article: saved, ...(newsletter ? { newsletter } : {}) });
     } catch (err: any) {
       console.error("Create piece error:", err);
       res.status(500).json({ error: err.message || "Failed to create piece." });
@@ -2574,6 +2712,12 @@ export async function createApp() {
   app.put("/api/admin/articles/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
+      const {
+        notifyNewsletterSubscribers,
+        createRevision,
+        revisionSummary,
+        ...articlePatch
+      } = req.body || {};
       const existing = await store.getFreshArticleById(id, true, true);
       if (!existing) {
         return res.status(404).json({ error: "Piece not found." });
@@ -2581,22 +2725,67 @@ export async function createApp() {
 
       const updatedArticle: Article = {
         ...existing,
-        ...req.body,
+        ...articlePatch,
         id: existing.id, // preserve id
         updatedAt: new Date().toISOString()
       };
+
+      if (notifyNewsletterSubscribers === true && updatedArticle.status !== 'published') {
+        return res.status(400).json({ error: 'Subscriber notification requires a published piece.' });
+      }
+      if (notifyNewsletterSubscribers === true && !newsletterFeatureEnabled()) {
+        return res.status(503).json({ error: 'Email delivery is not configured yet. Publish without notification or configure the newsletter provider.' });
+      }
 
       // If status changed to published and no publishedAt set
       if (updatedArticle.status === 'published' && !updatedArticle.publishedAt) {
         updatedArticle.publishedAt = new Date().toISOString().split('T')[0];
       }
 
-      const createRevision = Boolean(req.body.createRevision || req.body.revisionSummary);
-      const saved = await store.saveArticle(updatedArticle, createRevision, req.body.revisionSummary || "Author update");
-      res.json({ success: true, article: saved });
+      const shouldCreateRevision = Boolean(createRevision || revisionSummary);
+      const saved = await store.saveArticle(updatedArticle, shouldCreateRevision, revisionSummary || "Author update");
+      let newsletter;
+      if (notifyNewsletterSubscribers === true) {
+        try {
+          newsletter = {
+            requested: true as const,
+            status: 'ready' as const,
+            campaign: await ensureArticleReleaseNewsletter(req, saved)
+          };
+        } catch (error) {
+          console.error('[Newsletter] Piece published, but release campaign setup paused.', error);
+          newsletter = {
+            requested: true as const,
+            status: 'paused' as const,
+            message: 'The piece is live, but subscriber notification setup paused safely. Retry from this editor or the Newsletter tab.'
+          };
+        }
+      }
+      res.json({ success: true, article: saved, ...(newsletter ? { newsletter } : {}) });
     } catch (err: any) {
       console.error("Update piece error:", err);
       res.status(500).json({ error: err.message || "Failed to update piece." });
+    }
+  });
+
+  app.post('/api/admin/articles/:id/newsletter-release', requireAdminAuth, async (req: Request, res: Response) => {
+    if (!newsletterFeatureEnabled()) {
+      return res.status(503).json({ error: 'Email delivery is not configured yet.' });
+    }
+    try {
+      const article = await store.getFreshArticleById(req.params.id, true, true);
+      if (!article) return res.status(404).json({ error: 'Piece not found.' });
+      if (article.status !== 'published') {
+        return res.status(400).json({ error: 'Only a published piece can notify subscribers.' });
+      }
+      const campaign = await ensureArticleReleaseNewsletter(req, article);
+      return res.json({ campaign });
+    } catch (error) {
+      const status = error instanceof NewsletterValidationError ? 400 : 503;
+      console.error('[Newsletter] Release campaign retry could not be prepared.', error);
+      return res.status(status).json({
+        error: status === 400 ? error.message : 'Release notification setup is temporarily unavailable.'
+      });
     }
   });
 

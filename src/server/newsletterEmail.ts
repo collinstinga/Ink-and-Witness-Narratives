@@ -19,6 +19,19 @@ export class NewsletterProviderError extends Error {
   }
 }
 
+export function isRetryableNewsletterProviderError(error: unknown): boolean {
+  if (error instanceof NewsletterProviderConfigurationError) return true;
+  if (!(error instanceof NewsletterProviderError)) return false;
+  return error.status === 400
+    || error.status === 401
+    || error.status === 403
+    || error.status === 408
+    || error.status === 409
+    || error.status === 425
+    || error.status === 429
+    || error.status >= 500;
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -143,6 +156,7 @@ export async function sendNewsletterEmail(options: {
   html: string;
   text: string;
   idempotencyKey: string;
+  deliveryId?: string;
   unsubscribeUrl?: string;
   fetchImpl?: typeof fetch;
 }): Promise<{ providerMessageId: string }> {
@@ -158,6 +172,9 @@ export async function sendNewsletterEmail(options: {
   };
   const emailHeaders: Record<string, string> = {};
   if (options.unsubscribeUrl) emailHeaders['List-Unsubscribe'] = `<${options.unsubscribeUrl}>`;
+  const deliveryTags = options.deliveryId && /^nld_[a-f0-9]{48}$/.test(options.deliveryId)
+    ? [{ name: 'delivery_id', value: options.deliveryId }]
+    : undefined;
 
   let response: Response;
   try {
@@ -171,7 +188,8 @@ export async function sendNewsletterEmail(options: {
         html: options.html,
         text: options.text,
         reply_to: process.env.NEWSLETTER_REPLY_TO?.trim() || undefined,
-        headers: Object.keys(emailHeaders).length ? emailHeaders : undefined
+        headers: Object.keys(emailHeaders).length ? emailHeaders : undefined,
+        tags: deliveryTags
       }),
       signal: AbortSignal.timeout(15_000)
     });

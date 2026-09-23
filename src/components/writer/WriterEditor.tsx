@@ -40,7 +40,16 @@ import {
   Maximize2,
   Compass
 } from 'lucide-react';
-import { Article, ArticleStatus, ArticleRevision, Category, Topic } from '../../types.js';
+import {
+  Article,
+  ArticleSaveOptions,
+  ArticleSaveResult,
+  ArticleStatus,
+  ArticleRevision,
+  Category,
+  NewsletterCampaign,
+  Topic
+} from '../../types.js';
 import { api } from '../../utils/api.js';
 import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { ImageCropModal, CropSettings } from './ImageCropModal.js';
@@ -57,7 +66,7 @@ import {
 interface WriterEditorProps {
   initialArticle: Article | null;
   allPublishedArticles?: Article[];
-  onSave: (article: Partial<Article>) => Promise<Article>;
+  onSave: (article: Partial<Article>, options?: ArticleSaveOptions) => Promise<ArticleSaveResult>;
   onCancel: () => void;
   onPreview: (article: Article) => void;
 }
@@ -152,6 +161,9 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(initialArticle?.updatedAt || null);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [newsletterEnabled, setNewsletterEnabled] = useState(false);
+  const [notifySubscribers, setNotifySubscribers] = useState(false);
+  const [newsletterDeliveryPaused, setNewsletterDeliveryPaused] = useState(false);
   const [showUnsavedPrompt, setShowUnsavedPrompt] = useState(false);
   const isInitialMount = useRef(true);
   const editVersionRef = useRef(0);
@@ -201,6 +213,10 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         }
       })
       .catch(err => console.warn("Could not load rates in editor:", err));
+
+    api.getNewsletterConfig()
+      .then(config => setNewsletterEnabled(config.enabled === true))
+      .catch(() => setNewsletterEnabled(false));
   }, []);
 
   // BeforeUnload browser warning if unsaved
@@ -597,6 +613,48 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     }
   };
 
+  const deliverReleaseCampaign = async (
+    initialCampaign: NewsletterCampaign
+  ): Promise<NewsletterCampaign> => {
+    let campaign = initialCampaign;
+    let cursor: string | undefined;
+    let complete = campaign.status === 'sent' || campaign.status === 'partially_sent';
+    let guard = 0;
+    while (!complete && guard < 200) {
+      const step = await api.sendNewsletterCampaignStep(campaign.id, cursor);
+      campaign = step.campaign;
+      cursor = step.nextCursor;
+      complete = step.complete;
+      guard += 1;
+    }
+    if (!complete) {
+      throw new Error('Subscriber delivery paused at a safe checkpoint.');
+    }
+    return campaign;
+  };
+
+  const handleRetryReleaseNotification = async () => {
+    if (!currentArticleId || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const prepared = await api.prepareArticleReleaseNewsletter(currentArticleId);
+      const campaign = await deliverReleaseCampaign(prepared.campaign);
+      setNewsletterDeliveryPaused(false);
+      setNotifySubscribers(false);
+      setSaveSuccessMsg(campaign.failedCount > 0
+        ? `Subscriber delivery completed with ${campaign.failedCount} failed address(es). Review Newsletter history.`
+        : 'Subscriber release notification delivered successfully.');
+    } catch (retryError) {
+      setNewsletterDeliveryPaused(true);
+      setError(retryError instanceof Error
+        ? retryError.message
+        : 'Subscriber delivery remains paused at a safe checkpoint.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSaveAction = async (targetStatus?: ArticleStatus) => {
     if (!title.trim()) {
       setError('Please provide a piece title.');
@@ -664,21 +722,46 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       if (autosaveInFlightRef.current) {
         await autosaveInFlightRef.current;
       }
-      const saved = await onSave(payload);
+      const result = await onSave(payload, {
+        notifySubscribers: finalStatus === 'published' && notifySubscribers
+      });
+      const saved = result.article;
       setCurrentArticleId(saved.id);
       setStatus(saved.status);
       if (editVersionRef.current === editVersion) {
         setIsDirty(false);
       }
       setLastSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-      setSaveSuccessMsg(
-        finalStatus === 'published' 
-          ? 'Piece published successfully to live publication!' 
-          : finalStatus === 'scheduled' 
-            ? `Piece scheduled for publication on ${new Date(scheduledAt).toLocaleDateString()}!` 
-            : 'Draft saved securely with version revision recorded.'
-      );
-      setTimeout(() => setSaveSuccessMsg(null), 4000);
+      let successMessage = finalStatus === 'published'
+        ? 'Piece published successfully to live publication!'
+        : finalStatus === 'scheduled'
+          ? `Piece scheduled for publication on ${new Date(scheduledAt).toLocaleDateString()}!`
+          : 'Draft saved securely with version revision recorded.';
+      let keepSuccessNotice = false;
+
+      if (result.newsletter?.campaign) {
+        try {
+          const campaign = await deliverReleaseCampaign(result.newsletter.campaign);
+          setNewsletterDeliveryPaused(false);
+          setNotifySubscribers(false);
+          successMessage = campaign.failedCount > 0
+            ? `Piece published. Subscriber delivery completed with ${campaign.failedCount} failed address(es); review Newsletter history.`
+            : 'Piece published and the release notification was delivered to confirmed subscribers.';
+        } catch {
+          setNewsletterDeliveryPaused(true);
+          keepSuccessNotice = true;
+          successMessage = 'Piece published. Subscriber delivery paused safely and can be resumed without duplicate emails.';
+        }
+      } else if (result.newsletter?.status === 'paused') {
+        setNewsletterDeliveryPaused(true);
+        keepSuccessNotice = true;
+        successMessage = result.newsletter.message || 'Piece published. Subscriber notification setup paused safely.';
+      }
+
+      setSaveSuccessMsg(successMessage);
+      if (!keepSuccessNotice) {
+        setTimeout(() => setSaveSuccessMsg(null), 6000);
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to save piece.');
     } finally {
@@ -863,6 +946,38 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
         </div>
       </div>
+
+      {status !== 'published' && (
+        <label className={`flex items-start gap-3 rounded-xl border p-4 ${newsletterEnabled ? 'border-sky-800 bg-sky-950/30' : 'border-slate-800 bg-slate-900/40'}`}>
+          <input
+            type="checkbox"
+            checked={notifySubscribers}
+            onChange={event => setNotifySubscribers(event.target.checked)}
+            disabled={!newsletterEnabled || saving}
+            className="mt-0.5 h-4 w-4 accent-sky-500 disabled:opacity-50"
+          />
+          <span className="text-xs leading-relaxed text-slate-300">
+            <span className="block font-semibold text-white">Email confirmed subscribers when I publish</span>
+            {newsletterEnabled
+              ? 'Optional and off by default. One piece-specific campaign is created, so retrying cannot create a duplicate release email.'
+              : 'Email delivery is not configured yet. You can still publish normally without sending a newsletter.'}
+          </span>
+        </label>
+      )}
+
+      {newsletterDeliveryPaused && currentArticleId && (
+        <div className="flex flex-col gap-3 rounded-xl border border-amber-800 bg-amber-950/35 p-4 text-xs text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+          <span>The piece is live. Subscriber delivery is paused at a durable checkpoint; completed emails will not be sent again.</span>
+          <button
+            type="button"
+            onClick={() => void handleRetryReleaseNotification()}
+            disabled={saving || !newsletterEnabled}
+            className="shrink-0 rounded-lg border border-amber-700 bg-amber-900/60 px-3 py-2 font-semibold text-amber-50 hover:bg-amber-800 disabled:opacity-50"
+          >
+            {saving ? 'Resuming…' : 'Resume notification'}
+          </button>
+        </div>
+      )}
 
       {/* Success Notification */}
       {saveSuccessMsg && (

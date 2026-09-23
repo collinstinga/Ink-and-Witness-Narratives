@@ -151,6 +151,10 @@ export interface CreateNewsletterCampaignInput {
   createdBy: string;
 }
 
+export interface EnsureNewsletterReleaseCampaignInput extends CreateNewsletterCampaignInput {
+  pieceId: unknown;
+}
+
 export interface NewsletterCampaignDraftPatch {
   content?: NewsletterCampaignContent;
   audience?: NewsletterAudience;
@@ -280,6 +284,10 @@ function createSubscriberId(): string {
 
 function createCampaignId(): string {
   return `nlc_${crypto.randomBytes(18).toString('base64url')}`;
+}
+
+function releaseCampaignId(pieceId: string): string {
+  return `nlc_${sha256(`release\0${pieceId}`).slice(0, 48)}`;
 }
 
 function createConfirmationToken(): string {
@@ -518,8 +526,14 @@ function normalizeCampaign(id: string, value: unknown): StoredNewsletterCampaign
     const recipientCount = Number(value.recipientCount);
     const sentCount = Number(value.sentCount);
     const failedCount = Number(value.failedCount);
+    const kind = value.kind === undefined || value.kind === 'manual'
+      ? 'manual'
+      : value.kind === 'release'
+        ? 'release'
+        : null;
     if (
       !createdBy
+      || !kind
       || !Number.isSafeInteger(recipientCount) || recipientCount < 0
       || !Number.isSafeInteger(sentCount) || sentCount < 0
       || !Number.isSafeInteger(failedCount) || failedCount < 0
@@ -527,6 +541,7 @@ function normalizeCampaign(id: string, value: unknown): StoredNewsletterCampaign
     return {
       storageVersion: STORAGE_VERSION,
       id,
+      kind,
       content,
       audience,
       status: value.status as NewsletterCampaignStatus,
@@ -622,8 +637,8 @@ const CAMPAIGN_TRANSITIONS: Record<NewsletterCampaignStatus, readonly Newsletter
 
 const DELIVERY_TRANSITIONS: Record<NewsletterDeliveryStatus, readonly NewsletterDeliveryStatus[]> = {
   queued: ['sent', 'delivered', 'bounced', 'complained', 'suppressed', 'failed'],
-  sent: ['delivered', 'bounced', 'complained', 'failed'],
-  delivered: ['bounced', 'complained'],
+  sent: ['delivered', 'bounced', 'complained', 'suppressed', 'failed'],
+  delivered: ['bounced', 'complained', 'suppressed'],
   bounced: [],
   complained: [],
   suppressed: [],
@@ -1044,6 +1059,7 @@ export const newsletterStore = {
     const campaign: StoredNewsletterCampaign = {
       storageVersion: STORAGE_VERSION,
       id,
+      kind: 'manual',
       content,
       audience,
       status: 'draft',
@@ -1057,6 +1073,53 @@ export const newsletterStore = {
     };
     await getDb().collection(NEWSLETTER_COLLECTIONS.campaigns).doc(id)
       .create(sanitizeForFirestore(campaign));
+    return toCampaign(campaign);
+  },
+
+  async ensureReleaseCampaign(
+    input: EnsureNewsletterReleaseCampaignInput
+  ): Promise<NewsletterCampaign> {
+    const pieceId = typeof input.pieceId === 'string' ? input.pieceId.trim() : '';
+    if (!SAFE_REFERENCE_ID.test(pieceId)) {
+      throw new NewsletterValidationError('A valid piece identifier is required.');
+    }
+    const content = sanitizeCampaignContent({ ...input.content, pieceId });
+    const audience = sanitizeAudience(input.audience);
+    const createdBy = boundedText(input.createdBy, 160, 'createdBy', { required: true });
+    if (!createdBy) throw new NewsletterValidationError('createdBy is required.');
+
+    const id = releaseCampaignId(pieceId);
+    const db = getDb();
+    const ref = db.collection(NEWSLETTER_COLLECTIONS.campaigns).doc(id);
+    const campaign = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(ref);
+      if (snapshot.exists) {
+        const existing = normalizeCampaign(id, snapshot.data());
+        if (!existing || existing.kind !== 'release' || existing.content.pieceId !== pieceId) {
+          throw new NewsletterIntegrityError();
+        }
+        return existing;
+      }
+
+      const timestampIso = nowIso();
+      const created: StoredNewsletterCampaign = {
+        storageVersion: STORAGE_VERSION,
+        id,
+        kind: 'release',
+        content,
+        audience,
+        status: 'draft',
+        createdBy,
+        createdAt: timestampIso,
+        updatedAt: timestampIso,
+        provider: 'resend',
+        recipientCount: 0,
+        sentCount: 0,
+        failedCount: 0
+      };
+      transaction.create(ref, sanitizeForFirestore(created));
+      return created;
+    });
     return toCampaign(campaign);
   },
 
@@ -1220,6 +1283,31 @@ export const newsletterStore = {
     return toDelivery(delivery);
   },
 
+  async findDeliveryByProviderMessageId(
+    providerMessageIdValue: unknown
+  ): Promise<NewsletterDelivery | null> {
+    const providerMessageId = boundedText(
+      providerMessageIdValue,
+      200,
+      'providerMessageId',
+      { required: true }
+    );
+    if (!providerMessageId) {
+      throw new NewsletterValidationError('providerMessageId is required.');
+    }
+    const snapshot = await getDb().collection(NEWSLETTER_COLLECTIONS.deliveries)
+      .where('providerMessageId', '==', providerMessageId)
+      .limit(2)
+      .get();
+    if (snapshot.empty || snapshot.docs.length === 0) return null;
+    if (snapshot.docs.length !== 1) throw new NewsletterIntegrityError();
+    const delivery = normalizeDelivery(snapshot.docs[0].id, snapshot.docs[0].data());
+    if (!delivery || delivery.providerMessageId !== providerMessageId) {
+      throw new NewsletterIntegrityError();
+    }
+    return toDelivery(delivery);
+  },
+
   async listDeliveries(options: {
     campaignId: string;
     status?: NewsletterDeliveryStatus;
@@ -1306,7 +1394,7 @@ export const newsletterStore = {
       transaction.set(deliveryRef, sanitizeForFirestore(next));
       transaction.set(campaignRef, sanitizeForFirestore(nextCampaign));
       if (
-        (input.status === 'bounced' || input.status === 'complained')
+        (input.status === 'bounced' || input.status === 'complained' || input.status === 'suppressed')
         && subscriber.status !== 'suppressed'
       ) {
         const suppressed: StoredNewsletterSubscriber = {

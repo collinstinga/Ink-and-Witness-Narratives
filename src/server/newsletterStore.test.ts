@@ -182,4 +182,32 @@ describe('newsletter store', () => {
     });
     expect((await newsletterStore.getCampaign(campaign.id))?.sentCount).toBe(1);
   }, 60_000);
+
+  it('creates only one immutable release campaign for a piece', async () => {
+    const { newsletterStore } = await import('./newsletterStore.js');
+    const first = await newsletterStore.ensureReleaseCampaign({
+      pieceId: 'piece-123',
+      content: {
+        subject: 'New release: The First Title',
+        body: 'The first release letter.',
+        pieceId: 'piece-123'
+      },
+      audience: { type: 'all' },
+      createdBy: 'admin-1'
+    });
+    const repeated = await newsletterStore.ensureReleaseCampaign({
+      pieceId: 'piece-123',
+      content: {
+        subject: 'A retry must not rewrite the release',
+        body: 'Changed retry content.',
+        pieceId: 'piece-123'
+      },
+      audience: { type: 'all' },
+      createdBy: 'admin-1'
+    });
+
+    expect(first.kind).toBe('release');
+    expect(repeated.id).toBe(first.id);
+    expect(repeated.content.subject).toBe('New release: The First Title');
+  }, 60_000);
 });

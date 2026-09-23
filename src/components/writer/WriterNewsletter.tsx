@@ -135,6 +135,24 @@ export const WriterNewsletter: React.FC = () => {
     }
   };
 
+  const deliverCampaign = async (initialCampaign: NewsletterCampaign): Promise<NewsletterCampaign> => {
+    let campaign = initialCampaign;
+    let cursor: string | undefined;
+    let completed = campaign.status === 'sent' || campaign.status === 'partially_sent';
+    let guard = 0;
+    while (!completed && guard < 200) {
+      const step = await api.sendNewsletterCampaignStep(campaign.id, cursor);
+      cursor = step.nextCursor;
+      completed = step.complete;
+      campaign = step.campaign;
+      guard += 1;
+    }
+    if (!completed) {
+      throw new Error('Delivery paused at a safe checkpoint. Use Resume delivery to continue.');
+    }
+    return campaign;
+  };
+
   const handleSend = async () => {
     if (!window.confirm('Send this newsletter to the selected audience? This cannot be recalled.')) return;
     setSending(true);
@@ -146,23 +164,33 @@ export const WriterNewsletter: React.FC = () => {
       const campaign = deliveryInProgress && draftCampaign
         ? draftCampaign
         : await saveDraft();
-      let cursor: string | undefined;
-      let completed = false;
-      let guard = 0;
-      while (!completed && guard < 200) {
-        const step = await api.sendNewsletterCampaignStep(campaign.id, cursor);
-        cursor = step.nextCursor;
-        completed = step.complete;
-        setDraftCampaign(step.campaign);
-        guard += 1;
-      }
-      if (!completed) throw new Error('Delivery paused at a safe checkpoint. Press Send again to resume.');
+      const completedCampaign = await deliverCampaign(campaign);
+      setDraftCampaign(completedCampaign);
       setNotice('Newsletter delivery completed. Open delivery history to review the final status.');
       setDraftCampaign(null);
       setContent(emptyContent);
       await loadOverview();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Newsletter delivery could not be completed.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleResumeCampaign = async (campaign: NewsletterCampaign) => {
+    if (!window.confirm(`Send or resume “${campaign.content.subject}”? Completed deliveries will be skipped.`)) return;
+    setSending(true);
+    setError('');
+    setNotice('');
+    try {
+      const completedCampaign = await deliverCampaign(campaign);
+      setNotice(completedCampaign.failedCount > 0
+        ? `Delivery completed with ${completedCampaign.failedCount} failed address(es).`
+        : 'Newsletter delivery completed successfully.');
+      await loadOverview();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Newsletter delivery remains paused safely.');
+      await loadOverview();
     } finally {
       setSending(false);
     }
@@ -179,7 +207,7 @@ export const WriterNewsletter: React.FC = () => {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="font-serif text-2xl font-bold text-white">Newsletter &amp; Reader Retention</h1>
-          <p className="mt-1 text-xs text-slate-400">Consent-based reader updates with explicit audience control. Publishing never emails automatically.</p>
+          <p className="mt-1 text-xs text-slate-400">Consent-based reader updates with explicit audience control. A release email is sent only when explicitly selected during publishing.</p>
         </div>
         <button type="button" onClick={() => void loadOverview()} disabled={loading} className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50">
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh
@@ -266,6 +294,16 @@ export const WriterNewsletter: React.FC = () => {
                 <div key={campaign.id} className="rounded-xl border border-slate-800 bg-slate-950/50 p-3">
                   <div className="flex items-start justify-between gap-3"><span className="text-xs font-semibold text-slate-200">{campaign.content.subject}</span><span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase text-slate-400">{campaign.status.replace('_', ' ')}</span></div>
                   <p className="mt-2 text-[11px] text-slate-500">{campaign.sentCount} sent · {campaign.failedCount} failed · {new Date(campaign.createdAt).toLocaleString()}</p>
+                  {(campaign.status === 'queued' || campaign.status === 'sending' || (campaign.kind === 'release' && campaign.status === 'draft')) && (
+                    <button
+                      type="button"
+                      onClick={() => void handleResumeCampaign(campaign)}
+                      disabled={sending || !summary?.providerConfigured}
+                      className="mt-3 rounded-lg border border-sky-800 bg-sky-950 px-3 py-1.5 text-[11px] font-semibold text-sky-200 disabled:opacity-50"
+                    >
+                      {campaign.status === 'draft' ? 'Send release notification' : 'Resume delivery'}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

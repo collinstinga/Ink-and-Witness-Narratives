@@ -1,5 +1,7 @@
 import { 
-  Article, 
+  Article,
+  ArticleMutationResponse,
+  ArticleSaveOptions,
   AuthorProfile, 
   PaymentTransaction, 
   MpesaConfig, 
@@ -937,7 +939,11 @@ export const api = {
     return res.json();
   },
 
-  async createArticle(data: Partial<Article>, token?: string): Promise<{ success: boolean; article: Article }> {
+  async createArticle(
+    data: Partial<Article>,
+    token?: string,
+    options: ArticleSaveOptions = {}
+  ): Promise<ArticleMutationResponse> {
     const activeToken = token || getWriterToken();
     const res = await fetch('/api/admin/articles', {
       method: 'POST',
@@ -946,7 +952,10 @@ export const api = {
         ...(activeToken ? { 'x-admin-token': activeToken } : {})
       }),
       credentials: 'include',
-      body: JSON.stringify(data)
+      body: JSON.stringify({
+        ...data,
+        notifyNewsletterSubscribers: options.notifySubscribers === true
+      })
     });
     if (res.status === 401 || res.status === 403) {
       clearWriterToken();
@@ -959,7 +968,12 @@ export const api = {
     return res.json();
   },
 
-  async updateArticle(id: string, data: Partial<Article>, token?: string): Promise<{ success: boolean; article: Article }> {
+  async updateArticle(
+    id: string,
+    data: Partial<Article>,
+    token?: string,
+    options: ArticleSaveOptions = {}
+  ): Promise<ArticleMutationResponse> {
     const activeToken = token || getWriterToken();
     const res = await fetch(`/api/admin/articles/${id}`, {
       method: 'PUT',
@@ -968,7 +982,10 @@ export const api = {
         ...(activeToken ? { 'x-admin-token': activeToken } : {})
       }),
       credentials: 'include',
-      body: JSON.stringify(data)
+      body: JSON.stringify({
+        ...data,
+        notifyNewsletterSubscribers: options.notifySubscribers === true
+      })
     });
     if (res.status === 401 || res.status === 403) {
       clearWriterToken();
@@ -1551,6 +1568,12 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cursor })
     }, 'Failed to continue newsletter delivery.');
+  },
+
+  async prepareArticleReleaseNewsletter(id: string): Promise<{ campaign: NewsletterCampaign }> {
+    return safeFetchJson(`/api/admin/articles/${encodeURIComponent(id)}/newsletter-release`, {
+      method: 'POST'
+    }, 'Failed to prepare the release notification.');
   },
 
   async reissueManualAccessActivationToken(grantId: string): Promise<{ success: boolean; activationToken: string }> {

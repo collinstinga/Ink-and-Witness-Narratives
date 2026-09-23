@@ -187,6 +187,7 @@ export type NewsletterCampaignStatus =
   | 'sent'
   | 'partially_sent'
   | 'failed';
+export type NewsletterCampaignKind = 'manual' | 'release';
 export type NewsletterDeliveryStatus =
   | 'queued'
   | 'sent'
@@ -217,6 +218,7 @@ export interface NewsletterCampaignContent {
 
 export interface NewsletterCampaign {
   id: string;
+  kind: NewsletterCampaignKind;
   content: NewsletterCampaignContent;
   audience: NewsletterAudience;
   status: NewsletterCampaignStatus;
@@ -230,6 +232,26 @@ export interface NewsletterCampaign {
   sentCount: number;
   failedCount: number;
   lastError?: string;
+}
+
+export interface ArticleSaveOptions {
+  notifySubscribers?: boolean;
+}
+
+export interface PublicationNewsletterResult {
+  requested: true;
+  status: 'ready' | 'sent' | 'paused';
+  campaign?: NewsletterCampaign;
+  message?: string;
+}
+
+export interface ArticleSaveResult {
+  article: Article;
+  newsletter?: PublicationNewsletterResult;
+}
+
+export interface ArticleMutationResponse extends ArticleSaveResult {
+  success: boolean;
 }
 
 export interface NewsletterDelivery {

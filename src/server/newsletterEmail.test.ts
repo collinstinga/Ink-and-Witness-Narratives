@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildNewsletterCampaignEmail,
   buildNewsletterConfirmationEmail,
+  isRetryableNewsletterProviderError,
   isNewsletterProviderConfigured,
   NewsletterProviderConfigurationError,
+  NewsletterProviderError,
   sendNewsletterEmail
 } from './newsletterEmail.js';
 
@@ -77,6 +79,10 @@ describe('newsletter email provider', () => {
       expect(headers['Idempotency-Key']).toBe('campaign-1-subscriber-1');
       const body = JSON.parse(String(init?.body));
       expect(body.to).toEqual(['reader@example.com']);
+      expect(body.tags).toEqual([{
+        name: 'delivery_id',
+        value: 'nld_0123456789abcdef0123456789abcdef0123456789abcdef'
+      }]);
       return new Response(JSON.stringify({ id: 'email_123' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }
@@ -89,7 +95,15 @@ describe('newsletter email provider', () => {
       html: '<p>Body</p>',
       text: 'Body',
       idempotencyKey: 'campaign-1-subscriber-1',
+      deliveryId: 'nld_0123456789abcdef0123456789abcdef0123456789abcdef',
       fetchImpl
     })).resolves.toEqual({ providerMessageId: 'email_123' });
+  });
+
+  it('keeps transient provider failures retryable at the same delivery checkpoint', () => {
+    expect(isRetryableNewsletterProviderError(new NewsletterProviderError('domain is not verified', 403))).toBe(true);
+    expect(isRetryableNewsletterProviderError(new NewsletterProviderError('rate limited', 429))).toBe(true);
+    expect(isRetryableNewsletterProviderError(new NewsletterProviderError('provider unavailable', 503))).toBe(true);
+    expect(isRetryableNewsletterProviderError(new NewsletterProviderError('bad recipient', 422))).toBe(false);
   });
 });

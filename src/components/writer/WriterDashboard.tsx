@@ -29,7 +29,9 @@ import {
   Mail
 } from 'lucide-react';
 import { 
-  Article, 
+  Article,
+  ArticleSaveOptions,
+  ArticleSaveResult,
   AuthorProfile, 
   MpesaConfig, 
   PaymentTransaction, 
@@ -330,20 +332,26 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
     handleTabChange('editor', 'content', piece.id);
   };
 
-  const handleSavePiece = async (articleData: Partial<Article>): Promise<Article> => {
+  const handleSavePiece = async (
+    articleData: Partial<Article>,
+    options: ArticleSaveOptions = {}
+  ): Promise<ArticleSaveResult> => {
     let saved: Article;
+    let newsletter: ArticleSaveResult['newsletter'];
     if (editingPiece?.id) {
-      const res = await api.updateArticle(editingPiece.id, articleData);
+      const res = await api.updateArticle(editingPiece.id, articleData, undefined, options);
       saved = res.article;
+      newsletter = res.newsletter;
       setPieces(prev => prev.map(p => p.id === saved.id ? saved : p));
     } else {
-      const res = await api.createArticle(articleData);
+      const res = await api.createArticle(articleData, undefined, options);
       saved = res.article;
+      newsletter = res.newsletter;
       setPieces(prev => [saved, ...prev]);
     }
     setEditingPiece(saved);
     await loadDashboardData();
-    return saved;
+    return { article: saved, ...(newsletter ? { newsletter } : {}) };
   };
 
   const handleTogglePublish = async (id: string) => {
@@ -351,7 +359,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
       const piece = pieces.find(p => p.id === id);
       if (!piece) return;
       const nextStatus = piece.status === 'published' ? 'draft' : 'published';
-      const updated = await api.updateArticle(id, { status: nextStatus });
+      const { article: updated } = await api.updateArticle(id, { status: nextStatus });
       setPieces(prev => prev.map(p => p.id === id ? updated : p));
       await loadDashboardData();
     } catch (err) {
