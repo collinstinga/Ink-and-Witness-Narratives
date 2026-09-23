@@ -20,7 +20,10 @@ import {
   User
 } from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
-import { sanitizeAffiliateForResponse } from "./src/server/affiliateStore.js";
+import {
+  AffiliateSettingsValidationError,
+  sanitizeAffiliateForResponse
+} from "./src/server/affiliateStore.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
   AFFILIATE_CLICK_DEDUP_COOKIE_NAME,
@@ -4510,16 +4513,24 @@ ${currentDraft || prompt}
   });
 
   // Admin: Settings (GET, POST, PUT)
-  const handleAdminSettings = (req: Request, res: Response) => {
+  const handleAdminSettings = async (req: Request, res: Response) => {
     try {
-      const settings = store.affiliates.saveSettings(req.body, 'Admin (Jake)');
+      const settings = await store.affiliates.saveSettings(req.body, 'Admin (Jake)');
       res.json({
         success: true,
         settings,
         message: "Affiliate system settings updated successfully."
       });
     } catch (err: any) {
-      res.status(400).json({ success: false, error: err.message || "Failed to save settings." });
+      if (err instanceof AffiliateSettingsValidationError) {
+        res.status(400).json({ success: false, error: err.message });
+        return;
+      }
+      console.error('[AffiliateSettings] Failed to persist settings:', err);
+      res.status(503).json({
+        success: false,
+        error: "Affiliate settings could not be saved right now. Please try again."
+      });
     }
   };
 

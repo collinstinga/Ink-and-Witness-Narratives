@@ -124,6 +124,43 @@ function normalizeAffiliateSettings(value: unknown): AffiliateSettings {
   };
 }
 
+export class AffiliateSettingsValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AffiliateSettingsValidationError';
+  }
+}
+
+function validateAffiliateSettingsPatch(patch: Partial<AffiliateSettings>): void {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new AffiliateSettingsValidationError('Affiliate settings must be provided as an object.');
+  }
+  const validateNumber = (
+    key: keyof AffiliateSettings,
+    label: string,
+    minimum: number,
+    maximum: number,
+    integer = false
+  ) => {
+    if (patch[key] === undefined) return;
+    const value = Number(patch[key]);
+    if (
+      !Number.isFinite(value)
+      || value < minimum
+      || value > maximum
+      || (integer && !Number.isSafeInteger(value))
+    ) {
+      throw new AffiliateSettingsValidationError(
+        `${label} must be ${integer ? 'a whole number ' : ''}between ${minimum} and ${maximum}.`
+      );
+    }
+  };
+  validateNumber('defaultCommissionRate', 'Default commission rate', 0.01, 100);
+  validateNumber('minPayoutThresholdKes', 'Minimum payout threshold', 1, 10_000_000, true);
+  validateNumber('defaultAttributionDays', 'Attribution window', 1, MAX_ATTRIBUTION_DAYS, true);
+  validateNumber('autoApproveDelayHours', 'Auto-approve delay', 0, 24 * 365);
+}
+
 function isCampaignValidAttribution(
   campaign: AffiliateCampaign,
   articleId: string | undefined,
@@ -316,11 +353,11 @@ export const affiliateStore = {
     try {
       const fsSettings = await getFirestoreDoc<AffiliateSettings>('site_configs', 'affiliate_settings');
       if (fsSettings) {
-        cachedSettings = { ...cachedSettings, ...fsSettings };
+        cachedSettings = normalizeAffiliateSettings({ ...cachedSettings, ...fsSettings });
         writeJsonFileSync(SETTINGS_FILE, cachedSettings);
       } else if (fs.existsSync(SETTINGS_FILE)) {
         const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-        cachedSettings = { ...cachedSettings, ...JSON.parse(raw) };
+        cachedSettings = normalizeAffiliateSettings({ ...cachedSettings, ...JSON.parse(raw) });
         setFirestoreDoc('site_configs', 'affiliate_settings', cachedSettings).catch(() => {});
       } else {
         writeJsonFileSync(SETTINGS_FILE, cachedSettings);
@@ -485,17 +522,24 @@ export const affiliateStore = {
     return { ...cachedSettings };
   },
 
-  saveSettings(patch: Partial<AffiliateSettings>, actor = 'Admin'): AffiliateSettings {
+  async saveSettings(patch: Partial<AffiliateSettings>, actor = 'Admin'): Promise<AffiliateSettings> {
+    validateAffiliateSettingsPatch(patch);
     const prev = { ...cachedSettings };
-    cachedSettings = {
+    const next = normalizeAffiliateSettings({
       ...cachedSettings,
       ...patch,
-      pieceCommissionOverrides: patch.pieceCommissionOverrides || cachedSettings.pieceCommissionOverrides || {}
-    };
+      pieceCommissionOverrides: patch.pieceCommissionOverrides !== undefined
+        ? patch.pieceCommissionOverrides
+        : (cachedSettings.pieceCommissionOverrides || {})
+    });
+    // Do not acknowledge or publish an in-memory value until the source of
+    // truth has committed. This prevents a cold instance from immediately
+    // restoring the previous threshold after a reported successful save.
+    await setFirestoreDoc('site_configs', 'affiliate_settings', next);
+    cachedSettings = next;
     writeJsonFileSync(SETTINGS_FILE, cachedSettings);
-    setFirestoreDoc('site_configs', 'affiliate_settings', cachedSettings).catch(() => {});
     this.recordAudit(actor, 'settings_updated', 'settings', 'Updated affiliate global configuration', undefined, prev, cachedSettings);
-    return cachedSettings;
+    return { ...cachedSettings };
   },
 
   // AFFILIATES CRUD

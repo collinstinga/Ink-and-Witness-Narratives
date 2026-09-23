@@ -56,11 +56,11 @@ Completed locally:
 - Affiliate dashboards show per-sale piece, date, amount, commission, order ID, and status through an explicit privacy allow-list. Phone-shaped legacy transaction identifiers are never exposed as affiliate order IDs.
 - `scripts/backfill-sales-ledger.ts` provides a dry-run-by-default, additive historical backfill. Apply mode requires an exact `--expected-project` match, scans the full collection, refuses duplicate order IDs or invalid plans, skips seed data, and never changes existing document IDs or canonical payment fields.
 
-Production state: the backfill tool has **not** been run, no Firestore records were modified by this stage, and this commit has not yet been deployed.
+Production state: the code is included in the 2026-09-23 safe release candidate. The backfill tool has **not** been run and no Firestore records were modified by this stage.
 
 ## Verified local checkpoint — canonical sales intelligence
 
-- Full automated suite: 396/396 passed across 42 files.
+- Full automated suite: 399/399 passed across 42 files.
 - TypeScript: passed (`tsc --noEmit`).
 - Production client build: passed (Vite; existing large-chunk advisory only).
 - Production server bundle: passed (esbuild).
@@ -70,7 +70,7 @@ Production state: the backfill tool has **not** been run, no Firestore records w
 
 ### UP-04 — Chaptered publishing and editor reliability
 
-Status: pending
+Status: pending; additive schema checkpoint intentionally excluded from this release
 
 - Preserve every existing article as a standalone work by default.
 - Add parent-work/child-chapter records, draft/publish/schedule/reorder operations, reader table of contents, direct chapter URLs, and work-follow notifications.
@@ -80,13 +80,26 @@ Checkpoint: legacy standalone URL tests, chapter CRUD/reorder/access tests, and 
 
 Completed locally: safe shared Markdown rendering plus selection-aware bold/italic/headings/quotes/lists/links in writer preview and reader view. Existing content stays Markdown and raw HTML is not rendered. Remaining: chaptered work schema/routes/editor/table of contents and full control round-trip verification.
 
+An additive chapter-schema checkpoint exists on branch `fix/homepage-manual-grant-piece-scope-2026-09-16` at commit `84f1df5`. It is intentionally excluded from production until its routes, editor workflow, reader table of contents, access controls, and regression tests are complete.
+
 ## Verified local checkpoint — newsletter/editor foundation
 
 - TypeScript: passed (`tsc --noEmit`).
 - Focused tests: 38/38 passed across newsletter security/provider/store, canonical sales helper, safe Markdown rendering, and editor formatting.
 - Production build: Vite client and bundled server passed.
 - Diff integrity: `git diff --check` passed (line-ending warnings only).
-- Deployment/provider state: not deployed; no Firestore migration or production newsletter writes performed. Newsletter remains disabled unless server-side provider variables are configured.
+- Deployment/provider state: included in the safe release candidate; no Firestore migration or production newsletter writes were performed. Newsletter remains disabled unless server-side provider variables are configured.
+
+## Affiliate payout threshold durability hotfix
+
+Status: complete and included in the safe release candidate
+
+- The writer portal accepts whole-number payout thresholds from KES 1 through KES 10,000,000.
+- Background affiliate-summary refreshes cannot overwrite unsaved edits or race a newly confirmed save.
+- The API acknowledges a setting only after Firestore commits it; a failed write leaves the prior in-memory setting intact and returns a retryable service error.
+- Firestore-loaded and local fallback settings are normalized before entering the runtime cache.
+- Focused payout/commission durability suite: 26/26 passed.
+- Full automated suite: 399/399 passed; TypeScript and both production bundles passed.
 
 ### UP-05 — Inclusive discovery and personalization
 

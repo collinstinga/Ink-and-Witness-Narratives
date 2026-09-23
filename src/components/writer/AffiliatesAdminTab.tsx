@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Share2, 
   Users, 
@@ -103,6 +103,15 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   // Settings State
   const [settingsForm, setSettingsForm] = useState<AffiliateSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const settingsDirtyRef = useRef(false);
+  const summaryRequestIdRef = useRef(0);
+
+  const updateSettingsForm = (patch: Partial<AffiliateSettings>) => {
+    settingsDirtyRef.current = true;
+    setSettingsDirty(true);
+    setSettingsForm(current => current ? { ...current, ...patch } : current);
+  };
 
   // Filters
   const [affSearch, setAffSearch] = useState('');
@@ -111,21 +120,27 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [commStatusFilter, setCommStatusFilter] = useState('ALL');
 
   const loadSummary = async (isRefresh = false) => {
+    const requestId = ++summaryRequestIdRef.current;
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     setError('');
 
     try {
       const res = await api.getAdminAffiliatesSummary();
+      if (requestId !== summaryRequestIdRef.current) return;
       setSummary(res);
-      if (res.settings) {
+      if (res.settings && !settingsDirtyRef.current) {
         setSettingsForm(res.settings);
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to load affiliate administration summary');
+      if (requestId === summaryRequestIdRef.current) {
+        setError(err.message || 'Failed to load affiliate administration summary');
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === summaryRequestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
@@ -355,15 +370,23 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!settingsForm) return;
+    if (!Number.isSafeInteger(settingsForm.minPayoutThresholdKes) || settingsForm.minPayoutThresholdKes < 1) {
+      setError('Minimum payout threshold must be a whole Kenyan-shilling amount of at least KES 1.');
+      return;
+    }
     setSavingSettings(true);
+    setError('');
     try {
       const res = await api.saveAdminAffiliateSettings(settingsForm);
+      settingsDirtyRef.current = false;
+      setSettingsDirty(false);
       setSettingsForm(res.settings);
+      setSummary(current => current ? { ...current, settings: res.settings } : current);
       setSuccessMsg("Affiliate program global settings updated successfully!");
-      loadSummary(true);
+      await loadSummary(true);
       setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
-      alert(`Failed to save settings: ${err.message}`);
+      setError(`Failed to save settings: ${err.message}`);
     } finally {
       setSavingSettings(false);
     }
@@ -1139,10 +1162,11 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                     <input
                       type="number"
                       required
-                      min={1}
-                      max={90}
+                      min={0.01}
+                      max={100}
+                      step={0.01}
                       value={settingsForm.defaultCommissionRate}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, defaultCommissionRate: Number(e.target.value) })}
+                      onChange={(e) => updateSettingsForm({ defaultCommissionRate: Number(e.target.value) })}
                       className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-cyan-500"
                     />
                     <p className="text-[10px] text-slate-500 font-mono mt-0.5">Applied to all standard monographs</p>
@@ -1155,9 +1179,11 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                     <input
                       type="number"
                       required
-                      min={100}
+                      min={1}
+                      max={10000000}
+                      step={1}
                       value={settingsForm.minPayoutThresholdKes}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, minPayoutThresholdKes: Number(e.target.value) })}
+                      onChange={(e) => updateSettingsForm({ minPayoutThresholdKes: Number(e.target.value) })}
                       className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-cyan-300 font-mono font-bold focus:outline-none focus:border-cyan-500"
                     />
                     <p className="text-[10px] text-slate-500 font-mono mt-0.5">Minimum balance before payout request</p>
@@ -1173,9 +1199,9 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                       type="number"
                       required
                       min={1}
-                      max={180}
+                      max={90}
                       value={settingsForm.defaultAttributionDays}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, defaultAttributionDays: Number(e.target.value) })}
+                      onChange={(e) => updateSettingsForm({ defaultAttributionDays: Number(e.target.value) })}
                       className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
                     />
                   </div>
@@ -1188,9 +1214,9 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                       type="number"
                       required
                       min={0}
-                      max={168}
+                      max={8760}
                       value={settingsForm.autoApproveDelayHours}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, autoApproveDelayHours: Number(e.target.value) })}
+                      onChange={(e) => updateSettingsForm({ autoApproveDelayHours: Number(e.target.value) })}
                       className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
                     />
                   </div>
@@ -1201,7 +1227,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                     <input
                       type="checkbox"
                       checked={settingsForm.allowSelfRegistration}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, allowSelfRegistration: e.target.checked })}
+                      onChange={(e) => updateSettingsForm({ allowSelfRegistration: e.target.checked })}
                       className="rounded border-slate-700 bg-slate-950 text-cyan-500"
                     />
                     <span>Allow readers to self-register as affiliates via the website footer</span>
@@ -1211,7 +1237,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                     <input
                       type="checkbox"
                       checked={settingsForm.allowTipsCommission}
-                      onChange={(e) => setSettingsForm({ ...settingsForm, allowTipsCommission: e.target.checked })}
+                      onChange={(e) => updateSettingsForm({ allowTipsCommission: e.target.checked })}
                       className="rounded border-slate-700 bg-slate-950 text-cyan-500"
                     />
                     <span>Calculate commission on direct author reader tips (Default: Disabled)</span>
@@ -1221,11 +1247,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 <div className="pt-2">
                   <button
                     type="submit"
-                    disabled={savingSettings}
+                    disabled={savingSettings || !settingsDirty}
                     className="w-full py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    {savingSettings ? 'Saving Settings...' : 'Save Program Rules'}
+                    {savingSettings ? 'Saving Settings...' : settingsDirty ? 'Save Program Rules' : 'Program Rules Saved'}
                   </button>
+                  {settingsDirty && (
+                    <p className="mt-2 text-center text-[10px] font-mono text-amber-400">
+                      Unsaved changes are protected from background refreshes until you save.
+                    </p>
+                  )}
                 </div>
               </form>
             </div>

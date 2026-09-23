@@ -124,6 +124,56 @@ describe('affiliate store credential boundaries', () => {
     }
   });
 
+  it('persists a payout threshold before publishing it to the in-memory settings cache', async () => {
+    const previousThreshold = affiliateStore.getSettings().minPayoutThresholdKes;
+    const nextThreshold = previousThreshold === 2750 ? 2751 : 2750;
+
+    const saved = await affiliateStore.saveSettings({
+      minPayoutThresholdKes: nextThreshold
+    }, 'Threshold Durability Test');
+
+    expect(saved.minPayoutThresholdKes).toBe(nextThreshold);
+    expect(affiliateStore.getSettings().minPayoutThresholdKes).toBe(nextThreshold);
+    expect(firestore.documents.get('site_configs/affiliate_settings')).toMatchObject({
+      minPayoutThresholdKes: nextThreshold
+    });
+    expect(firestore.setDoc).toHaveBeenCalledWith(
+      'site_configs',
+      'affiliate_settings',
+      expect.objectContaining({ minPayoutThresholdKes: nextThreshold })
+    );
+
+    await affiliateStore.saveSettings({
+      minPayoutThresholdKes: previousThreshold
+    }, 'Threshold Durability Test Cleanup');
+  });
+
+  it('keeps the existing payout threshold when durable settings persistence fails', async () => {
+    const before = affiliateStore.getSettings();
+    const attemptedThreshold = before.minPayoutThresholdKes === 5555 ? 5556 : 5555;
+    firestore.setDoc.mockRejectedValueOnce(new Error('simulated settings write failure'));
+
+    await expect(affiliateStore.saveSettings({
+      minPayoutThresholdKes: attemptedThreshold
+    }, 'Threshold Failure Test')).rejects.toThrow('simulated settings write failure');
+
+    expect(affiliateStore.getSettings()).toEqual(before);
+    expect(firestore.documents.get('site_configs/affiliate_settings')).toMatchObject({
+      minPayoutThresholdKes: before.minPayoutThresholdKes
+    });
+  });
+
+  it('rejects an invalid payout threshold without attempting persistence', async () => {
+    const before = affiliateStore.getSettings();
+
+    await expect(affiliateStore.saveSettings({
+      minPayoutThresholdKes: 0
+    }, 'Threshold Validation Test')).rejects.toThrow(/Minimum payout threshold.*between 1 and 10000000/i);
+
+    expect(affiliateStore.getSettings()).toEqual(before);
+    expect(firestore.setDoc).not.toHaveBeenCalled();
+  });
+
   it('does not publish password hashes through list or audit responses', async () => {
     const created = await affiliateStore.createAffiliate({
       name: 'Security Test Affiliate',
