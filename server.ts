@@ -61,6 +61,14 @@ import {
   sendNewsletterEmail
 } from "./src/server/newsletterEmail.js";
 import {
+  buildBuyerSnapshot,
+  enrichSalesTransaction,
+  formatCsvCell,
+  isSettledTransactionStatus,
+  toAdminSalesTransaction,
+  toAffiliateSaleCommission
+} from "./src/server/salesLedger.js";
+import {
   PAYMENT_CALLBACK_QUERY_PARAMETER,
   canRecoverMpesaPurchase,
   generatePaymentCapability,
@@ -225,6 +233,30 @@ function newsletterAudienceMatches(
   }
   const requested = new Set((audience.interests || []).map(value => value.trim().toLocaleLowerCase('en')));
   return subscriber.interests.some(value => requested.has(value.trim().toLocaleLowerCase('en')));
+}
+
+function projectAdminSalesLedger(transactions: PaymentTransaction[]) {
+  const commissions = store.affiliates.getCommissions();
+  const commissionByTransaction = new Map<string, (typeof commissions)[number]>();
+  for (const commission of commissions) {
+    if (commission.transactionId) commissionByTransaction.set(commission.transactionId, commission);
+    if (commission.checkoutRequestId) commissionByTransaction.set(commission.checkoutRequestId, commission);
+  }
+  return transactions.map(transaction => toAdminSalesTransaction(
+    transaction,
+    commissionByTransaction.get(transaction.checkoutRequestId)
+      || commissionByTransaction.get(transaction.id)
+  ));
+}
+
+function projectAffiliateDashboard(
+  dashboard: ReturnType<typeof store.affiliates.getAffiliateDashboard>
+) {
+  if (!dashboard) return null;
+  return {
+    ...dashboard,
+    sales: (dashboard.sales || []).map(toAffiliateSaleCommission)
+  };
 }
 
 function publicCoverUrl(article: Article): string | undefined {
@@ -1645,13 +1677,16 @@ export async function createApp() {
       const bankRef = `BW-${randomSuffix}`;
       const checkoutRequestId = `bank_${Date.now()}_${randomSuffix}`;
       const paymentCapability = generatePaymentCapability();
+      const normalizedBuyerPhone = phoneNumber ? formatKenyanPhone(phoneNumber) : undefined;
+      const reader = (req as any).user;
 
-      const tx: PaymentTransaction = {
+      const tx: PaymentTransaction = enrichSalesTransaction({
         id: `tx_bank_${Date.now()}`,
         checkoutRequestId,
         articleId: canonicalArticleId,
         articleTitle,
-        phoneNumber: phoneNumber ? maskPhone(phoneNumber) : undefined,
+        phoneNumber: normalizedBuyerPhone,
+        senderName: customerName?.trim() || reader?.name,
         amount: chargeAmount,
         currency: currency || "KES",
         originalAmount: chargeAmount,
@@ -1663,6 +1698,14 @@ export async function createApp() {
         bankAccountRef: `NCBA Bank Kenya | Acc: 729104819 | Till: ${mpesaSettings.tillNumber || '1618656'}`,
         createdAt: new Date().toISOString(),
         paymentCapabilityHash: hashPaymentCapability(paymentCapability),
+        userId: reader?.id,
+        userEmail: reader?.email || email?.trim().toLowerCase(),
+        buyer: buildBuyerSnapshot({
+          userId: reader?.id,
+          email: reader?.email || email,
+          phoneNumber: normalizedBuyerPhone,
+          name: reader?.name || customerName
+        }),
         affiliateCode: trustedAttribution?.ref,
         campaignCode: trustedAttribution?.campaign,
         affiliateAttributionAt: trustedAttribution
@@ -1671,7 +1714,7 @@ export async function createApp() {
         affiliateAttributionExpiresAt: trustedAttribution
           ? new Date(trustedAttribution.expiresAt).toISOString()
           : undefined,
-      };
+      });
 
       await store.saveTransaction(tx);
 
@@ -1728,7 +1771,15 @@ export async function createApp() {
       }
       tx.bankReference = normalizedReference;
       if (senderPhone) {
-        tx.phoneNumber = maskPhone(senderPhone);
+        const normalizedSenderPhone = formatKenyanPhone(senderPhone);
+        tx.phoneNumber = normalizedSenderPhone;
+        tx.buyer = buildBuyerSnapshot({
+          userId: tx.buyer?.userId || tx.userId,
+          email: tx.buyer?.email || tx.userEmail,
+          phoneNumber: normalizedSenderPhone,
+          phoneVerifiedAt: tx.buyer?.phoneVerifiedAt,
+          name: tx.buyer?.name || tx.senderName
+        });
       }
       tx.updatedAt = new Date().toISOString();
       await store.saveTransaction(tx);
@@ -3007,23 +3058,59 @@ export async function createApp() {
       const type = req.query.type as string;
       const status = req.query.status as string;
       const txList = store.getTransactions({ type, status });
+      const sales = projectAdminSalesLedger(txList);
       
-      const headers = ['Transaction ID', 'Article Title', 'Amount (KES)', 'Type', 'Status', 'Payment Method', 'Receipt / Ref', 'Phone', 'Created At', 'Completed At'];
-      const rows = txList.map(t => [
-        `"${t.id || t.checkoutRequestId}"`,
-        `"${(t.articleTitle || '').replace(/"/g, '""')}"`,
+      const headers = [
+        'Order ID',
+        'Piece ID',
+        'Piece Title',
+        'Buyer Account ID',
+        'Buyer Name',
+        'Buyer Email',
+        'Buyer Phone',
+        'Amount (KES)',
+        'Currency',
+        'Type',
+        'Status',
+        'Channel',
+        'Payment Method',
+        'Payment / Reference ID',
+        'Affiliate Code',
+        'Affiliate Name',
+        'Commission (KES)',
+        'Commission Status',
+        'Created At',
+        'Settled At'
+      ];
+      const rows = sales.map(t => [
+        t.orderId,
+        t.articleId,
+        t.articleTitle || '',
+        t.buyer?.userId || t.userId || '',
+        t.buyer?.name || t.senderName || '',
+        t.buyer?.email || t.userEmail || '',
+        t.buyer?.phoneNumber || t.phoneNumber || '',
         t.amount || 0,
+        t.currency || 'KES',
         t.type || 'PURCHASE',
         t.status,
-        t.paymentMethod || 'mpesa',
-        `"${t.mpesaReceiptNumber || t.bankReference || ''}"`,
-        `"${t.phoneNumber || ''}"`,
-        `"${t.createdAt}"`,
-        `"${t.completedAt || ''}"`
+        t.saleChannel,
+        t.paymentMethod,
+        t.mpesaReceiptNumber || t.receiptNumber || t.bankReference || '',
+        t.affiliateCode || '',
+        t.commission?.affiliateName || '',
+        t.commission?.amountKes || 0,
+        t.commission?.status || '',
+        t.createdAt,
+        t.settledAt || t.confirmedAt || t.completedAt || ''
       ]);
 
-      const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-      res.setHeader('Content-Type', 'text/csv');
+      const csv = '\uFEFF' + [
+        headers.map(formatCsvCell).join(','),
+        ...rows.map(row => row.map(formatCsvCell).join(','))
+      ].join('\r\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Cache-Control', 'private, no-store');
       res.setHeader('Content-Disposition', `attachment; filename="ink-witness-transactions-${Date.now()}.csv"`);
       res.send(csv);
     } catch (err: any) {
@@ -3044,15 +3131,16 @@ export async function createApp() {
       const type = req.query.type as string;
       const status = req.query.status as string;
       const txList = store.getTransactions({ type, status });
+      const sales = projectAdminSalesLedger(txList);
 
-      const totalRevenue = txList
-        .filter(t => t.status === 'SUCCESS' || t.status === 'CONFIRMED')
+      const totalRevenue = sales
+        .filter(t => isSettledTransactionStatus(t.status))
         .reduce((sum, t) => sum + (t.amount || 0), 0);
 
       res.json({
         totalRevenueKes: totalRevenue,
-        count: txList.length,
-        transactions: txList.map(redactPaymentTransaction),
+        count: sales.length,
+        transactions: sales,
       });
     } catch (err: any) {
       console.error("Transactions ledger error:", err);
@@ -3069,13 +3157,13 @@ export async function createApp() {
       const result = await store.confirmTransaction(id, receiptNumber);
 
       if (!result.success) {
-        return res.status(404).json({ error: result.error || "Failed to confirm payment." });
+        const status = result.error === 'Transaction not found.' ? 404 : 409;
+        return res.status(status).json({ error: result.error || "Failed to confirm payment." });
       }
 
       res.json({
         success: true,
-        transaction: result.transaction ? redactPaymentTransaction(result.transaction) : undefined,
-        downloadToken: result.downloadToken,
+        transaction: result.transaction ? toAdminSalesTransaction(result.transaction) : undefined,
         message: "Payment successfully confirmed and piece unlocked."
       });
     } catch (err: any) {
@@ -3089,14 +3177,16 @@ export async function createApp() {
     try {
       const { id } = req.params;
       await store.ensureTransactionsHydrated();
-      const tx = store.getTransaction(id);
-      if (!tx) {
-        return res.status(404).json({ error: "Transaction not found." });
+      const result = await store.rejectTransaction(id);
+      if (!result.success || !result.transaction) {
+        const status = result.error === 'Transaction not found.' ? 404 : 409;
+        return res.status(status).json({ error: result.error || 'Failed to reject payment.' });
       }
-      tx.status = "FAILED";
-      tx.completedAt = new Date().toISOString();
-      await store.saveTransaction(tx);
-      res.json({ success: true, transaction: redactPaymentTransaction(tx), message: "Payment marked as rejected/failed." });
+      res.json({
+        success: true,
+        transaction: toAdminSalesTransaction(result.transaction),
+        message: "Payment marked as rejected/failed."
+      });
     } catch (err: any) {
       console.error("Payment rejection error:", err);
       res.status(500).json({ error: err.message || "Failed to reject payment." });
@@ -3108,14 +3198,14 @@ export async function createApp() {
     try {
       await store.ensureTransactionsHydrated();
       const tipsList = store.getTransactions({ type: 'TIP' });
-      const verifiedTips = tipsList.filter(t => t.status === 'SUCCESS');
+      const verifiedTips = tipsList.filter(t => isSettledTransactionStatus(t.status));
       const totalTipsKes = verifiedTips.reduce((sum, t) => sum + (t.amount || 0), 0);
 
       res.json({
         totalTipsKes,
         count: tipsList.length,
         verifiedCount: verifiedTips.length,
-        tips: tipsList.map(redactPaymentTransaction),
+        tips: tipsList.map(transaction => toAdminSalesTransaction(transaction)),
       });
     } catch (err: any) {
       console.error("Tips ledger error:", err);
@@ -3739,7 +3829,7 @@ ${currentDraft || prompt}
         success: true,
         message: "Terms & Conditions accepted successfully. Your dashboard is now fully unlocked.",
         affiliate: dashboard?.affiliate,
-        dashboard
+        dashboard: projectAffiliateDashboard(dashboard)
       });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message || "Failed to record Terms acceptance." });
@@ -3873,10 +3963,11 @@ ${currentDraft || prompt}
         return res.status(404).json({ success: false, error: "Affiliate account not found." });
       }
 
+      const safeDashboard = projectAffiliateDashboard(dashboard);
       res.json({
         success: true,
         payoutSettings: formatSafePayoutSettings(affiliate),
-        ...dashboard
+        ...safeDashboard
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message || "Failed to fetch affiliate dashboard." });
@@ -3932,7 +4023,7 @@ ${currentDraft || prompt}
         success: true,
         message: "Profile and payout details updated successfully.",
         payoutSettings: formatSafePayoutSettings(updated),
-        ...dashboard
+        ...(projectAffiliateDashboard(dashboard) || {})
       });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message || "Failed to update affiliate profile." });
@@ -4028,11 +4119,12 @@ ${currentDraft || prompt}
       }
       const affiliate = (req as any).affiliate;
       const sales = store.affiliates.getCommissions({ affiliateId: affiliate.id });
+      const safeSales = sales.map(toAffiliateSaleCommission);
       res.json({
         success: true,
-        sales,
-        commissions: sales,
-        totalSalesCount: sales.length
+        sales: safeSales,
+        commissions: safeSales,
+        totalSalesCount: safeSales.length
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message || "Failed to fetch sales ledger." });
@@ -4081,7 +4173,7 @@ ${currentDraft || prompt}
         success: true,
         message: `Payout request of KES ${payout.amountKes.toLocaleString()} submitted successfully! Jake will review and disburse via ${payout.payoutMethod}.`,
         payout,
-        ...dashboard
+        ...(projectAffiliateDashboard(dashboard) || {})
       });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message || "Failed to request payout." });

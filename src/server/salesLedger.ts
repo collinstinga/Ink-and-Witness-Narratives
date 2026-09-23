@@ -72,11 +72,33 @@ export function createStableOrderId(identifier: unknown): string {
 
 export function resolveOrderId(
   transaction: Pick<PaymentTransaction, 'orderId' | 'id' | 'checkoutRequestId'>
+    & Partial<Pick<PaymentTransaction, 'phoneNumber' | 'buyer'>>
 ): string {
+  const buyerPhoneDigits = String(transaction.buyer?.phoneNumber || transaction.phoneNumber || '')
+    .replace(/\D/g, '');
+  const isBuyerPhone = (value: string | undefined) => {
+    const identifierDigits = String(value || '').replace(/\D/g, '');
+    return buyerPhoneDigits.length >= 9 && identifierDigits === buyerPhoneDigits;
+  };
   const existing = transaction.orderId?.trim();
-  if (existing) return existing;
-  const identifier = transaction.id?.trim() || transaction.checkoutRequestId?.trim();
-  return createStableOrderId(identifier);
+  if (
+    existing
+    && !isBuyerPhone(existing)
+    && existing.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(existing)
+  ) {
+    return existing;
+  }
+  for (const identifier of [transaction.id, transaction.checkoutRequestId]) {
+    if (isBuyerPhone(identifier)) continue;
+    try {
+      return createStableOrderId(identifier);
+    } catch {
+      // Historical records can contain a malformed legacy ID. Prefer the next
+      // stable identifier rather than making the complete writer ledger fail.
+    }
+  }
+  throw new Error('A safe transaction identifier is required to resolve an order ID.');
 }
 
 export function buildBuyerSnapshot(input: {
@@ -102,22 +124,74 @@ export function buildBuyerSnapshot(input: {
 }
 
 /**
+ * Quote a value for spreadsheet-compatible CSV and neutralize formula
+ * prefixes. Writer exports can contain reader-entered names and references,
+ * so ordinary CSV escaping alone is not sufficient.
+ */
+export function formatCsvCell(value: unknown): string {
+  let text = value === null || value === undefined ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Additive metadata for all newly written or deliberately updated payment
+ * records. Existing identifiers remain the Firestore document keys; orderId is
+ * a reporting identifier and never derives from a phone number.
+ */
+export function enrichSalesTransaction(transaction: PaymentTransaction): PaymentTransaction {
+  const buyer = buildBuyerSnapshot({
+    userId: transaction.buyer?.userId || transaction.userId,
+    email: transaction.buyer?.email || transaction.userEmail,
+    phoneNumber: transaction.buyer?.phoneNumber || transaction.phoneNumber,
+    phoneVerifiedAt: transaction.buyer?.phoneVerifiedAt,
+    name: transaction.buyer?.name || transaction.senderName
+  });
+  const settledAt = transaction.settledAt
+    || transaction.confirmedAt
+    || transaction.completedAt;
+  return {
+    ...transaction,
+    schemaVersion: 2,
+    orderId: resolveOrderId(transaction),
+    paymentMethod: normalizePaymentMethod(transaction),
+    saleChannel: resolveSaleChannel(transaction),
+    ...(buyer ? { buyer } : {}),
+    ...(isSettledTransactionStatus(transaction.status) && settledAt ? { settledAt } : {})
+  };
+}
+
+/**
  * Writer-facing transaction projection. Provider capability hashes and bearer
  * access tokens never need to leave the server, even for an administrator.
  */
-export function toAdminSalesTransaction(transaction: PaymentTransaction): AdminSalesTransaction {
+export function toAdminSalesTransaction(
+  transaction: PaymentTransaction,
+  commission?: AffiliateSaleCommission
+): AdminSalesTransaction {
   const {
     paymentCapabilityHash: _paymentCapabilityHash,
     callbackCapabilityHash: _callbackCapabilityHash,
     downloadToken: _downloadToken,
     ...safeTransaction
   } = transaction;
+  const enriched = enrichSalesTransaction(safeTransaction as PaymentTransaction);
   return {
-    ...safeTransaction,
-    orderId: resolveOrderId(transaction),
-    paymentMethod: normalizePaymentMethod(transaction),
-    saleChannel: resolveSaleChannel(transaction),
-    buyer: transaction.buyer ? buildBuyerSnapshot(transaction.buyer) : undefined
+    ...enriched,
+    orderId: resolveOrderId(enriched),
+    paymentMethod: normalizePaymentMethod(enriched),
+    saleChannel: resolveSaleChannel(enriched),
+    ...(commission ? {
+      commission: {
+        id: commission.id,
+        affiliateId: commission.affiliateId,
+        affiliateCode: commission.affiliateCode,
+        affiliateName: commission.affiliateName,
+        amountKes: commission.commissionAmountKes,
+        rate: commission.commissionRate,
+        status: commission.status
+      }
+    } : {})
   };
 }
 
@@ -128,9 +202,14 @@ export function toAdminSalesTransaction(transaction: PaymentTransaction): AdminS
 export function toAffiliateSaleCommission(
   commission: AffiliateSaleCommission
 ): AffiliateSaleCommission {
+  const legacyTransactionId = commission.transactionId?.trim();
+  const phoneLikeLegacyId = /^\+?[\d\s()-]{9,}$/.test(legacyTransactionId || '');
+  const safeLegacyOrderSource = phoneLikeLegacyId
+    ? commission.id
+    : (legacyTransactionId || commission.id);
   return {
     id: commission.id,
-    orderId: commission.orderId || createStableOrderId(commission.transactionId || commission.id),
+    orderId: commission.orderId || createStableOrderId(safeLegacyOrderSource),
     affiliateId: commission.affiliateId,
     affiliateCode: commission.affiliateCode,
     affiliateName: commission.affiliateName,

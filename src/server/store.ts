@@ -8,6 +8,7 @@ import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
 import { sanitizeImageDataUrl } from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
+import { enrichSalesTransaction } from './salesLedger.js';
 import {
   MANUAL_ACCESS_ENTITLEMENT_COLLECTION,
   MANUAL_ACCESS_ENTITLEMENT_VERSION,
@@ -657,7 +658,7 @@ function transactionFromMpesaIntent(
   checkoutRequestId: string,
   merchantRequestId: string
 ): PaymentTransaction {
-  return {
+  return enrichSalesTransaction({
     id: `tx_mpesa_${crypto.createHash('sha256').update(checkoutRequestId).digest('hex').slice(0, 24)}`,
     checkoutRequestId,
     paymentAttemptId: intent.paymentAttemptId,
@@ -683,7 +684,7 @@ function transactionFromMpesaIntent(
     callbackCapabilityHash: intent.callbackCapabilityHash,
     userId: intent.userId,
     userEmail: intent.userEmail
-  };
+  });
 }
 
 function isSafeLegacyReaderLicenseToken(token: string): boolean {
@@ -2900,7 +2901,7 @@ export const store = {
       const downloadToken = current.type === 'PURCHASE'
         ? (current.downloadToken || `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`)
         : undefined;
-      const settled: PaymentTransaction = {
+      const settled: PaymentTransaction = enrichSalesTransaction({
         ...current,
         status: 'CONFIRMED',
         resultCode: 0,
@@ -2908,11 +2909,19 @@ export const store = {
         mpesaReceiptNumber: cleanReceipt,
         receiptNumber: cleanReceipt,
         transactionTimestamp: settlement.transactionTimestamp,
+        buyer: {
+          ...(current.buyer || {}),
+          userId: current.buyer?.userId || current.userId,
+          email: current.buyer?.email || current.userEmail,
+          phoneNumber: settlement.phoneNumber,
+          phoneVerifiedAt: current.buyer?.phoneVerifiedAt || now
+        },
         confirmedAt: current.confirmedAt || now,
         completedAt: now,
         updatedAt: now,
+        settledAt: current.settledAt || now,
         downloadToken
-      };
+      });
 
       firestoreTransaction.set(transactionRef, sanitizeForFirestore(settled), { merge: true });
       firestoreTransaction.set(receiptRef, {
@@ -2941,8 +2950,8 @@ export const store = {
           expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
           receipt: cleanReceipt,
           createdAt: now,
-          userId: current.userId,
-          email: current.userEmail,
+          userId: current.buyer?.userId || current.userId,
+          email: current.buyer?.email || current.userEmail,
           accessSource: 'MPESA_PURCHASE'
         }), { merge: true });
         firestoreTransaction.set(getDb().collection('articles').doc(current.articleId), {
@@ -3043,14 +3052,14 @@ export const store = {
         return { outcome: 'rejected' as const, error: 'A conflicting terminal payment result already exists.' };
       }
 
-      const failed: PaymentTransaction = {
+      const failed: PaymentTransaction = enrichSalesTransaction({
         ...current,
         status: failure.status,
         resultCode: failure.resultCode,
         resultDesc: failure.resultDesc,
         completedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
-      };
+      });
       firestoreTransaction.set(transactionRef, sanitizeForFirestore(failed), { merge: true });
       if (/^[a-f0-9]{64}$/.test(current.callbackCapabilityHash || '')) {
         firestoreTransaction.delete(
@@ -3105,86 +3114,202 @@ export const store = {
   },
 
   async saveTransaction(tx: PaymentTransaction): Promise<PaymentTransaction> {
-    cachedTransactions.set(tx.checkoutRequestId, tx);
+    const enriched = enrichSalesTransaction(tx);
+    cachedTransactions.set(enriched.checkoutRequestId, enriched);
     writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
-    const docId = tx.checkoutRequestId || tx.id;
+    const docId = enriched.checkoutRequestId || enriched.id;
     if (docId) {
-      await setFirestoreDoc('transactions', docId, tx);
+      await setFirestoreDoc('transactions', docId, enriched);
     }
-    return tx;
+    return enriched;
   },
 
   async confirmTransaction(identifier: string, receiptNumber?: string): Promise<{ success: boolean; transaction?: PaymentTransaction; downloadToken?: string; error?: string }> {
-    const tx = await this.loadTransaction(identifier);
-    if (!tx) {
+    const loaded = await this.loadTransaction(identifier);
+    if (!loaded) {
       return { success: false, error: "Transaction not found." };
     }
+    const checkoutRequestId = loaded.checkoutRequestId || loaded.id;
+    const transactionRef = getDb().collection('transactions').doc(checkoutRequestId);
 
-    const receipt = (receiptNumber || tx.mpesaReceiptNumber || tx.receiptNumber || tx.bankReference || '').trim();
-    if (!receipt && tx.status !== 'CONFIRMED' && tx.status !== 'SUCCESS' && tx.status !== 'PAID') {
-      return { success: false, error: "Cannot confirm transaction without a verified provider receipt number." };
-    }
-
-    const alreadyConfirmed = tx.status === 'CONFIRMED' || tx.status === 'SUCCESS' || tx.status === 'PAID';
-
-    // If already confirmed and already has download token (for purchases), ensure commission and return
-    if (alreadyConfirmed && (tx.type !== 'PURCHASE' && tx.type !== 'MANUAL' || tx.downloadToken)) {
-      if (tx.affiliateCode) {
-        try {
-          await affiliateStore.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
-        } catch (err) {
-          console.warn('[Data Store] Error attributing affiliate commission on confirmed tx:', err);
-        }
-      }
-      return { success: true, transaction: tx, downloadToken: tx.downloadToken };
-    }
-
-    tx.status = 'CONFIRMED';
-    if (receipt) {
-      tx.mpesaReceiptNumber = receipt;
-      tx.receiptNumber = receipt;
-    }
-    tx.confirmedAt = tx.confirmedAt || new Date().toISOString();
-    tx.completedAt = tx.completedAt || new Date().toISOString();
-
-    let downloadToken: string | undefined = tx.downloadToken;
-
-    if (tx.type === 'PURCHASE' || tx.type === 'MANUAL') {
-      if (!downloadToken) {
-        downloadToken = `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`;
-        tx.downloadToken = downloadToken;
+    const result = await getDb().runTransaction(async firestoreTransaction => {
+      const transactionSnapshot = await firestoreTransaction.get(transactionRef);
+      if (!transactionSnapshot.exists) {
+        return { error: 'Transaction not found.' };
       }
 
-      await this.savePurchasedToken(downloadToken, {
-        articleId: tx.articleId,
-        phone: tx.phoneNumber || '254700000000',
-        expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
-        receipt: receipt || tx.receiptNumber || tx.mpesaReceiptNumber || 'CONFIRMED',
-        createdAt: new Date().toISOString(),
-        userId: tx.userId,
-        email: tx.userEmail
+      const current = transactionSnapshot.data() as PaymentTransaction;
+      if (!isPersistentTransaction(current) || current.checkoutRequestId !== checkoutRequestId) {
+        return { error: 'Transaction record failed an integrity check.' };
+      }
+      const alreadyConfirmed = isConfirmedPaymentTransaction(current);
+      const canonicalReceipt = (
+        receiptNumber
+        || current.mpesaReceiptNumber
+        || current.receiptNumber
+        || current.bankReference
+        || ''
+      ).trim().toUpperCase();
+      const receiptRef = canonicalReceipt
+        ? getDb().collection('payment_receipts').doc(paymentReceiptLookupId(canonicalReceipt))
+        : undefined;
+      const receiptSnapshot = receiptRef
+        ? await firestoreTransaction.get(receiptRef)
+        : undefined;
+      if (!canonicalReceipt && !alreadyConfirmed) {
+        return { error: 'Cannot confirm transaction without a verified provider receipt number.' };
+      }
+      const existingReceipt = (current.mpesaReceiptNumber || current.receiptNumber || '').trim().toUpperCase();
+      if (alreadyConfirmed && existingReceipt && canonicalReceipt && existingReceipt !== canonicalReceipt) {
+        return { error: 'A conflicting receipt is already attached to this transaction.' };
+      }
+      const claimedCheckoutId = receiptSnapshot?.exists
+        ? String(receiptSnapshot.data()?.checkoutRequestId || '')
+        : '';
+      if (claimedCheckoutId && claimedCheckoutId !== checkoutRequestId) {
+        return { error: 'The receipt is already linked to another transaction.' };
+      }
+
+      const grantsAccess = current.type === 'PURCHASE' || current.type === 'MANUAL';
+      const licenseCreated = grantsAccess && !current.downloadToken;
+      const downloadToken = grantsAccess
+        ? (current.downloadToken || `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`)
+        : undefined;
+      const now = new Date().toISOString();
+      const settled = enrichSalesTransaction({
+        ...current,
+        status: 'CONFIRMED',
+        ...(canonicalReceipt ? {
+          receiptNumber: canonicalReceipt,
+          ...(current.paymentMethod === 'mpesa' ? { mpesaReceiptNumber: canonicalReceipt } : {})
+        } : {}),
+        confirmedAt: current.confirmedAt || now,
+        completedAt: current.completedAt || now,
+        settledAt: current.settledAt || current.confirmedAt || now,
+        updatedAt: now,
+        ...(downloadToken ? { downloadToken } : {})
       });
 
-      const article = cachedArticles.find(a => a.id === tx.articleId);
+      firestoreTransaction.set(transactionRef, sanitizeForFirestore(settled), { merge: true });
+      if (receiptRef && canonicalReceipt) {
+        firestoreTransaction.set(receiptRef, {
+          checkoutRequestId,
+          createdAt: now
+        }, { merge: true });
+      }
+      if (current.affiliateCode) {
+        firestoreTransaction.set(
+          getDb().collection('affiliate_commission_outbox').doc(affiliateCommissionOutboxId(checkoutRequestId)),
+          {
+            checkoutRequestId,
+            status: 'PENDING',
+            createdAt: now,
+            updatedAt: now
+          },
+          { merge: true }
+        );
+      }
+
+      let license: CachedReaderLicense | undefined;
+      if (downloadToken) {
+        license = {
+          articleId: current.articleId,
+          phone: current.buyer?.phoneNumber || current.phoneNumber || '',
+          expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
+          receipt: canonicalReceipt || current.receiptNumber || 'CONFIRMED',
+          createdAt: now,
+          userId: current.buyer?.userId || current.userId,
+          email: current.buyer?.email || current.userEmail,
+          accessSource: 'MPESA_PURCHASE'
+        };
+        firestoreTransaction.set(
+          getDb().collection('reader_licenses').doc(downloadToken),
+          sanitizeForFirestore({ token: downloadToken, ...license }),
+          { merge: true }
+        );
+        if (licenseCreated) {
+          firestoreTransaction.set(getDb().collection('articles').doc(current.articleId), {
+            downloadsCount: FieldValue.increment(1)
+          }, { merge: true });
+        }
+      }
+      return { transaction: settled, downloadToken, license, licenseCreated };
+    });
+
+    if (!result.transaction) {
+      return { success: false, error: result.error || 'Payment could not be confirmed.' };
+    }
+    cacheTransaction(result.transaction);
+    writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    if (result.downloadToken && result.license) {
+      cachedTokens.set(result.downloadToken, result.license);
+      cachedReaderLicenseVerifiedAt.set(result.downloadToken, Date.now());
+      missingReaderLicenses.delete(result.downloadToken);
+      writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens.entries()));
+    }
+    if (result.licenseCreated) {
+      const article = cachedArticles.find(item => item.id === result.transaction?.articleId);
       if (article) {
         article.downloadsCount = (article.downloadsCount || 0) + 1;
         writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-        setFirestoreDoc('articles', article.id, article).catch(() => {});
       }
     }
-
-    await this.saveTransaction(tx);
-
-    // If transaction has an associated affiliate, record the commission once
-    if (tx.affiliateCode) {
+    if (result.transaction.affiliateCode) {
       try {
-        await affiliateStore.recordAffiliateSale(tx, tx.affiliateCode, tx.campaignCode);
-      } catch (err) {
-        console.warn('[Data Store] Error attributing affiliate commission:', err);
+        await finalizeAffiliateCommissionOutbox(result.transaction);
+      } catch {
+        console.warn('[Affiliate Commission Outbox] Payment confirmed; commission reconciliation will retry later.');
       }
     }
 
-    return { success: true, transaction: tx, downloadToken };
+    return {
+      success: true,
+      transaction: result.transaction,
+      downloadToken: result.downloadToken
+    };
+  },
+
+  async rejectTransaction(identifier: string): Promise<{ success: boolean; transaction?: PaymentTransaction; error?: string }> {
+    const loaded = await this.loadTransaction(identifier);
+    if (!loaded) {
+      return { success: false, error: 'Transaction not found.' };
+    }
+    const checkoutRequestId = loaded.checkoutRequestId || loaded.id;
+    const transactionRef = getDb().collection('transactions').doc(checkoutRequestId);
+
+    const result = await getDb().runTransaction(async firestoreTransaction => {
+      const snapshot = await firestoreTransaction.get(transactionRef);
+      if (!snapshot.exists) return { error: 'Transaction not found.' };
+
+      const current = snapshot.data() as PaymentTransaction;
+      if (!isPersistentTransaction(current) || current.checkoutRequestId !== checkoutRequestId) {
+        return { error: 'Transaction record failed an integrity check.' };
+      }
+      if (isConfirmedPaymentTransaction(current)) {
+        return { error: 'A settled payment cannot be rejected.' };
+      }
+      if (current.status === 'FAILED') {
+        return { transaction: enrichSalesTransaction(current) };
+      }
+
+      const now = new Date().toISOString();
+      const failed = enrichSalesTransaction({
+        ...current,
+        status: 'FAILED',
+        resultDesc: current.resultDesc || 'Rejected by writer',
+        completedAt: current.completedAt || now,
+        updatedAt: now
+      });
+      firestoreTransaction.set(transactionRef, sanitizeForFirestore(failed), { merge: true });
+      return { transaction: failed };
+    });
+
+    if (!result.transaction) {
+      return { success: false, error: result.error || 'Payment could not be rejected.' };
+    }
+    cacheTransaction(result.transaction);
+    writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    return { success: true, transaction: result.transaction };
   },
 
   // PURCHASE TOKENS & READER LICENSES

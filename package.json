@@ -9,7 +9,8 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "migrate:sales:dry-run": "tsx scripts/backfill-sales-ledger.ts"
   },
   "dependencies": {
     "@google-cloud/firestore": "^9.0.0",

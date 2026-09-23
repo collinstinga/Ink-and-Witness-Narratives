@@ -635,6 +635,16 @@ export interface PaymentBuyerSnapshot {
   name?: string;
 }
 
+export interface PaymentCommissionSnapshot {
+  id: string;
+  affiliateId: string;
+  affiliateCode: string;
+  affiliateName?: string;
+  amountKes: number;
+  rate: number;
+  status: CommissionStatus;
+}
+
 export interface PaymentTransaction {
   id: string;
   checkoutRequestId: string;
@@ -644,6 +654,8 @@ export interface PaymentTransaction {
   schemaVersion?: 2;
   buyer?: PaymentBuyerSnapshot;
   saleChannel?: SaleChannel;
+  /** Writer-only joined projection. Never required on the canonical payment document. */
+  commission?: PaymentCommissionSnapshot;
   settledAt?: string;
   commissionId?: string;
   accessEntitlementId?: string;

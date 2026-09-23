@@ -648,7 +648,7 @@ export const api = {
     return res.json();
   },
 
-  async confirmPaymentAsAdmin(id: string, receiptNumber?: string): Promise<{ success: boolean; transaction: PaymentTransaction; downloadToken?: string; message: string }> {
+  async confirmPaymentAsAdmin(id: string, receiptNumber?: string): Promise<{ success: boolean; transaction: PaymentTransaction; message: string }> {
     const activeToken = getWriterToken();
     const res = await fetch(`/api/admin/payments/${encodeURIComponent(id)}/confirm`, {
       method: 'POST',

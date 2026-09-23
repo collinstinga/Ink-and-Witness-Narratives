@@ -445,6 +445,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
     const matchesSearch = 
       sale.articleTitle.toLowerCase().includes(salesSearch.toLowerCase()) ||
       sale.receiptNumber.toLowerCase().includes(salesSearch.toLowerCase()) ||
+      (sale.orderId || '').toLowerCase().includes(salesSearch.toLowerCase()) ||
       sale.id.toLowerCase().includes(salesSearch.toLowerCase());
     
     const matchesStatus = salesStatusFilter === 'ALL' || sale.status.toLowerCase() === salesStatusFilter.toLowerCase();
@@ -929,9 +930,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                                 {new Date(sale.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
                               </span>
                               <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${
-                                sale.status === 'verified' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                                sale.status === 'paid' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
-                                sale.status === 'reversed' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                                sale.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                                sale.status === 'PAID' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
+                                sale.status === 'REVERSED' || sale.status === 'REJECTED' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
                                 'bg-amber-950 text-amber-400 border border-amber-800'
                               }`}>
                                 {sale.status}
@@ -1204,10 +1205,11 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         className="bg-slate-900 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 font-mono focus:outline-none"
                       >
                         <option value="ALL">All Statuses</option>
-                        <option value="verified">Verified</option>
-                        <option value="pending">Pending</option>
-                        <option value="paid">Paid Out</option>
-                        <option value="reversed">Reversed</option>
+                        <option value="APPROVED">Approved</option>
+                        <option value="PENDING">Pending</option>
+                        <option value="PAID">Paid Out</option>
+                        <option value="REVERSED">Reversed</option>
+                        <option value="REJECTED">Rejected</option>
                       </select>
                     </div>
                   </div>
@@ -1226,6 +1228,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         <thead className="bg-slate-950/80 text-[11px] font-mono text-slate-400 border-b border-slate-800">
                           <tr>
                             <th className="p-3">Date</th>
+                            <th className="p-3">Order ID</th>
                             <th className="p-3">Monograph Title</th>
                             <th className="p-3">Method</th>
                             <th className="p-3 text-right">Sale Amount</th>
@@ -1239,6 +1242,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                             <tr key={sale.id} className="hover:bg-slate-800/30 transition-colors">
                               <td className="p-3 text-slate-400 whitespace-nowrap">
                                 {new Date(sale.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+                              </td>
+                              <td className="p-3 text-[10px] text-slate-500" title={sale.orderId || sale.transactionId}>
+                                {sale.orderId || sale.transactionId}
                               </td>
                               <td className="p-3 font-serif font-semibold text-slate-100 max-w-xs truncate">
                                 {sale.articleTitle}
@@ -1262,9 +1268,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                               </td>
                               <td className="p-3 text-center">
                                 <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${
-                                  sale.status === 'verified' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                                  sale.status === 'paid' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
-                                  sale.status === 'reversed' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                                  sale.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                                  sale.status === 'PAID' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
+                                  sale.status === 'REVERSED' || sale.status === 'REJECTED' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
                                   'bg-amber-950 text-amber-400 border border-amber-800'
                                 }`}>
                                   {sale.status}
@@ -1365,9 +1371,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                                 </td>
                                 <td className="p-3 text-center">
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${
-                                    payout.status === 'paid' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                                    payout.status === 'approved' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
-                                    payout.status === 'rejected' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                                    payout.status === 'PAID' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                                    payout.status === 'APPROVED' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
+                                    payout.status === 'REJECTED' || payout.status === 'FAILED' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
                                     'bg-amber-950 text-amber-400 border border-amber-800'
                                   }`}>
                                     {payout.status}

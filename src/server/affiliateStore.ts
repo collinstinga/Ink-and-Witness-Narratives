@@ -28,6 +28,7 @@ import {
   AffiliateSession
 } from '../types.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
+import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import {
   AFFILIATE_SESSION_MAX_AGE_MS,
   AFFILIATE_SESSION_STORAGE_VERSION,
@@ -1196,6 +1197,7 @@ export const affiliateStore = {
       const effectiveCommissionAmount = isSelfReferral ? 0 : commissionAmountKes;
       const commission: AffiliateSaleCommission = {
         id: commissionId,
+        orderId: resolveOrderId(tx),
         affiliateId: freshAffiliate.id,
         affiliateCode: freshAffiliate.affiliateCode,
         affiliateName: freshAffiliate.name,
@@ -1588,27 +1590,7 @@ export const affiliateStore = {
     // Filter ONLY this affiliate's sales with ANONYMIZED customer info
     const sales = cachedCommissions
       .filter(c => c.affiliateId === affiliate.id)
-      .map(c => ({
-        id: c.id,
-        affiliateId: c.affiliateId,
-        affiliateCode: c.affiliateCode,
-        affiliateName: c.affiliateName,
-        transactionId: c.transactionId,
-        receiptNumber: c.receiptNumber,
-        articleId: c.articleId,
-        articleTitle: c.articleTitle,
-        saleAmountKes: c.saleAmountKes,
-        currency: c.currency || 'KES',
-        originalAmount: c.originalAmount || c.saleAmountKes,
-        commissionRate: c.commissionRate,
-        commissionAmountKes: c.commissionAmountKes,
-        grossCreatorRevenueKes: c.grossCreatorRevenueKes,
-        paymentMethod: c.paymentMethod,
-        status: c.status,
-        createdAt: c.createdAt,
-        approvedAt: c.approvedAt,
-        paidAt: c.paidAt
-      }));
+      .map(toAffiliateSaleCommission);
 
     const payouts = cachedPayouts.filter(p => p.affiliateId === affiliate.id);
     const activeCampaigns = cachedCampaigns.filter(c => c.isActive);
@@ -1632,7 +1614,7 @@ export const affiliateStore = {
       clicks: affiliate.totalClicks || 0,
       uniqueVisitors: affiliate.uniqueVisitors || 0,
       totalPiecesSold: sales.length,
-      totalConfirmedSales: sales.filter(s => s.status === 'APPROVED' || s.status === 'PAID').length,
+      totalConfirmedSales: sales.filter(s => ['PENDING', 'APPROVED', 'PAID'].includes(s.status)).length,
       totalRevenueGeneratedKes: totalRevenue,
       commissionEarnedKes: commissionEarned,
       commissionPendingKes: commissionPending,

@@ -112,6 +112,23 @@ function pendingTransaction(id: string, overrides: Record<string, unknown> = {})
   };
 }
 
+function pendingBankTransaction(id: string, overrides: Record<string, unknown> = {}) {
+  return pendingTransaction(id, {
+    articleTitle: 'Atomic bank test',
+    amount: 450,
+    paymentMethod: 'bank',
+    bankReference: `BANK-${id}`,
+    phoneNumber: '254712345678',
+    buyer: {
+      userId: 'reader_1',
+      name: 'Reader One',
+      email: 'reader@example.com',
+      phoneNumber: '254712345678'
+    },
+    ...overrides
+  });
+}
+
 describe('atomic M-Pesa settlement', () => {
   let store: typeof import('./store.js').store;
 
@@ -184,6 +201,150 @@ describe('atomic M-Pesa settlement', () => {
     expect(firestoreMock.documents.get('transactions/checkout_1').status).toBe('PENDING');
     expect(Array.from(firestoreMock.documents.keys()).some(key => key.startsWith('reader_licenses/'))).toBe(false);
     expect(Array.from(firestoreMock.documents.keys()).some(key => key.startsWith('payment_receipts/'))).toBe(false);
+  });
+
+  it('atomically confirms a verified bank payment with a durable sales snapshot', async () => {
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_1',
+      pendingBankTransaction('bank_checkout_1')
+    );
+
+    const result = await store.confirmTransaction('bank_checkout_1');
+
+    expect(result.success).toBe(true);
+    expect(result.downloadToken).toMatch(/^ink_/);
+    expect(result.transaction).toMatchObject({
+      checkoutRequestId: 'bank_checkout_1',
+      orderId: 'ord_tx_bank_checkout_1',
+      schemaVersion: 2,
+      status: 'CONFIRMED',
+      receiptNumber: 'BANK-BANK_CHECKOUT_1',
+      paymentMethod: 'bank',
+      saleChannel: 'DIRECT',
+      buyer: {
+        userId: 'reader_1',
+        name: 'Reader One',
+        email: 'reader@example.com',
+        phoneNumber: '254712345678'
+      },
+      settledAt: expect.any(String)
+    });
+    expect(firestoreMock.documents.get('transactions/bank_checkout_1')).toMatchObject({
+      status: 'CONFIRMED',
+      downloadToken: result.downloadToken
+    });
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('payment_receipts/')
+    )).toHaveLength(1);
+    expect(firestoreMock.documents.has(`reader_licenses/${result.downloadToken}`)).toBe(true);
+  });
+
+  it('serializes concurrent manual confirmations without duplicating reader access', async () => {
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_concurrent',
+      pendingBankTransaction('bank_checkout_concurrent')
+    );
+
+    const [first, second] = await Promise.all([
+      store.confirmTransaction('bank_checkout_concurrent'),
+      store.confirmTransaction('bank_checkout_concurrent')
+    ]);
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(first.downloadToken).toBe(second.downloadToken);
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('reader_licenses/')
+    )).toHaveLength(1);
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('payment_receipts/')
+    )).toHaveLength(1);
+  });
+
+  it('rejects a manual confirmation when its receipt belongs to another order', async () => {
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_original',
+      pendingBankTransaction('bank_checkout_original')
+    );
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_conflict',
+      pendingBankTransaction('bank_checkout_conflict')
+    );
+
+    const original = await store.confirmTransaction('bank_checkout_original', 'BANK-DUPLICATE');
+    const conflict = await store.confirmTransaction('bank_checkout_conflict', 'BANK-DUPLICATE');
+
+    expect(original.success).toBe(true);
+    expect(conflict).toMatchObject({
+      success: false,
+      error: 'The receipt is already linked to another transaction.'
+    });
+    expect(firestoreMock.documents.get('transactions/bank_checkout_conflict').status).toBe('PENDING');
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('reader_licenses/')
+    )).toHaveLength(1);
+  });
+
+  it('leaves a manual payment pending when its atomic confirmation commit fails', async () => {
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_failure',
+      pendingBankTransaction('bank_checkout_failure')
+    );
+    firestoreMock.failCommit();
+
+    await expect(store.confirmTransaction('bank_checkout_failure'))
+      .rejects.toThrow(/injected commit failure/);
+
+    expect(firestoreMock.documents.get('transactions/bank_checkout_failure').status).toBe('PENDING');
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('reader_licenses/')
+    )).toBe(false);
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('payment_receipts/')
+    )).toBe(false);
+  });
+
+  it('rejects a pending payment atomically without granting reader access', async () => {
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_rejected',
+      pendingBankTransaction('bank_checkout_rejected')
+    );
+
+    const result = await store.rejectTransaction('bank_checkout_rejected');
+
+    expect(result).toMatchObject({
+      success: true,
+      transaction: {
+        status: 'FAILED',
+        completedAt: expect.any(String)
+      }
+    });
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('reader_licenses/')
+    )).toBe(false);
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('payment_receipts/')
+    )).toBe(false);
+  });
+
+  it('never allows an administrator to reject an already-settled payment', async () => {
+    firestoreMock.documents.set(
+      'transactions/bank_checkout_settled',
+      pendingBankTransaction('bank_checkout_settled')
+    );
+    const confirmed = await store.confirmTransaction('bank_checkout_settled');
+
+    const rejected = await store.rejectTransaction('bank_checkout_settled');
+
+    expect(confirmed.success).toBe(true);
+    expect(rejected).toEqual({
+      success: false,
+      error: 'A settled payment cannot be rejected.'
+    });
+    expect(firestoreMock.documents.get('transactions/bank_checkout_settled')).toMatchObject({
+      status: 'CONFIRMED',
+      downloadToken: confirmed.downloadToken
+    });
   });
 
   it('writes a pending affiliate outbox checkpoint atomically and completes it after commission persistence', async () => {

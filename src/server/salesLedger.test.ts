@@ -3,6 +3,8 @@ import type { AffiliateSaleCommission, PaymentTransaction } from '../types.js';
 import {
   buildBuyerSnapshot,
   createStableOrderId,
+  enrichSalesTransaction,
+  formatCsvCell,
   isFailedTransactionStatus,
   isSettledTransactionStatus,
   normalizePaymentMethod,
@@ -59,6 +61,30 @@ describe('sales ledger normalization', () => {
     expect(resolveSaleChannel(affiliate)).toBe('AFFILIATE');
   });
 
+  it('falls back to a safe checkout identifier for malformed legacy IDs', () => {
+    expect(resolveOrderId(transaction({
+      id: 'legacy id with spaces',
+      checkoutRequestId: 'safe_checkout_1'
+    }))).toBe('ord_safe_checkout_1');
+    expect(resolveOrderId(transaction({
+      orderId: 'invalid order id',
+      id: 'tx_safe_1'
+    }))).toBe('ord_tx_safe_1');
+  });
+
+  it('never promotes the buyer phone number into an order ID', () => {
+    expect(resolveOrderId(transaction({
+      id: '254700000000',
+      checkoutRequestId: 'safe_checkout_2',
+      phoneNumber: '254700000000'
+    }))).toBe('ord_safe_checkout_2');
+    expect(() => resolveOrderId(transaction({
+      id: '254700000000',
+      checkoutRequestId: '254700000000',
+      phoneNumber: '+254 700 000 000'
+    }))).toThrow(/safe transaction identifier/i);
+  });
+
   it('normalizes an optional buyer snapshot', () => {
     expect(buildBuyerSnapshot({
       userId: ' reader-1 ',
@@ -72,6 +98,37 @@ describe('sales ledger normalization', () => {
       phoneVerifiedAt: undefined,
       name: 'Reader One'
     });
+  });
+
+  it('adds stable v2 reporting metadata without changing the transaction key', () => {
+    const enriched = enrichSalesTransaction(transaction({
+      userId: 'reader-1',
+      userEmail: 'reader@example.com',
+      phoneNumber: '254700000000',
+      confirmedAt: '2026-09-23T10:01:00.000Z',
+      affiliateCode: 'PARTNER1'
+    }));
+    expect(enriched).toMatchObject({
+      id: 'tx_123',
+      checkoutRequestId: 'ws_CO_123',
+      orderId: 'ord_tx_123',
+      schemaVersion: 2,
+      saleChannel: 'AFFILIATE',
+      settledAt: '2026-09-23T10:01:00.000Z',
+      buyer: {
+        userId: 'reader-1',
+        email: 'reader@example.com',
+        phoneNumber: '254700000000'
+      }
+    });
+  });
+
+  it('escapes CSV values and neutralizes spreadsheet formulas', () => {
+    expect(formatCsvCell('Reader "One"')).toBe('"Reader ""One"""');
+    expect(formatCsvCell('=HYPERLINK("https://attacker.example")'))
+      .toBe('"\'=HYPERLINK(""https://attacker.example"")"');
+    expect(formatCsvCell(450)).toBe('"450"');
+    expect(formatCsvCell(undefined)).toBe('""');
   });
 });
 
@@ -114,5 +171,27 @@ describe('sales ledger privacy projections', () => {
     expect(safe.orderId).toBe('ord_tx_123');
     expect(safe).not.toHaveProperty('buyerEmail');
     expect(safe).not.toHaveProperty('buyerPhone');
+  });
+
+  it('does not expose a phone-shaped legacy transaction ID as the affiliate order ID', () => {
+    const source = {
+      id: 'commission-safe-1',
+      affiliateId: 'affiliate-1',
+      affiliateCode: 'PARTNER1',
+      affiliateName: 'Partner',
+      transactionId: '254700000000',
+      receiptNumber: 'RCPT123',
+      articleId: 'article-1',
+      articleTitle: 'A Piece',
+      saleAmountKes: 300,
+      commissionRate: 15,
+      commissionAmountKes: 45,
+      grossCreatorRevenueKes: 255,
+      paymentMethod: 'mpesa',
+      status: 'APPROVED',
+      createdAt: '2026-09-23T10:00:00.000Z'
+    } as AffiliateSaleCommission;
+
+    expect(toAffiliateSaleCommission(source).orderId).toBe('ord_commission-safe-1');
   });
 });

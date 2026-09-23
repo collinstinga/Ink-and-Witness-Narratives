@@ -25,7 +25,7 @@ Completed locally: current collection/payment/access/editor/homepage/auth bounda
 
 ### UP-02 — Newsletter and reader retention
 
-Status: in progress
+Status: foundation complete; release integration deferred to UP-04/UP-06
 
 - Add consent-based subscriber records with unique normalized-email index, interests, work follows, status, timestamps, and signed unsubscribe flow.
 - Add writer-only subscriber search, segmentation, composition, preview, test-send, resumable campaign sending, and delivery history.
@@ -34,11 +34,11 @@ Status: in progress
 
 Checkpoint: subscription/unsubscribe security tests, campaign idempotency tests, UI tests, provider-disabled behavior, and no-email-without-explicit-opt-in test.
 
-Completed locally: double-opt-in subscriber storage, signed unsubscribe, server-only Resend adapter, writer subscriber/campaign UI, audience segmentation, preview/test send, deterministic delivery records, resumable sending, and provider-disabled public signup. Remaining: explicit piece/chapter release notification controls, provider webhook outcomes, and production provider/domain configuration.
+Completed locally: double-opt-in subscriber storage, signed unsubscribe, server-only Resend adapter, writer subscriber/campaign UI, audience segmentation, preview/test send, deterministic delivery records, resumable sending, and provider-disabled public signup. Remaining release integration: explicit piece/chapter release notification controls in UP-04; provider webhook outcomes and production provider/domain configuration in UP-06.
 
 ### UP-03 — Canonical sales intelligence
 
-Status: in progress
+Status: complete locally; production backfill/release deferred to UP-06
 
 - Enrich the existing permanent transaction ledger instead of creating competing counters.
 - Add a stable unique sale/order ID per confirmed purchase and immutable buyer/piece/payment/affiliate snapshots.
@@ -46,6 +46,27 @@ Status: in progress
 - Add a dry-run/backfill migration for historical confirmed purchases.
 
 Checkpoint: M-Pesa, bank, manual confirmation, reader unlock, affiliate attribution, and idempotent retry tests all pass.
+
+Completed locally:
+
+- New and deliberately updated payment records receive additive schema-v2 metadata: stable non-phone order ID, method, direct/affiliate channel, buyer snapshot, and settlement time.
+- M-Pesa success atomically commits the payment, hashed receipt claim, reader access, piece counter, and affiliate reconciliation outbox. Provider-confirmed phones receive a verification timestamp.
+- Writer bank confirmation is atomic and idempotent; concurrent retries create one license, duplicate receipts are rejected, failed commits grant no access, and settled payments cannot later be rejected.
+- Writer Sales now provides buyer/piece/payment/affiliate visibility, direct-versus-affiliate and commission metrics, search, piece/status/method/channel/date filters, clickable piece history, and a private CSV export. Export cells are formula-neutralized.
+- Affiliate dashboards show per-sale piece, date, amount, commission, order ID, and status through an explicit privacy allow-list. Phone-shaped legacy transaction identifiers are never exposed as affiliate order IDs.
+- `scripts/backfill-sales-ledger.ts` provides a dry-run-by-default, additive historical backfill. Apply mode requires an exact `--expected-project` match, scans the full collection, refuses duplicate order IDs or invalid plans, skips seed data, and never changes existing document IDs or canonical payment fields.
+
+Production state: the backfill tool has **not** been run, no Firestore records were modified by this stage, and this commit has not yet been deployed.
+
+## Verified local checkpoint — canonical sales intelligence
+
+- Full automated suite: 396/396 passed across 42 files.
+- TypeScript: passed (`tsc --noEmit`).
+- Production client build: passed (Vite; existing large-chunk advisory only).
+- Production server bundle: passed (esbuild).
+- Diff integrity: `git diff --check` passed (line-ending warnings only).
+- React review: writer and affiliate changes passed the hooks, derived-state, accessibility, typing, and rendering checklist after memoizing summaries and labeling interactive controls.
+- Migration safety: dry-run tool implemented and unit-tested; production dry run/apply intentionally deferred until the UP-06 snapshot and release gate.
 
 ### UP-04 — Chaptered publishing and editor reliability
 
@@ -98,4 +119,4 @@ Status: pending
 
 ## Resume instructions
 
-Resume at the first stage marked `in progress`. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing.
+Resume at UP-04. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing. Do not run the newsletter provider setup or sales backfill until the UP-06 production snapshot and release gate.
