@@ -21,7 +21,13 @@ import {
   AdminAffiliatesSummary,
   ReaderLicense,
   UserLibraryResponse,
-  HomepageConfig
+  HomepageConfig,
+  NewsletterAdminSummary,
+  NewsletterAudience,
+  NewsletterCampaign,
+  NewsletterCampaignContent,
+  NewsletterSubscriber,
+  NewsletterSubscriberStatus
 } from '../types.js';
 import { getActiveReferral } from './affiliateReferral.js';
 
@@ -478,6 +484,29 @@ export const api = {
     const res = await fetch(url, { headers });
     if (!res.ok) throw new Error('Failed to fetch piece');
     return res.json();
+  },
+
+  async getNewsletterConfig(): Promise<{
+    enabled: boolean;
+    consentVersion: string;
+    doubleOptIn: boolean;
+  }> {
+    return safeFetchJson('/api/newsletter/config', undefined, 'Newsletter signup is unavailable.');
+  },
+
+  async subscribeNewsletter(input: {
+    email: string;
+    name?: string;
+    interests?: string[];
+    contentMode?: 'standard' | 'discreet';
+    consent: true;
+    website?: string;
+  }): Promise<{ accepted: boolean }> {
+    return safeFetchJson('/api/newsletter/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    }, 'Newsletter signup could not be completed.');
   },
 
   async getUserLibrary(): Promise<UserLibraryResponse> {
@@ -1447,6 +1476,81 @@ export const api = {
       throw new Error(err.error || 'Failed to grant manual access');
     }
     return res.json();
+  },
+
+  async getNewsletterAdminSummary(limit = 25): Promise<NewsletterAdminSummary & {
+    providerConfigured: boolean;
+    enabled: boolean;
+  }> {
+    return safeFetchJson(`/api/admin/newsletter?limit=${Math.max(1, Math.min(100, limit))}`, undefined,
+      'Failed to load newsletter overview.');
+  },
+
+  async getNewsletterSubscribers(options: {
+    status?: NewsletterSubscriberStatus | 'all';
+    search?: string;
+    cursor?: string;
+    limit?: number;
+  } = {}): Promise<{ subscribers: NewsletterSubscriber[]; nextCursor?: string }> {
+    const params = new URLSearchParams();
+    if (options.status) params.set('status', options.status);
+    if (options.search) params.set('search', options.search);
+    if (options.cursor) params.set('cursor', options.cursor);
+    params.set('limit', String(Math.max(1, Math.min(100, options.limit || 50))));
+    return safeFetchJson(`/api/admin/newsletter/subscribers?${params.toString()}`, undefined,
+      'Failed to load newsletter subscribers.');
+  },
+
+  async getNewsletterCampaigns(): Promise<{ campaigns: NewsletterCampaign[] }> {
+    return safeFetchJson('/api/admin/newsletter/campaigns', undefined,
+      'Failed to load newsletter history.');
+  },
+
+  async createNewsletterCampaign(input: {
+    content: NewsletterCampaignContent;
+    audience: NewsletterAudience;
+  }): Promise<{ campaign: NewsletterCampaign }> {
+    return safeFetchJson('/api/admin/newsletter/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    }, 'Failed to create newsletter campaign.');
+  },
+
+  async updateNewsletterCampaign(id: string, input: {
+    content?: NewsletterCampaignContent;
+    audience?: NewsletterAudience;
+  }): Promise<{ campaign: NewsletterCampaign }> {
+    return safeFetchJson(`/api/admin/newsletter/campaigns/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    }, 'Failed to update newsletter campaign.');
+  },
+
+  async sendNewsletterTest(email: string, content: NewsletterCampaignContent): Promise<{
+    success: boolean;
+    providerMessageId: string;
+  }> {
+    return safeFetchJson('/api/admin/newsletter/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, content })
+    }, 'Failed to send newsletter test.');
+  },
+
+  async sendNewsletterCampaignStep(id: string, cursor?: string): Promise<{
+    success: boolean;
+    campaign: NewsletterCampaign;
+    processed: number;
+    nextCursor?: string;
+    complete: boolean;
+  }> {
+    return safeFetchJson(`/api/admin/newsletter/campaigns/${encodeURIComponent(id)}/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cursor })
+    }, 'Failed to continue newsletter delivery.');
   },
 
   async reissueManualAccessActivationToken(grantId: string): Promise<{ success: boolean; activationToken: string }> {

@@ -46,6 +46,7 @@ import {
 import { Article, AuthorProfile, User } from '../types.js';
 import { api, getArticleReceipt } from '../utils/api.js';
 import { chooseNarrationVoice, cleanTextForNarration, splitNarrationText } from '../utils/narration.js';
+import { SafeMarkdown } from './common/SafeMarkdown.js';
 
 interface ArticleReaderModalProps {
   article: Article | null;
@@ -1141,137 +1142,20 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   onDragStart={(e) => e.preventDefault()}
                 >
                   {article.content.split('\n\n').map((paragraph, index) => {
-                    const trimmed = paragraph.trim();
-                    if (!trimmed) return null;
-                    const isParagraphActive = isAudioActive && activeChunk?.rawIndex === index;
-
-                    // Heading 1 (#)
-                    if (trimmed.startsWith('# ')) {
-                      return (
-                        <h2 
-                          id={`reader-para-${index}`}
-                          key={index} 
-                          className={`font-display text-2xl sm:text-3xl font-bold text-white mt-8 mb-4 border-b border-slate-800 pb-2 transition-all duration-300 ${
-                            isParagraphActive ? 'text-amber-300 pl-2 border-l-4 border-amber-500' : ''
-                          }`}
-                        >
-                          {trimmed.replace(/^#\s+/, '')}
-                        </h2>
-                      );
-                    }
-                    // Heading 2 (##)
-                    if (trimmed.startsWith('## ')) {
-                      return (
-                        <h3 
-                          id={`reader-para-${index}`}
-                          key={index} 
-                          className={`font-display text-xl sm:text-2xl font-bold text-sky-300 mt-7 mb-3 transition-all duration-300 ${
-                            isParagraphActive ? 'text-amber-300 pl-2 border-l-4 border-amber-500' : ''
-                          }`}
-                        >
-                          {trimmed.replace(/^##\s+/, '')}
-                        </h3>
-                      );
-                    }
-                    // Heading 3 (###)
-                    if (trimmed.startsWith('### ')) {
-                      return (
-                        <h4 
-                          id={`reader-para-${index}`}
-                          key={index} 
-                          className={`font-display text-lg font-bold text-slate-200 mt-5 mb-2 transition-all duration-300 ${
-                            isParagraphActive ? 'text-amber-300 pl-2 border-l-4 border-amber-500' : ''
-                          }`}
-                        >
-                          {trimmed.replace(/^###\s+/, '')}
-                        </h4>
-                      );
-                    }
-                    // Blockquote (>) with interactive Quote & Share buttons
-                    if (trimmed.startsWith('>')) {
-                      const quoteContent = trimmed.replace(/^>\s*/, '');
-                      return (
-                        <div 
-                          id={`reader-para-${index}`}
-                          key={index} 
-                          className={`group relative my-6 rounded-2xl bg-gradient-to-r from-slate-900/90 via-slate-900/60 to-slate-950/80 border-l-4 p-5 sm:p-6 shadow-md transition-all duration-300 ${
-                            isParagraphActive ? 'border-amber-500 ring-1 ring-amber-500/40' : 'border-sky-500'
-                          }`}
-                        >
-                          <div className="flex items-start gap-3">
-                            <Quote className={`w-6 h-6 shrink-0 mt-1 opacity-70 ${isParagraphActive ? 'text-amber-400' : 'text-sky-500'}`} />
-                            <blockquote className="font-serif italic text-slate-200 text-lg sm:text-xl leading-relaxed flex-1">
-                              {quoteContent}
-                            </blockquote>
-                          </div>
-                          <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between flex-wrap gap-2 text-xs font-mono">
-                            <span className="text-slate-400">Jake • {article.title}</span>
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => handleShareToX(quoteContent)}
-                                className="px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 flex items-center gap-1.5 transition-colors cursor-pointer"
-                                title="Share this specific quote to X (Twitter)"
-                              >
-                                <Twitter className="w-3 h-3" />
-                                <span>Quote on X</span>
-                              </button>
-                              <button
-                                onClick={() => handleShareToWhatsApp(quoteContent)}
-                                className="px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-slate-800 flex items-center gap-1.5 transition-colors cursor-pointer"
-                                title="Share this specific quote to WhatsApp"
-                              >
-                                <MessageCircle className="w-3 h-3" />
-                                <span>WhatsApp</span>
-                              </button>
-                              <button
-                                onClick={() => handleCopyQuoteAndLink(quoteContent)}
-                                className="p-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 transition-colors cursor-pointer"
-                                title="Copy quote and monograph link"
-                              >
-                                <Copy className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
-                    // Divider
-                    if (trimmed.startsWith('---')) {
-                      return <hr key={index} className="my-8 border-slate-800" />;
-                    }
-
-                    // Bullet points
-                    if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || /^\d+\.\s/.test(trimmed)) {
-                      const items = trimmed.split('\n');
-                      return (
-                        <ul 
-                          id={`reader-para-${index}`}
-                          key={index} 
-                          className={`space-y-2 my-4 pl-5 list-disc marker:text-sky-400 transition-all duration-300 ${
-                            isParagraphActive ? 'bg-amber-950/20 p-3 rounded-xl border-l-2 border-amber-500' : ''
-                          }`}
-                        >
-                          {items.map((item, itemIdx) => (
-                            <li key={itemIdx} className="leading-relaxed">
-                              {item.replace(/^[-*\d.]+\s+/, '')}
-                            </li>
-                          ))}
-                        </ul>
-                      );
-                    }
-
+                    const markdown = paragraph.trim();
+                    if (!markdown) return null;
                     return (
-                      <p 
-                        id={`reader-para-${index}`}
-                        key={index} 
-                        className={`leading-relaxed transition-all duration-300 ${
-                          isParagraphActive 
-                            ? 'bg-amber-950/25 p-3.5 rounded-2xl border-l-4 border-amber-400 text-white shadow-md' 
-                            : 'text-slate-200'
-                        }`}
-                      >
-                        {trimmed}
-                      </p>
+                      <SafeMarkdown
+                        key={index}
+                        markdown={markdown}
+                        variant="reader"
+                        blockId={`reader-para-${index}`}
+                        active={isAudioActive && activeChunk?.rawIndex === index}
+                        quoteAttribution={`Jake • ${article.title}`}
+                        onShareQuoteToX={handleShareToX}
+                        onShareQuoteToWhatsApp={handleShareToWhatsApp}
+                        onCopyQuote={handleCopyQuoteAndLink}
+                      />
                     );
                   })}
 

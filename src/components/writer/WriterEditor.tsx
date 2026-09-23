@@ -47,6 +47,12 @@ import { ImageCropModal, CropSettings } from './ImageCropModal.js';
 import { CategoryManagerModal } from './CategoryManagerModal.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
 import { UnsavedChangesPromptModal } from '../common/UnsavedChangesPromptModal.js';
+import { SafeMarkdown } from '../common/SafeMarkdown.js';
+import {
+  applyMarkdownLinePrefix,
+  isCursorInsideInlineMarkdown,
+  toggleInlineMarkdown
+} from '../../utils/markdownEditor.js';
 
 interface WriterEditorProps {
   initialArticle: Article | null;
@@ -93,6 +99,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [excerpt, setExcerpt] = useState(initialArticle?.excerpt || '');
   const [synopsis, setSynopsis] = useState(initialArticle?.synopsis || '');
   const [content, setContent] = useState(initialArticle?.content || '');
+  const [boldActive, setBoldActive] = useState(false);
+  const [italicActive, setItalicActive] = useState(false);
   const [category, setCategory] = useState(initialArticle?.category || '');
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
     initialArticle?.categories && initialArticle.categories.length > 0
@@ -397,23 +405,74 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     }
   };
 
-  // Text formatting tool helper
-  const insertFormatting = (prefix: string, suffix = '') => {
+  const applyEditorResult = (result: { content: string; selectionStart: number; selectionEnd: number }) => {
+    const textarea = textareaRef.current;
+    setContent(result.content);
+    setTimeout(() => {
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(result.selectionStart, result.selectionEnd);
+      setBoldActive(isCursorInsideInlineMarkdown(result.content, result.selectionStart, '**'));
+      setItalicActive(isCursorInsideInlineMarkdown(result.content, result.selectionStart, '*'));
+    }, 0);
+  };
+
+  const updateInlineToolbarState = (nextContent = content) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const cursor = textarea.selectionStart;
+    setBoldActive(isCursorInsideInlineMarkdown(nextContent, cursor, '**'));
+    setItalicActive(isCursorInsideInlineMarkdown(nextContent, cursor, '*'));
+  };
+
+  const toggleInlineFormatting = (marker: '**' | '*') => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    applyEditorResult(toggleInlineMarkdown(
+      content,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      marker
+    ));
+  };
+
+  const toggleLineFormatting = (prefix: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    applyEditorResult(applyMarkdownLinePrefix(
+      content,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      prefix
+    ));
+  };
+
+  // Text formatting helper for links and other paired insertions.
+  const insertFormatting = (prefix: string, suffix = '', placeholder = 'text') => {
     const textarea = textareaRef.current;
     if (!textarea) return;
 
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const selectedText = content.substring(start, end);
-    const replacement = `${prefix}${selectedText || 'text'}${suffix}`;
+    const replacement = `${prefix}${selectedText || placeholder}${suffix}`;
 
     const newContent = content.substring(0, start) + replacement + content.substring(end);
-    setContent(newContent);
+    applyEditorResult({
+      content: newContent,
+      selectionStart: start + prefix.length,
+      selectionEnd: start + replacement.length - suffix.length
+    });
+  };
 
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start + prefix.length, start + replacement.length - suffix.length);
-    }, 0);
+  const insertAtCursor = (value: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const nextContent = content.slice(0, start) + value + content.slice(end);
+    const cursor = start + value.length;
+    applyEditorResult({ content: nextContent, selectionStart: cursor, selectionEnd: cursor });
   };
 
   // Inline Image Upload Handler
@@ -444,7 +503,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         const imageUrl = res.url || dataUrl;
         
         // Insert markdown image at cursor
-        insertFormatting(`\n\n![${file.name.replace(/\.[^/.]+$/, '')}](${imageUrl})\n\n`);
+        insertAtCursor(`\n\n![${file.name.replace(/\.[^/.]+$/, '')}](${imageUrl})\n\n`);
         setSaveSuccessMsg('Image uploaded and inserted into piece!');
         setTimeout(() => setSaveSuccessMsg(null), 3000);
       } catch (err: any) {
@@ -894,17 +953,19 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
             <div className="flex flex-wrap items-center gap-1">
               <button
                 type="button"
-                onClick={() => insertFormatting('**', '**')}
-                className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                title="Bold (**text**)"
+                onClick={() => toggleInlineFormatting('**')}
+                aria-pressed={boldActive}
+                className={`p-1.5 rounded transition-colors cursor-pointer ${boldActive ? 'bg-sky-900 text-sky-200 ring-1 ring-sky-600' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}`}
+                title="Bold selected text or toggle bold typing"
               >
                 <Bold className="w-4 h-4" />
               </button>
               <button
                 type="button"
-                onClick={() => insertFormatting('*', '*')}
-                className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                title="Italic (*text*)"
+                onClick={() => toggleInlineFormatting('*')}
+                aria-pressed={italicActive}
+                className={`p-1.5 rounded transition-colors cursor-pointer ${italicActive ? 'bg-sky-900 text-sky-200 ring-1 ring-sky-600' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}`}
+                title="Italicize selected text or toggle italic typing"
               >
                 <Italic className="w-4 h-4" />
               </button>
@@ -913,7 +974,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
               <button
                 type="button"
-                onClick={() => insertFormatting('# ')}
+                onClick={() => toggleLineFormatting('# ')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Heading 1"
               >
@@ -921,7 +982,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => insertFormatting('## ')}
+                onClick={() => toggleLineFormatting('## ')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Heading 2"
               >
@@ -929,7 +990,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => insertFormatting('### ')}
+                onClick={() => toggleLineFormatting('### ')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Heading 3"
               >
@@ -940,7 +1001,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
               <button
                 type="button"
-                onClick={() => insertFormatting('> ')}
+                onClick={() => toggleLineFormatting('> ')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Blockquote"
               >
@@ -948,7 +1009,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => insertFormatting('- ')}
+                onClick={() => toggleLineFormatting('- ')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Bullet List"
               >
@@ -956,7 +1017,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => insertFormatting('1. ')}
+                onClick={() => toggleLineFormatting('1. ')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Numbered List"
               >
@@ -972,7 +1033,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => insertFormatting('\n---\n')}
+                onClick={() => insertAtCursor('\n\n---\n\n')}
                 className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                 title="Horizontal Divider"
               >
@@ -1024,7 +1085,14 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                 ref={textareaRef}
                 rows={22}
                 value={content}
-                onChange={(e) => setContent(e.target.value)}
+                onChange={(e) => {
+                  const nextContent = e.target.value;
+                  setContent(nextContent);
+                  requestAnimationFrame(() => updateInlineToolbarState(nextContent));
+                }}
+                onSelect={() => updateInlineToolbarState()}
+                onKeyUp={() => updateInlineToolbarState()}
+                onClick={() => updateInlineToolbarState()}
                 placeholder="Write your monograph here in clean Markdown. Use headings (#, ##), blockquotes (>), lists (-), and horizontal rules (---)..."
                 className="w-full p-5 rounded-2xl bg-[#0b1120] border border-slate-700 text-slate-100 placeholder-slate-600 text-sm sm:text-base font-serif leading-relaxed focus:outline-none focus:border-sky-500 transition-colors resize-y font-normal"
               />
@@ -1032,9 +1100,13 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               <div className="w-full min-h-[440px] p-6 rounded-2xl bg-[#0b1120] border border-slate-700 text-slate-200 prose prose-invert max-w-none font-serif leading-relaxed overflow-y-auto">
                 <h1 className="text-2xl font-serif font-bold text-white mb-2">{title || 'Untitled Monograph'}</h1>
                 {subtitle && <p className="text-slate-400 italic text-sm mb-4">{subtitle}</p>}
-                <div className="whitespace-pre-wrap text-sm sm:text-base leading-relaxed text-slate-300">
-                  {content || 'Start writing to see the preview here...'}
-                </div>
+                {content ? (
+                  <div className="space-y-5 text-sm sm:text-base leading-relaxed text-slate-300">
+                    <SafeMarkdown markdown={content} variant="preview" />
+                  </div>
+                ) : (
+                  <p className="text-slate-500">Start writing to see the preview here...</p>
+                )}
               </div>
             )}
           </div>

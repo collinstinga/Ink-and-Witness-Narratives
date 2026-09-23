@@ -17,6 +17,7 @@ import { api } from '../../utils/api.js';
 import { HorizontalPieceCarousel } from '../HorizontalPieceCarousel.js';
 import { TopicCatalogueSection } from '../TopicCatalogueSection.js';
 import { TopicReaderModal } from '../TopicReaderModal.js';
+import { NewsletterSignup } from '../NewsletterSignup.js';
 
 interface HomeViewProps {
   author: AuthorProfile | null;
@@ -267,6 +268,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
         onSelectTopic={(topic) => setSelectedTopic(topic)}
         selectedTopicSlug={selectedTopic?.slug}
       />
+
+      <NewsletterSignup />
 
       {/* Separator between Topic Catalogue and Piece of the Week */}
       <SectionSeparator id="sep-topics-piece-of-week" />

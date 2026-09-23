@@ -1,6 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
-type FieldKind = 'string' | 'number' | 'boolean' | 'object';
+type FieldKind = 'string' | 'number' | 'boolean' | 'object' | 'stringArray';
 
 interface FieldRule {
   kind: FieldKind;
@@ -12,6 +12,8 @@ interface FieldRule {
   min?: number;
   max?: number;
   maxBytes?: number;
+  maxItems?: number;
+  itemMaxLength?: number;
   normalize?: 'trim' | 'lower' | 'upper';
 }
 
@@ -144,6 +146,20 @@ function validateJsonBody(
         continue;
       }
 
+      if (rule.kind === 'stringArray') {
+        if (!Array.isArray(raw)) {
+          return res.status(400).json({ success: false, error: `${field} must be a list of text values.` });
+        }
+        if (rule.maxItems !== undefined && raw.length > rule.maxItems) {
+          return res.status(400).json({ success: false, error: `${field} contains too many values.` });
+        }
+        if (raw.some(item => typeof item !== 'string' || item.length > (rule.itemMaxLength ?? 200))) {
+          return res.status(400).json({ success: false, error: `${field} contains an invalid value.` });
+        }
+        body[field] = raw.map(item => String(item).trim()).filter(Boolean);
+        continue;
+      }
+
       if (!isPlainObject(raw) || hasUnsafeObjectKey(raw)) {
         return res.status(400).json({ success: false, error: `${field} must be a safe JSON object.` });
       }
@@ -176,6 +192,31 @@ const optionalCode: FieldRule = { kind: 'string', maxLength: 64, pattern: SAFE_C
 const optionalPhone: FieldRule = { kind: 'string', maxLength: 32, pattern: SAFE_PHONE, normalize: 'trim' };
 
 export const publicWriteValidators = {
+  newsletterSubscribe: validateJsonBody({
+    email: { kind: 'string', required: true, maxLength: 254, pattern: EMAIL, normalize: 'lower' },
+    name: { kind: 'string', maxLength: 120, normalize: 'trim' },
+    interests: { kind: 'stringArray', maxItems: 20, itemMaxLength: 80 },
+    contentMode: { kind: 'string', allowed: ['standard', 'discreet'], normalize: 'lower' },
+    consent: { kind: 'boolean', required: true },
+    website: { kind: 'string', maxLength: 200, normalize: 'trim' }
+  }, {
+    maxBytes: 8_192,
+    custom: body => body.consent !== true
+      ? 'Consent is required to subscribe.'
+      : (typeof body.website === 'string' && body.website.length > 0 ? 'Unable to accept this subscription.' : null)
+  }),
+
+  newsletterCapability: validateJsonBody({
+    token: {
+      kind: 'string',
+      required: true,
+      minLength: 24,
+      maxLength: 256,
+      pattern: /^[A-Za-z0-9._-]+$/,
+      normalize: 'trim'
+    }
+  }, { maxBytes: 2_048 }),
+
   restorePurchase: validateJsonBody({
     transactionCode: { kind: 'string', required: true, maxLength: 64, pattern: SAFE_CODE, normalize: 'upper' },
     phoneNumber: { ...optionalPhone, required: true }

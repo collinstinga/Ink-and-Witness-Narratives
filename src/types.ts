@@ -158,6 +158,105 @@ export interface ReaderLicense {
   checkoutRequestId?: string;
 }
 
+export type NewsletterSubscriberStatus = 'pending' | 'active' | 'unsubscribed' | 'suppressed';
+
+export interface NewsletterSubscriber {
+  id: string;
+  email: string;
+  name?: string;
+  interests: string[];
+  followedWorkIds?: string[];
+  status: NewsletterSubscriberStatus;
+  consentSource: 'homepage' | 'reader_preferences' | 'writer_import';
+  consentVersion: string;
+  consentAt: string;
+  subscribedAt: string;
+  updatedAt: string;
+  confirmedAt?: string;
+  unsubscribedAt?: string;
+  suppressionReason?: string;
+  lastEmailAt?: string;
+  contentMode?: 'standard' | 'discreet';
+}
+
+export type NewsletterAudienceType = 'all' | 'interests' | 'selected' | 'work_followers';
+export type NewsletterCampaignStatus =
+  | 'draft'
+  | 'queued'
+  | 'sending'
+  | 'sent'
+  | 'partially_sent'
+  | 'failed';
+export type NewsletterDeliveryStatus =
+  | 'queued'
+  | 'sent'
+  | 'delivered'
+  | 'bounced'
+  | 'complained'
+  | 'suppressed'
+  | 'failed';
+
+export interface NewsletterAudience {
+  type: NewsletterAudienceType;
+  interests?: string[];
+  subscriberIds?: string[];
+  workId?: string;
+}
+
+export interface NewsletterCampaignContent {
+  subject: string;
+  preheader?: string;
+  heading?: string;
+  body: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+  pieceId?: string;
+  chapterId?: string;
+  coverImageUrl?: string;
+}
+
+export interface NewsletterCampaign {
+  id: string;
+  content: NewsletterCampaignContent;
+  audience: NewsletterAudience;
+  status: NewsletterCampaignStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  queuedAt?: string;
+  sentAt?: string;
+  provider: 'resend';
+  recipientCount: number;
+  sentCount: number;
+  failedCount: number;
+  lastError?: string;
+}
+
+export interface NewsletterDelivery {
+  id: string;
+  campaignId: string;
+  subscriberId: string;
+  email: string;
+  status: NewsletterDeliveryStatus;
+  provider: 'resend';
+  providerMessageId?: string;
+  createdAt: string;
+  updatedAt: string;
+  sentAt?: string;
+  deliveredAt?: string;
+  failedAt?: string;
+  error?: string;
+}
+
+export interface NewsletterAdminSummary {
+  totalSubscribers: number;
+  activeSubscribers: number;
+  unsubscribedSubscribers: number;
+  suppressedSubscribers: number;
+  subscribers: NewsletterSubscriber[];
+  recentCampaigns: NewsletterCampaign[];
+}
+
 export type LibraryAccessSource = 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
 
 export type LibraryArticle = Article & {
@@ -526,10 +625,28 @@ export interface DetailedAnalytics {
 export type TransactionType = 'PURCHASE' | 'TIP' | 'MANUAL' | 'TEST';
 export type PaymentMethod = 'mpesa' | 'bank' | 'manual';
 export type TransactionStatus = 'INITIATED' | 'STK_SENT' | 'PENDING' | 'CONFIRMED' | 'SUCCESS' | 'PAID' | 'FAILED' | 'CANCELLED' | 'TIMEOUT' | 'TIMED_OUT' | 'EXPIRED';
+export type SaleChannel = 'DIRECT' | 'AFFILIATE';
+
+export interface PaymentBuyerSnapshot {
+  userId?: string;
+  email?: string;
+  phoneNumber?: string;
+  phoneVerifiedAt?: string;
+  name?: string;
+}
 
 export interface PaymentTransaction {
   id: string;
   checkoutRequestId: string;
+  /** Additive v2 reporting identifier; legacy transactions remain valid without it. */
+  orderId?: string;
+  /** Present on records written by the v2 sales ledger path. */
+  schemaVersion?: 2;
+  buyer?: PaymentBuyerSnapshot;
+  saleChannel?: SaleChannel;
+  settledAt?: string;
+  commissionId?: string;
+  accessEntitlementId?: string;
   paymentAttemptId?: string;
   merchantRequestId?: string;
   articleId: string;
@@ -765,6 +882,7 @@ export type WriterNavTab =
   | 'comments'
   | 'analytics'
   | 'readers'
+  | 'newsletter'
   | 'settings'
   | 'categories';
 
@@ -837,6 +955,7 @@ export interface AffiliateSession {
 
 export interface AffiliateSaleCommission {
   id: string;
+  orderId?: string;
   affiliateId: string;
   affiliateCode: string;
   affiliateName: string;

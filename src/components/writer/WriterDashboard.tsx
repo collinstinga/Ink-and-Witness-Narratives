@@ -25,7 +25,8 @@ import {
   Compass, 
   Share2,
   CheckCircle2,
-  Save
+  Save,
+  Mail
 } from 'lucide-react';
 import { 
   Article, 
@@ -53,6 +54,7 @@ import { WriterComments } from './WriterComments.js';
 import { CategoryManagerModal } from './CategoryManagerModal.js';
 import { TopicManagementTab } from './TopicManagementTab.js';
 import { AffiliatesAdminTab } from './AffiliatesAdminTab.js';
+import { WriterNewsletter } from './WriterNewsletter.js';
 
 interface WriterDashboardProps {
   onClose: () => void;
@@ -690,6 +692,25 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
             </div>
           </button>
 
+          {/* Newsletter & Subscribers */}
+          <button
+            id="nav-tab-newsletter"
+            onClick={() => handleTabChange('newsletter')}
+            className={`w-full px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+              currentTab === 'newsletter'
+                ? 'bg-sky-950/80 text-sky-200 border border-sky-800/80 shadow-sm'
+                : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60'
+            }`}
+          >
+            <div className="flex items-center gap-2.5">
+              <Mail className="w-4 h-4 text-sky-400" />
+              <span>Newsletter</span>
+            </div>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-950 text-sky-300 border border-sky-800">
+              Subscribers
+            </span>
+          </button>
+
           {/* Payments */}
           <button
             onClick={() => handleTabChange('payments')}
@@ -901,6 +922,10 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
             <WriterReaders
               articles={pieces}
             />
+          )}
+
+          {currentTab === 'newsletter' && (
+            <WriterNewsletter />
           )}
 
           {currentTab === 'payments' && (

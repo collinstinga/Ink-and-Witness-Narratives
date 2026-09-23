@@ -9,7 +9,16 @@ import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { HomepageSaveConflictError, store } from "./src/server/store.js";
-import { Article, HomepageConfig, PaymentTransaction, User } from "./src/types.js";
+import {
+  Article,
+  HomepageConfig,
+  NewsletterAudience,
+  NewsletterCampaignContent,
+  NewsletterCampaignStatus,
+  NewsletterSubscriber,
+  PaymentTransaction,
+  User
+} from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import { sanitizeAffiliateForResponse } from "./src/server/affiliateStore.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
@@ -38,6 +47,19 @@ import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import { ImageValidationError, validateImageDataUrl } from "./src/server/imageSecurity.js";
 import { hasUnsafeMpesaSecretUpdate } from "./src/server/mpesaSecretStorage.js";
 import { isManualAccessBearerLicense } from "./src/server/manualAccessSecurity.js";
+import {
+  newsletterStore,
+  NewsletterIntegrityError,
+  NewsletterStateError,
+  NewsletterValidationError
+} from "./src/server/newsletterStore.js";
+import {
+  buildNewsletterCampaignEmail,
+  buildNewsletterConfirmationEmail,
+  isNewsletterProviderConfigured,
+  NewsletterProviderConfigurationError,
+  sendNewsletterEmail
+} from "./src/server/newsletterEmail.js";
 import {
   PAYMENT_CALLBACK_QUERY_PARAMETER,
   canRecoverMpesaPurchase,
@@ -109,6 +131,100 @@ function isSafePublicIdentifier(value: unknown, maxLength = 128): value is strin
 
 function getPaymentCapability(req: Request): unknown {
   return req.headers['x-payment-capability'];
+}
+
+const NEWSLETTER_CONSENT_VERSION = '2026-09-23';
+
+function newsletterFeatureEnabled(): boolean {
+  return process.env.NEWSLETTER_ENABLED !== 'false' && isNewsletterProviderConfigured();
+}
+
+function resolvePublicBaseUrl(req: Request): string {
+  const configured = (
+    process.env.PUBLIC_BASE_URL
+    || process.env.APP_BASE_URL
+    || process.env.VITE_PUBLIC_BASE_URL
+    || ''
+  ).trim();
+  if (configured) {
+    try {
+      const parsed = new URL(configured);
+      if (parsed.protocol === 'https:' || (!isProduction && parsed.protocol === 'http:')) {
+        return parsed.origin;
+      }
+    } catch {
+      // Fall through to the validated request origin.
+    }
+  }
+  const forwardedHost = req.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const host = forwardedHost || req.get('host') || 'localhost:3000';
+  const forwardedProtocol = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const protocol = forwardedProtocol || req.protocol || (isProduction ? 'https' : 'http');
+  return `${protocol}://${host}`;
+}
+
+function newsletterCapabilityPage(options: {
+  title: string;
+  message: string;
+  action: string;
+  token: string;
+  buttonLabel: string;
+}): string {
+  const safeToken = /^[A-Za-z0-9._-]{24,256}$/.test(options.token) ? options.token : '';
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${options.title}</title></head>
+<body style="margin:0;background:#080d17;color:#e2e8f0;font-family:Georgia,serif;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;">
+<main style="width:min(560px,100%);background:#0f172a;border:1px solid #334155;border-radius:20px;padding:34px;box-sizing:border-box;box-shadow:0 24px 80px rgba(0,0,0,.35);">
+<p style="font:700 12px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#38bdf8;">Ink &amp; Witness Narratives</p>
+<h1 style="font-size:30px;margin:18px 0 12px;color:#fff;">${options.title}</h1>
+<p style="line-height:1.7;color:#cbd5e1;">${options.message}</p>
+<form method="post" action="${options.action}" style="margin-top:26px;">
+<input type="hidden" name="token" value="${safeToken}">
+<button type="submit" style="border:0;border-radius:10px;background:#0284c7;color:white;font-weight:700;padding:13px 20px;cursor:pointer;">${options.buttonLabel}</button>
+</form></main></body></html>`;
+}
+
+function newsletterResultPage(title: string, message: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>
+<body style="margin:0;background:#080d17;color:#e2e8f0;font-family:Georgia,serif;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;">
+<main style="width:min(560px,100%);background:#0f172a;border:1px solid #334155;border-radius:20px;padding:34px;box-sizing:border-box;"><p style="font:700 12px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#38bdf8;">Ink &amp; Witness Narratives</p><h1 style="font-size:30px;color:#fff;">${title}</h1><p style="line-height:1.7;color:#cbd5e1;">${message}</p><a href="/" style="color:#38bdf8;">Return to Ink &amp; Witness</a></main></body></html>`;
+}
+
+function requireSameOriginPublicWrite(req: Request, res: Response, next: NextFunction) {
+  const origin = req.get('origin');
+  const fetchSite = req.get('sec-fetch-site');
+  if (!origin) {
+    return isProduction
+      ? res.status(403).json({ success: false, error: 'This request must originate from Ink & Witness.' })
+      : next();
+  }
+  try {
+    const originUrl = new URL(origin);
+    const requestUrl = new URL(resolvePublicBaseUrl(req));
+    const crossSite = Boolean(fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite));
+    if (originUrl.origin !== requestUrl.origin || crossSite) {
+      return res.status(403).json({ success: false, error: 'This request must originate from Ink & Witness.' });
+    }
+  } catch {
+    return res.status(403).json({ success: false, error: 'This request must originate from Ink & Witness.' });
+  }
+  return next();
+}
+
+function newsletterAudienceMatches(
+  subscriber: NewsletterSubscriber,
+  audience: NewsletterAudience
+): boolean {
+  if (subscriber.status !== 'active') return false;
+  if (audience.type === 'all') return true;
+  if (audience.type === 'selected') {
+    return Boolean(audience.subscriberIds?.includes(subscriber.id));
+  }
+  if (audience.type === 'work_followers') {
+    return Boolean(audience.workId && subscriber.followedWorkIds?.includes(audience.workId));
+  }
+  const requested = new Set((audience.interests || []).map(value => value.trim().toLocaleLowerCase('en')));
+  return subscriber.interests.some(value => requested.has(value.trim().toLocaleLowerCase('en')));
 }
 
 function publicCoverUrl(article: Article): string | undefined {
@@ -772,6 +888,153 @@ export async function createApp() {
       res.status(503).json({ error: 'Homepage settings are temporarily unavailable.' });
     }
   });
+
+  const newsletterSubscribeLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 8,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { accepted: true }
+  });
+
+  const newsletterCapabilityLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { accepted: true }
+  });
+
+  app.get('/api/newsletter/config', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300');
+    res.json({
+      enabled: newsletterFeatureEnabled(),
+      consentVersion: NEWSLETTER_CONSENT_VERSION,
+      doubleOptIn: true
+    });
+  });
+
+  app.post(
+    '/api/newsletter/subscribe',
+    newsletterSubscribeLimiter,
+    requireSameOriginPublicWrite,
+    publicWriteValidators.newsletterSubscribe,
+    async (req: Request, res: Response) => {
+      if (!newsletterFeatureEnabled()) {
+        return res.status(503).json({
+          accepted: false,
+          error: 'Newsletter signup is being prepared. Please try again shortly.'
+        });
+      }
+      const email = String(req.body.email || '').trim().toLowerCase();
+      if (isDuplicatePublicWrite('newsletter-subscribe', [email], 60_000)) {
+        return res.status(202).json({ accepted: true });
+      }
+      try {
+        const baseUrl = resolvePublicBaseUrl(req);
+        await newsletterStore.requestSubscription({
+          email,
+          name: req.body.name,
+          interests: req.body.interests,
+          contentMode: req.body.contentMode,
+          consentSource: 'homepage',
+          consentVersion: NEWSLETTER_CONSENT_VERSION
+        }, {
+          onConfirmationRequired: async confirmation => {
+            const confirmationUrl = `${baseUrl}/newsletter/confirm?token=${encodeURIComponent(confirmation.confirmationToken)}`;
+            const emailMessage = buildNewsletterConfirmationEmail({
+              name: confirmation.name,
+              confirmationUrl
+            });
+            await sendNewsletterEmail({
+              to: confirmation.email,
+              ...emailMessage,
+              idempotencyKey: `newsletter-confirm-${crypto.createHash('sha256').update(confirmation.confirmationToken).digest('hex')}`
+            });
+          }
+        });
+      } catch (error) {
+        // The response is deliberately generic so this endpoint cannot be used
+        // to discover whether an email address is already subscribed.
+        if (!(error instanceof NewsletterProviderConfigurationError)) {
+          console.error('[Newsletter] Subscription request could not be completed safely.', error);
+        }
+      }
+      return res.status(202).json({ accepted: true });
+    }
+  );
+
+  app.get('/newsletter/confirm', newsletterCapabilityLimiter, (req: Request, res: Response) => {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('html').send(newsletterCapabilityPage({
+      title: 'Confirm your subscription',
+      message: 'Confirm that you would like to receive new writing and occasional Ink & Witness updates.',
+      action: '/api/newsletter/confirm',
+      token,
+      buttonLabel: 'Confirm subscription'
+    }));
+  });
+
+  app.post(
+    '/api/newsletter/confirm',
+    newsletterCapabilityLimiter,
+    publicWriteValidators.newsletterCapability,
+    async (req: Request, res: Response) => {
+      try {
+        await newsletterStore.confirmSubscription(req.body.token);
+      } catch (error) {
+        if (error instanceof NewsletterIntegrityError) {
+          console.error('[Newsletter] Confirmation encountered an integrity error.');
+        }
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      if (Boolean(req.is('application/x-www-form-urlencoded'))) {
+        return res.type('html').send(newsletterResultPage(
+          'You are close to the ink',
+          'Your request has been processed. If the confirmation was valid, your subscription is now active.'
+        ));
+      }
+      return res.status(202).json({ accepted: true });
+    }
+  );
+
+  app.get('/newsletter/unsubscribe', newsletterCapabilityLimiter, (req: Request, res: Response) => {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('html').send(newsletterCapabilityPage({
+      title: 'Manage your subscription',
+      message: 'You can stop Ink & Witness email updates at any time. Your reader account and purchased library will not be affected.',
+      action: '/api/newsletter/unsubscribe',
+      token,
+      buttonLabel: 'Unsubscribe from emails'
+    }));
+  });
+
+  app.post(
+    '/api/newsletter/unsubscribe',
+    newsletterCapabilityLimiter,
+    publicWriteValidators.newsletterCapability,
+    async (req: Request, res: Response) => {
+      try {
+        await newsletterStore.unsubscribe(req.body.token);
+      } catch (error) {
+        if (error instanceof NewsletterIntegrityError) {
+          console.error('[Newsletter] Unsubscribe encountered an integrity error.');
+        }
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      if (Boolean(req.is('application/x-www-form-urlencoded'))) {
+        return res.type('html').send(newsletterResultPage(
+          'Email preferences updated',
+          'Your request has been processed. Purchased pieces and reader access remain unchanged.'
+        ));
+      }
+      return res.status(202).json({ accepted: true });
+    }
+  );
 
   // Public Custom Categories (Dynamically managed by writer Jake)
   app.get("/api/categories", (_req: Request, res: Response) => {
@@ -1961,6 +2224,201 @@ export async function createApp() {
     } catch (error) {
       console.error('Writer catalog refresh failed:', error);
       res.status(503).json({ error: 'Pieces are temporarily unavailable. Please retry.' });
+    }
+  });
+
+  app.get('/api/admin/newsletter', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+      const summary = await newsletterStore.getAdminSummary({ limit });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({
+        ...summary,
+        providerConfigured: isNewsletterProviderConfigured(),
+        enabled: newsletterFeatureEnabled()
+      });
+    } catch (error) {
+      console.error('[Newsletter] Admin summary failed.', error);
+      return res.status(503).json({ error: 'Newsletter records are temporarily unavailable.' });
+    }
+  });
+
+  app.get('/api/admin/newsletter/subscribers', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const status = typeof req.query.status === 'string' && req.query.status !== 'all'
+        ? req.query.status as any
+        : undefined;
+      const result = await newsletterStore.listSubscribers({
+        status,
+        search: typeof req.query.search === 'string' ? req.query.search : undefined,
+        cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+        limit: Math.min(100, Math.max(1, Number(req.query.limit) || 50))
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json(result);
+    } catch (error) {
+      const status = error instanceof NewsletterValidationError ? 400 : 503;
+      return res.status(status).json({
+        error: status === 400 ? error.message : 'Newsletter subscribers are temporarily unavailable.'
+      });
+    }
+  });
+
+  app.get('/api/admin/newsletter/campaigns', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const campaigns = await newsletterStore.listCampaigns({
+        status: typeof req.query.status === 'string' ? req.query.status as any : undefined,
+        limit: Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ campaigns });
+    } catch (error) {
+      const status = error instanceof NewsletterValidationError ? 400 : 503;
+      return res.status(status).json({
+        error: status === 400 ? error.message : 'Newsletter campaigns are temporarily unavailable.'
+      });
+    }
+  });
+
+  app.post('/api/admin/newsletter/campaigns', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const campaign = await newsletterStore.createCampaign({
+        content: req.body.content as NewsletterCampaignContent,
+        audience: req.body.audience as NewsletterAudience,
+        createdBy: String((req as any).user?.id || (req as any).user?.email || 'admin')
+      });
+      return res.status(201).json({ campaign });
+    } catch (error) {
+      const status = error instanceof NewsletterValidationError ? 400 : 503;
+      return res.status(status).json({
+        error: status === 400 ? error.message : 'The newsletter campaign could not be created.'
+      });
+    }
+  });
+
+  app.put('/api/admin/newsletter/campaigns/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const campaign = await newsletterStore.updateCampaignDraft(req.params.id, {
+        content: req.body.content,
+        audience: req.body.audience
+      });
+      return res.json({ campaign });
+    } catch (error) {
+      const status = error instanceof NewsletterValidationError || error instanceof NewsletterStateError ? 400 : 503;
+      return res.status(status).json({
+        error: status === 400 ? error.message : 'The newsletter campaign could not be updated.'
+      });
+    }
+  });
+
+  app.post('/api/admin/newsletter/test', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const to = String(req.body.email || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to) || to.length > 254) {
+        return res.status(400).json({ error: 'A valid test email address is required.' });
+      }
+      const content = req.body.content as NewsletterCampaignContent;
+      const baseUrl = resolvePublicBaseUrl(req);
+      const rendered = buildNewsletterCampaignEmail({
+        content,
+        baseUrl,
+        unsubscribeUrl: `${baseUrl}/newsletter/unsubscribe`
+      });
+      const delivery = await sendNewsletterEmail({
+        to,
+        ...rendered,
+        idempotencyKey: `newsletter-test-${crypto.randomUUID()}`
+      });
+      return res.json({ success: true, providerMessageId: delivery.providerMessageId });
+    } catch (error) {
+      const status = error instanceof NewsletterProviderConfigurationError ? 503 : 400;
+      return res.status(status).json({
+        error: status === 503
+          ? 'Email delivery is not configured yet.'
+          : (error instanceof Error ? error.message : 'The test email could not be sent.')
+      });
+    }
+  });
+
+  app.post('/api/admin/newsletter/campaigns/:id/send', requireAdminAuth, async (req: Request, res: Response) => {
+    if (!newsletterFeatureEnabled()) {
+      return res.status(503).json({ error: 'Email delivery is not configured yet.' });
+    }
+    try {
+      let campaign = await newsletterStore.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ error: 'Newsletter campaign not found.' });
+      if (campaign.status === 'draft') {
+        campaign = await newsletterStore.setCampaignStatus(campaign.id, { status: 'queued' });
+      }
+      if (campaign.status === 'queued') {
+        campaign = await newsletterStore.setCampaignStatus(campaign.id, { status: 'sending' });
+      }
+      if (campaign.status !== 'sending') {
+        return res.status(400).json({ error: 'This campaign can no longer be sent.' });
+      }
+
+      const page = await newsletterStore.listSubscribers({
+        status: 'active',
+        limit: 25,
+        cursor: typeof req.body.cursor === 'string' ? req.body.cursor : undefined
+      });
+      const baseUrl = resolvePublicBaseUrl(req);
+      let processed = 0;
+      for (const subscriber of page.subscribers) {
+        if (!newsletterAudienceMatches(subscriber, campaign.audience)) continue;
+        const delivery = await newsletterStore.queueDelivery(campaign.id, subscriber.id);
+        if (delivery.status !== 'queued') continue;
+        const unsubscribeToken = newsletterStore.createUnsubscribeToken(subscriber.id);
+        const unsubscribeUrl = `${baseUrl}/newsletter/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+        const rendered = buildNewsletterCampaignEmail({
+          content: campaign.content,
+          recipientName: subscriber.name,
+          baseUrl,
+          unsubscribeUrl
+        });
+        try {
+          const sent = await sendNewsletterEmail({
+            to: subscriber.email,
+            ...rendered,
+            unsubscribeUrl,
+            idempotencyKey: `${campaign.id}-${subscriber.id}`
+          });
+          await newsletterStore.recordDeliveryOutcome(delivery.id, {
+            status: 'sent',
+            providerMessageId: sent.providerMessageId
+          });
+        } catch (error) {
+          await newsletterStore.recordDeliveryOutcome(delivery.id, {
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'Provider send failed.'
+          });
+        }
+        processed += 1;
+      }
+
+      if (!page.nextCursor) {
+        const latest = await newsletterStore.getCampaign(campaign.id);
+        const finalStatus: NewsletterCampaignStatus = latest && latest.failedCount > 0
+          ? (latest.sentCount > 0 ? 'partially_sent' : 'failed')
+          : 'sent';
+        campaign = await newsletterStore.setCampaignStatus(campaign.id, { status: finalStatus });
+      } else {
+        campaign = (await newsletterStore.getCampaign(campaign.id)) || campaign;
+      }
+
+      return res.status(page.nextCursor ? 202 : 200).json({
+        success: true,
+        campaign,
+        processed,
+        nextCursor: page.nextCursor,
+        complete: !page.nextCursor
+      });
+    } catch (error) {
+      const status = error instanceof NewsletterValidationError || error instanceof NewsletterStateError ? 400 : 503;
+      console.error('[Newsletter] Campaign send step failed safely.', error);
+      return res.status(status).json({
+        error: status === 400 ? error.message : 'The campaign send step could not be completed.'
+      });
     }
   });
 

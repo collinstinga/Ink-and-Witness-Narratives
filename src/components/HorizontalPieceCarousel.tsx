@@ -172,7 +172,7 @@ export const HorizontalPieceCarousel: React.FC<HorizontalPieceCarouselProps> = (
       opacity: 1,
       scale: 1,
       transition: {
-        x: { type: 'spring', stiffness: 320, damping: 32 },
+        x: { type: 'spring' as const, stiffness: 320, damping: 32 },
         opacity: { duration: 0.25 },
         scale: { duration: 0.25 }
       }
@@ -182,7 +182,7 @@ export const HorizontalPieceCarousel: React.FC<HorizontalPieceCarouselProps> = (
       opacity: 0,
       scale: 0.98,
       transition: {
-        x: { type: 'spring', stiffness: 320, damping: 32 },
+        x: { type: 'spring' as const, stiffness: 320, damping: 32 },
         opacity: { duration: 0.2 },
         scale: { duration: 0.2 }
       }
