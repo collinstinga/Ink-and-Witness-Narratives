@@ -130,6 +130,10 @@ let cachedArticles: Article[] = [];
 let cachedArticleCatalogVersion: string | null | undefined;
 let cachedArticleCatalogCheckedAt = 0;
 let articleCatalogRefreshPromise: Promise<void> | null = null;
+let cachedPublicMetadataVersion: string | null | undefined;
+let publicMetadataRefreshPromise: Promise<void> | null = null;
+let affiliateStoreInitializationPromise: Promise<void> | null = null;
+let affiliateStoreInitialized = false;
 let cachedCategories: Category[] = [];
 let cachedTopics: Topic[] = [];
 let cachedTransactions: Map<string, PaymentTransaction> = new Map();
@@ -443,6 +447,48 @@ async function persistArticleCatalogMutation(
   return catalogVersion;
 }
 
+type PublicContentMutation =
+  | { type: 'set'; collection: 'categories' | 'topics' | 'articles'; id: string; data: unknown }
+  | { type: 'delete'; collection: 'categories' | 'topics'; id: string };
+
+async function persistPublicContentMutations(
+  mutations: PublicContentMutation[],
+  articlesChanged: boolean,
+  updatedAt: string
+): Promise<string | null> {
+  const markerOperations = articlesChanged ? 2 : 1;
+  if (mutations.length + markerOperations > 500) {
+    throw new Error('The requested content update is too large to save atomically.');
+  }
+  const catalogVersion = articlesChanged ? crypto.randomUUID() : null;
+  const publicMetadataVersion = crypto.randomUUID();
+  try {
+    const db = getDb();
+    const batch = db.batch();
+    for (const mutation of mutations) {
+      const ref = db.collection(mutation.collection).doc(mutation.id);
+      if (mutation.type === 'delete') batch.delete(ref);
+      else batch.set(ref, sanitizeForFirestore(mutation.data), { merge: true });
+    }
+    if (catalogVersion) {
+      batch.set(db.collection('site_configs').doc('article_catalog'), {
+        version: catalogVersion,
+        updatedAt
+      }, { merge: true });
+    }
+    batch.set(db.collection('site_configs').doc('public_metadata'), {
+      version: publicMetadataVersion,
+      updatedAt
+    }, { merge: true });
+    await batch.commit();
+  } catch (error) {
+    if (process.env.VERCEL) throw error;
+    console.warn('[Data Store] Firestore content mutation unavailable; using local JSON fallback:', error);
+  }
+  cachedPublicMetadataVersion = publicMetadataVersion;
+  return catalogVersion;
+}
+
 async function persistArticleCatalogReplacement(
   articles: Article[],
   updatedAt: string
@@ -474,6 +520,21 @@ async function persistArticleCatalogReplacement(
     console.warn('[Data Store] Firestore article restore unavailable; using local JSON fallback:', error);
   }
   return catalogVersion;
+}
+
+async function hydrateAffiliateStoreOnce(): Promise<void> {
+  if (affiliateStoreInitialized) return;
+  if (!affiliateStoreInitializationPromise) {
+    affiliateStoreInitializationPromise = affiliateStore.init()
+      .then(() => {
+        affiliateStoreInitialized = true;
+      })
+      .catch(error => {
+        affiliateStoreInitializationPromise = null;
+        throw error;
+      });
+  }
+  await affiliateStoreInitializationPromise;
 }
 
 function isPersistentTransaction(tx: PaymentTransaction): boolean {
@@ -1694,6 +1755,10 @@ export const store = {
     cachedArticleCatalogVersion = undefined;
     cachedArticleCatalogCheckedAt = 0;
     articleCatalogRefreshPromise = null;
+    cachedPublicMetadataVersion = undefined;
+    publicMetadataRefreshPromise = null;
+    affiliateStoreInitializationPromise = null;
+    affiliateStoreInitialized = false;
     const startupStartedAt = Date.now();
 
     // Begin independent Firestore reads together. Each result remains wrapped so
@@ -1718,6 +1783,9 @@ export const store = {
     const startupReads = {
       users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
       articleCatalog: articleCatalogRead,
+      publicMetadata: captureStartupRead(
+        getFirestoreDoc<{ version?: string }>('site_configs', 'public_metadata')
+      ),
       // Read the marker first: if a save races startup, the next public read
       // can still detect a newer version and refresh the initial article scan.
       articles: captureStartupRead(articleCatalogRead.then(() => getAllFirestoreDocs<Article>('articles'))),
@@ -2109,6 +2177,11 @@ export const store = {
       }
     } catch {}
 
+    const publicMetadataRead = await startupReads.publicMetadata;
+    if (publicMetadataRead.ok) {
+      cachedPublicMetadataVersion = publicMetadataRead.value?.version || null;
+    }
+
     // 9. Load Interaction Events
     if (fs.existsSync(EVENTS_FILE)) {
       try {
@@ -2181,11 +2254,17 @@ export const store = {
       }
     }
 
-    // 12. Initialize Affiliate & Referral Store
-    try {
-      await affiliateStore.init();
-    } catch (e) {
-      console.warn('[Data Store] Error initializing Affiliate store:', e);
+    // 12. Public page loads do not need the historical affiliate ledgers. Keep
+    // them off the Vercel cold-start path and hydrate them on the first
+    // affiliate, referral, or payment request instead.
+    if (!process.env.VERCEL) {
+      try {
+        await hydrateAffiliateStoreOnce();
+      } catch (e) {
+        console.warn('[Data Store] Error initializing Affiliate store:', e);
+      }
+    } else {
+      console.log('[Data Store] Affiliate ledger hydration deferred until an affiliate-dependent request.');
     }
 
     const transactionStatus = transactionsHydrated ? cachedTransactions.size : 'deferred';
@@ -2204,6 +2283,10 @@ export const store = {
         console.warn('[Data Store] Error checking/creating startup snapshot:', e);
       }
     }
+  },
+
+  async ensureAffiliateStoreInitialized(): Promise<void> {
+    await hydrateAffiliateStoreOnce();
   },
 
   // EXPORT ALL APPLICATION DATA FOR BACKUP
@@ -4384,17 +4467,86 @@ export const store = {
     };
   },
 
-  saveAuthorProfile(profile: Partial<AuthorProfile>): AuthorProfile {
-    cachedAuthor = {
-      ...cachedAuthor,
-      ...profile,
-      stats: {
-        ...cachedAuthor.stats,
-        ...(profile.stats || {})
-      }
-    };
+  async refreshPublicMetadata(): Promise<void> {
+    if (!process.env.VERCEL) return;
+    if (!publicMetadataRefreshPromise) {
+      publicMetadataRefreshPromise = (async () => {
+        const cacheVersionAtStart = cachedPublicMetadataVersion;
+        const marker = await getFirestoreDoc<{ version?: string }>('site_configs', 'public_metadata');
+        const version = marker?.version || null;
+        if (cachedPublicMetadataVersion !== undefined && cachedPublicMetadataVersion === version) {
+          return;
+        }
+
+        const [canonicalAuthor, legacyAuthor, categories, topics] = await Promise.all([
+          getFirestoreDoc<AuthorProfile>('site_configs', 'author'),
+          getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'),
+          getAllFirestoreDocs<Category>('categories'),
+          getAllFirestoreDocs<Topic>('topics')
+        ]);
+        // A local save may have completed while the scan was in flight. In that
+        // case its newer marker and cache win over this older snapshot.
+        if (cachedPublicMetadataVersion !== cacheVersionAtStart && cachedPublicMetadataVersion !== version) {
+          return;
+        }
+        const storedAuthor = canonicalAuthor || legacyAuthor;
+        if (storedAuthor) {
+          cachedAuthor = { ...JAKE_PROFILE, ...storedAuthor };
+          writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
+        }
+        cachedCategories = categories;
+        cachedTopics = topics;
+        cachedPublicMetadataVersion = version;
+        writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
+        writeJsonFileSync(TOPICS_FILE, cachedTopics);
+      })().catch(error => {
+        // Preserve the last coherent in-memory snapshot during a transient quota
+        // or network failure instead of turning the public site into a blank page.
+        console.warn('[Data Store] Public metadata freshness check failed; serving last known good state:', error);
+      }).finally(() => {
+        publicMetadataRefreshPromise = null;
+      });
+    }
+    await publicMetadataRefreshPromise;
+  },
+
+  async saveAuthorProfile(profile: Partial<AuthorProfile>): Promise<AuthorProfile> {
+    const db = getDb();
+    const authorRef = db.collection('site_configs').doc('author');
+    const legacyAuthorRef = db.collection('site_configs').doc('author_profile');
+    const publicMetadataRef = db.collection('site_configs').doc('public_metadata');
+    const publicMetadataVersion = crypto.randomUUID();
+    const persisted = await db.runTransaction(async transaction => {
+      const canonicalSnapshot = await transaction.get(authorRef);
+      const legacySnapshot = canonicalSnapshot.exists
+        ? null
+        : await transaction.get(legacyAuthorRef);
+      const remote = canonicalSnapshot.exists
+        ? canonicalSnapshot.data() as Partial<AuthorProfile>
+        : legacySnapshot?.exists
+          ? legacySnapshot.data() as Partial<AuthorProfile>
+          : {};
+      const next: AuthorProfile = {
+        ...cachedAuthor,
+        ...remote,
+        ...profile,
+        stats: {
+          ...cachedAuthor.stats,
+          ...(remote.stats || {}),
+          ...(profile.stats || {})
+        }
+      };
+      transaction.set(authorRef, sanitizeForFirestore(next));
+      transaction.set(legacyAuthorRef, sanitizeForFirestore(next));
+      transaction.set(publicMetadataRef, {
+        version: publicMetadataVersion,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      return next;
+    });
+    cachedAuthor = persisted;
+    cachedPublicMetadataVersion = publicMetadataVersion;
     writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
     return this.getAuthorProfile();
   },
 
@@ -5863,7 +6015,10 @@ export const store = {
     return cachedCategories.find(c => c.id === idOrSlug || c.slug === idOrSlug);
   },
 
-  saveCategory(data: { id?: string; name: string; description?: string; order?: number; isEnabled?: boolean }): Category {
+  async saveCategory(data: { id?: string; name: string; description?: string; order?: number; isEnabled?: boolean }): Promise<Category> {
+    if (process.env.VERCEL) {
+      await Promise.all([this.refreshPublicMetadata(), this.getFreshArticles(true, true)]);
+    }
     const now = new Date().toISOString();
     const cleanName = data.name.trim();
     const slug = cleanName
@@ -5885,30 +6040,47 @@ export const store = {
           isEnabled: data.isEnabled !== undefined ? data.isEnabled : (cachedCategories[idx].isEnabled !== false),
           updatedAt: now
         };
-        cachedCategories[idx] = updatedCategory;
-        writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
-        setFirestoreDoc('categories', updatedCategory.id, updatedCategory).catch(() => {});
-
-        // If category was renamed, cascade update pieces that referenced oldName
-        if (oldName && oldName !== cleanName) {
-          let articlesUpdated = false;
-          cachedArticles.forEach(art => {
-            if (art.category === oldName) {
-              art.category = cleanName;
-              articlesUpdated = true;
+        const nextCategories = cachedCategories.map((category, index) =>
+          index === idx ? updatedCategory : category
+        );
+        const changedArticles: Article[] = [];
+        const nextArticles = cachedArticles.map(article => {
+          if (!oldName || oldName === cleanName) return article;
+          const categoryChanged = article.category === oldName;
+          const categoriesChanged = Boolean(article.categories?.includes(oldName));
+          if (!categoryChanged && !categoriesChanged) return article;
+          const updatedArticle: Article = {
+            ...article,
+            ...(categoryChanged ? { category: cleanName } : {}),
+            ...(categoriesChanged
+              ? { categories: article.categories!.map(category => category === oldName ? cleanName : category) }
+              : {}),
+            updatedAt: now
+          };
+          changedArticles.push(updatedArticle);
+          return updatedArticle;
+        });
+        const catalogVersion = await persistPublicContentMutations([
+          { type: 'set', collection: 'categories', id: updatedCategory.id, data: updatedCategory },
+          ...changedArticles.map(article => ({
+            type: 'set' as const,
+            collection: 'articles' as const,
+            id: article.id,
+            data: {
+              category: article.category,
+              categories: article.categories,
+              updatedAt: article.updatedAt
             }
-            if (art.categories && art.categories.includes(oldName)) {
-              art.categories = art.categories.map(cat => cat === oldName ? cleanName : cat);
-              articlesUpdated = true;
-            }
-          });
-          if (articlesUpdated) {
-            writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-            cachedArticles.forEach(art => {
-              setFirestoreDoc('articles', art.id, art).catch(() => {});
-            });
-          }
+          }))
+        ], changedArticles.length > 0, now);
+        cachedCategories = nextCategories;
+        cachedArticles = nextArticles;
+        if (catalogVersion) {
+          cachedArticleCatalogVersion = catalogVersion;
+          cachedArticleCatalogCheckedAt = Date.now();
         }
+        writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
+        if (changedArticles.length > 0) writeJsonFileSync(ARTICLES_FILE, cachedArticles);
 
         return updatedCategory;
       }
@@ -5926,60 +6098,81 @@ export const store = {
       updatedAt: now
     };
 
-    cachedCategories.push(newCategory);
+    await persistPublicContentMutations([
+      { type: 'set', collection: 'categories', id: newCategory.id, data: newCategory }
+    ], false, now);
+    cachedCategories = [...cachedCategories, newCategory];
     writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
-    setFirestoreDoc('categories', newCategory.id, newCategory).catch(() => {});
     return newCategory;
   },
 
-  deleteCategory(id: string): boolean {
+  async deleteCategory(id: string): Promise<boolean> {
+    if (process.env.VERCEL) {
+      await Promise.all([this.refreshPublicMetadata(), this.getFreshArticles(true, true)]);
+    }
     const target = cachedCategories.find(c => c.id === id);
     if (!target) return false;
 
+    const now = new Date().toISOString();
     const targetName = target.name;
-    cachedCategories = cachedCategories.filter(c => c.id !== id);
-    writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
-    deleteFirestoreDoc('categories', id).catch(() => {});
-
-    // Safely remove category reference from articles WITHOUT deleting the pieces
-    let articlesUpdated = false;
-    cachedArticles.forEach(art => {
-      let modified = false;
-      if (art.categories && art.categories.includes(targetName)) {
-        art.categories = art.categories.filter(cat => cat !== targetName);
-        modified = true;
-      }
-      if (art.category === targetName) {
-        art.category = art.categories && art.categories.length > 0 ? art.categories[0] : '';
-        modified = true;
-      }
-      if (modified) {
-        articlesUpdated = true;
-      }
+    const nextCategories = cachedCategories.filter(category => category.id !== id);
+    const changedArticles: Article[] = [];
+    const nextArticles = cachedArticles.map(article => {
+      const categories = article.categories?.filter(category => category !== targetName);
+      const categoriesChanged = (categories?.length || 0) !== (article.categories?.length || 0);
+      const categoryChanged = article.category === targetName;
+      if (!categoriesChanged && !categoryChanged) return article;
+      const updatedArticle: Article = {
+        ...article,
+        ...(categoriesChanged ? { categories } : {}),
+        ...(categoryChanged ? { category: categories?.[0] || '' } : {}),
+        updatedAt: now
+      };
+      changedArticles.push(updatedArticle);
+      return updatedArticle;
     });
-
-    if (articlesUpdated) {
-      writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      cachedArticles.forEach(art => {
-        setFirestoreDoc('articles', art.id, art).catch(() => {});
-      });
+    const catalogVersion = await persistPublicContentMutations([
+      { type: 'delete', collection: 'categories', id },
+      ...changedArticles.map(article => ({
+        type: 'set' as const,
+          collection: 'articles' as const,
+          id: article.id,
+          data: {
+            category: article.category,
+            categories: article.categories,
+            updatedAt: article.updatedAt
+          }
+      }))
+    ], changedArticles.length > 0, now);
+    cachedCategories = nextCategories;
+    cachedArticles = nextArticles;
+    if (catalogVersion) {
+      cachedArticleCatalogVersion = catalogVersion;
+      cachedArticleCatalogCheckedAt = Date.now();
     }
+    writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
+    if (changedArticles.length > 0) writeJsonFileSync(ARTICLES_FILE, cachedArticles);
 
     return true;
   },
 
-  reorderCategories(ids: string[]): Category[] {
-    ids.forEach((id, index) => {
-      const cat = cachedCategories.find(c => c.id === id);
-      if (cat) {
-        cat.order = index + 1;
-      }
-    });
-    cachedCategories.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  async reorderCategories(ids: string[]): Promise<Category[]> {
+    if (process.env.VERCEL) await this.refreshPublicMetadata();
+    const orderById = new Map(ids.map((id, index) => [id, index + 1]));
+    const nextCategories = cachedCategories
+      .map(category => orderById.has(category.id)
+        ? { ...category, order: orderById.get(category.id) }
+        : category)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const now = new Date().toISOString();
+    await persistPublicContentMutations(nextCategories.map(category => ({
+      type: 'set' as const,
+      collection: 'categories' as const,
+      id: category.id,
+      data: category
+    })), false, now);
+    cachedCategories = nextCategories;
     writeJsonFileSync(CATEGORIES_FILE, cachedCategories);
-    cachedCategories.forEach(cat => {
-      setFirestoreDoc('categories', cat.id, cat).catch(() => {});
-    });
     return this.getCategories();
   },
 
@@ -6007,7 +6200,10 @@ export const store = {
     return cachedTopics.find(t => t.id === idOrSlug || t.slug === idOrSlug);
   },
 
-  saveTopic(data: Partial<Topic> & { name: string }): Topic {
+  async saveTopic(data: Partial<Topic> & { name: string }): Promise<Topic> {
+    if (process.env.VERCEL) {
+      await Promise.all([this.refreshPublicMetadata(), this.getFreshArticles(true, true)]);
+    }
     const now = new Date().toISOString();
     const cleanName = data.name.trim();
     const slug = (data.slug || cleanName)
@@ -6031,26 +6227,41 @@ export const store = {
           pieceIds: Array.isArray(data.pieceIds) ? data.pieceIds : cachedTopics[idx].pieceIds || [],
           updatedAt: now
         };
-        cachedTopics[idx] = updatedTopic;
-        writeJsonFileSync(TOPICS_FILE, cachedTopics);
-        setFirestoreDoc('topics', updatedTopic.id, updatedTopic).catch(() => {});
-
-        // Sync with articles if name or slug changed
-        if (oldSlug !== updatedTopic.slug || oldName !== updatedTopic.name) {
-          let articlesChanged = false;
-          cachedArticles.forEach(art => {
-            if (art.topics && (art.topics.includes(oldSlug) || art.topics.includes(oldName))) {
-              art.topics = art.topics.map(t => (t === oldSlug || t === oldName) ? updatedTopic.slug : t);
-              articlesChanged = true;
+        const nextTopics = cachedTopics.map((topic, index) => index === idx ? updatedTopic : topic);
+        const changedArticles: Article[] = [];
+        const nextArticles = cachedArticles.map(article => {
+          if (oldSlug === updatedTopic.slug && oldName === updatedTopic.name) return article;
+          if (!article.topics?.some(topic => topic === oldSlug || topic === oldName)) return article;
+          const updatedArticle: Article = {
+            ...article,
+            topics: article.topics.map(topic =>
+              topic === oldSlug || topic === oldName ? updatedTopic.slug : topic
+            ),
+            updatedAt: now
+          };
+          changedArticles.push(updatedArticle);
+          return updatedArticle;
+        });
+        const catalogVersion = await persistPublicContentMutations([
+          { type: 'set', collection: 'topics', id: updatedTopic.id, data: updatedTopic },
+          ...changedArticles.map(article => ({
+            type: 'set' as const,
+            collection: 'articles' as const,
+            id: article.id,
+            data: {
+              topics: article.topics,
+              updatedAt: article.updatedAt
             }
-          });
-          if (articlesChanged) {
-            writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-            cachedArticles.forEach(art => {
-              setFirestoreDoc('articles', art.id, art).catch(() => {});
-            });
-          }
+          }))
+        ], changedArticles.length > 0, now);
+        cachedTopics = nextTopics;
+        cachedArticles = nextArticles;
+        if (catalogVersion) {
+          cachedArticleCatalogVersion = catalogVersion;
+          cachedArticleCatalogCheckedAt = Date.now();
         }
+        writeJsonFileSync(TOPICS_FILE, cachedTopics);
+        if (changedArticles.length > 0) writeJsonFileSync(ARTICLES_FILE, cachedArticles);
 
         return updatedTopic;
       }
@@ -6069,89 +6280,135 @@ export const store = {
       updatedAt: now
     };
 
-    cachedTopics.push(newTopic);
+    await persistPublicContentMutations([
+      { type: 'set', collection: 'topics', id: newTopic.id, data: newTopic }
+    ], false, now);
+    cachedTopics = [...cachedTopics, newTopic];
     writeJsonFileSync(TOPICS_FILE, cachedTopics);
-    setFirestoreDoc('topics', newTopic.id, newTopic).catch(() => {});
     return newTopic;
   },
 
-  deleteTopic(id: string): boolean {
+  async deleteTopic(id: string): Promise<boolean> {
+    if (process.env.VERCEL) {
+      await Promise.all([this.refreshPublicMetadata(), this.getFreshArticles(true, true)]);
+    }
     const target = cachedTopics.find(t => t.id === id);
     if (!target) return false;
 
+    const now = new Date().toISOString();
     const targetSlug = target.slug;
     const targetName = target.name;
-    cachedTopics = cachedTopics.filter(t => t.id !== id);
-    writeJsonFileSync(TOPICS_FILE, cachedTopics);
-    deleteFirestoreDoc('topics', id).catch(() => {});
-
-    // Safely remove topic references from articles WITHOUT deleting the pieces
-    let articlesChanged = false;
-    cachedArticles.forEach(art => {
-      if (art.topics && (art.topics.includes(targetSlug) || art.topics.includes(targetName) || art.topics.includes(id))) {
-        art.topics = art.topics.filter(t => t !== targetSlug && t !== targetName && t !== id);
-        articlesChanged = true;
+    const nextTopics = cachedTopics.filter(topic => topic.id !== id);
+    const changedArticles: Article[] = [];
+    const nextArticles = cachedArticles.map(article => {
+      if (!article.topics?.some(topic => topic === targetSlug || topic === targetName || topic === id)) {
+        return article;
       }
+      const updatedArticle: Article = {
+        ...article,
+        topics: article.topics.filter(topic => topic !== targetSlug && topic !== targetName && topic !== id),
+        updatedAt: now
+      };
+      changedArticles.push(updatedArticle);
+      return updatedArticle;
     });
-
-    if (articlesChanged) {
-      writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      cachedArticles.forEach(art => {
-        setFirestoreDoc('articles', art.id, art).catch(() => {});
-      });
+    const catalogVersion = await persistPublicContentMutations([
+      { type: 'delete', collection: 'topics', id },
+      ...changedArticles.map(article => ({
+        type: 'set' as const,
+          collection: 'articles' as const,
+          id: article.id,
+          data: {
+            topics: article.topics,
+            updatedAt: article.updatedAt
+          }
+      }))
+    ], changedArticles.length > 0, now);
+    cachedTopics = nextTopics;
+    cachedArticles = nextArticles;
+    if (catalogVersion) {
+      cachedArticleCatalogVersion = catalogVersion;
+      cachedArticleCatalogCheckedAt = Date.now();
     }
+    writeJsonFileSync(TOPICS_FILE, cachedTopics);
+    if (changedArticles.length > 0) writeJsonFileSync(ARTICLES_FILE, cachedArticles);
 
     return true;
   },
 
-  reorderTopics(ids: string[]): Topic[] {
-    ids.forEach((id, index) => {
-      const topic = cachedTopics.find(t => t.id === id);
-      if (topic) {
-        topic.displayOrder = index + 1;
-      }
-    });
-    cachedTopics.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+  async reorderTopics(ids: string[]): Promise<Topic[]> {
+    if (process.env.VERCEL) await this.refreshPublicMetadata();
+    const orderById = new Map(ids.map((id, index) => [id, index + 1]));
+    const nextTopics = cachedTopics
+      .map(topic => orderById.has(topic.id)
+        ? { ...topic, displayOrder: orderById.get(topic.id) }
+        : topic)
+      .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+    const now = new Date().toISOString();
+    await persistPublicContentMutations(nextTopics.map(topic => ({
+      type: 'set' as const,
+      collection: 'topics' as const,
+      id: topic.id,
+      data: topic
+    })), false, now);
+    cachedTopics = nextTopics;
     writeJsonFileSync(TOPICS_FILE, cachedTopics);
-    cachedTopics.forEach(top => {
-      setFirestoreDoc('topics', top.id, top).catch(() => {});
-    });
     return this.getTopics(true);
   },
 
-  assignPiecesToTopic(topicId: string, pieceIds: string[]): Topic {
+  async assignPiecesToTopic(topicId: string, pieceIds: string[]): Promise<Topic> {
+    if (process.env.VERCEL) {
+      await Promise.all([this.refreshPublicMetadata(), this.getFreshArticles(true, true)]);
+    }
     const topic = cachedTopics.find(t => t.id === topicId || t.slug === topicId);
     if (!topic) {
       throw new Error(`Topic not found: ${topicId}`);
     }
 
-    topic.pieceIds = [...pieceIds];
-    topic.updatedAt = new Date().toISOString();
-    writeJsonFileSync(TOPICS_FILE, cachedTopics);
-    setFirestoreDoc('topics', topic.id, topic).catch(() => {});
-
-    // Update articles two-way
-    let articlesChanged = false;
-    cachedArticles.forEach(art => {
-      const shouldHaveTopic = pieceIds.includes(art.id);
-      const hasTopic = art.topics && (art.topics.includes(topic.slug) || art.topics.includes(topic.id) || art.topics.includes(topic.name));
-      if (shouldHaveTopic && !hasTopic) {
-        art.topics = [...(art.topics || []), topic.slug];
-        articlesChanged = true;
-      } else if (!shouldHaveTopic && hasTopic) {
-        art.topics = (art.topics || []).filter(t => t !== topic.slug && t !== topic.id && t !== topic.name);
-        articlesChanged = true;
-      }
+    const now = new Date().toISOString();
+    const updatedTopic: Topic = { ...topic, pieceIds: [...pieceIds], updatedAt: now };
+    const nextTopics = cachedTopics.map(existing => existing.id === topic.id ? updatedTopic : existing);
+    const changedArticles: Article[] = [];
+    const nextArticles = cachedArticles.map(article => {
+      const shouldHaveTopic = pieceIds.includes(article.id);
+      const hasTopic = Boolean(article.topics?.some(value =>
+        value === topic.slug || value === topic.id || value === topic.name
+      ));
+      if (shouldHaveTopic === hasTopic) return article;
+      const updatedArticle: Article = {
+        ...article,
+        topics: shouldHaveTopic
+          ? [...(article.topics || []), topic.slug]
+          : (article.topics || []).filter(value =>
+            value !== topic.slug && value !== topic.id && value !== topic.name
+          ),
+        updatedAt: now
+      };
+      changedArticles.push(updatedArticle);
+      return updatedArticle;
     });
-
-    if (articlesChanged) {
-      writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      cachedArticles.forEach(art => {
-        setFirestoreDoc('articles', art.id, art).catch(() => {});
-      });
+    const catalogVersion = await persistPublicContentMutations([
+      { type: 'set', collection: 'topics', id: updatedTopic.id, data: updatedTopic },
+      ...changedArticles.map(article => ({
+        type: 'set' as const,
+          collection: 'articles' as const,
+          id: article.id,
+          data: {
+            topics: article.topics,
+            updatedAt: article.updatedAt
+          }
+      }))
+    ], changedArticles.length > 0, now);
+    cachedTopics = nextTopics;
+    cachedArticles = nextArticles;
+    if (catalogVersion) {
+      cachedArticleCatalogVersion = catalogVersion;
+      cachedArticleCatalogCheckedAt = Date.now();
     }
+    writeJsonFileSync(TOPICS_FILE, cachedTopics);
+    if (changedArticles.length > 0) writeJsonFileSync(ARTICLES_FILE, cachedArticles);
 
-    return topic;
+    return updatedTopic;
   },
 
   getTopicAnalytics(options: { period?: AnalyticsTimePeriod; startDate?: string; endDate?: string } = {}): TopicAnalyticsItem[] {
@@ -6231,9 +6488,32 @@ export const store = {
     // refresh it from the authoritative collection and only snapshot that state.
     // Article mutations persist themselves at the time of the mutation.
     if (process.env.VERCEL) {
-      const catalog = await getFirestoreDoc<{ version?: string }>('site_configs', 'article_catalog');
-      const freshArticles = await getAllFirestoreDocs<Article>('articles');
+      const [
+        catalog,
+        freshArticles,
+        canonicalAuthor,
+        legacyAuthor,
+        canonicalHomepage,
+        legacyHomepage,
+        freshCategories,
+        freshTopics
+      ] = await Promise.all([
+        getFirestoreDoc<{ version?: string }>('site_configs', 'article_catalog'),
+        getAllFirestoreDocs<Article>('articles'),
+        getFirestoreDoc<AuthorProfile>('site_configs', 'author'),
+        getFirestoreDoc<AuthorProfile>('site_configs', 'author_profile'),
+        getFirestoreDoc<HomepageConfig>('site_configs', 'homepage'),
+        getFirestoreDoc<HomepageConfig>('site_configs', 'homepage_config'),
+        getAllFirestoreDocs<Category>('categories'),
+        getAllFirestoreDocs<Topic>('topics')
+      ]);
       cachedArticles = freshArticles.map(normalizePersistedArticle);
+      const freshAuthor = canonicalAuthor || legacyAuthor;
+      if (freshAuthor) cachedAuthor = { ...JAKE_PROFILE, ...freshAuthor };
+      const freshHomepage = canonicalHomepage || legacyHomepage;
+      if (freshHomepage) cachedHomepageConfig = { ...cachedHomepageConfig, ...freshHomepage };
+      cachedCategories = freshCategories;
+      cachedTopics = freshTopics;
       cachedArticleCatalogVersion = catalog?.version || null;
       cachedArticleCatalogCheckedAt = Date.now();
     }
@@ -6257,35 +6537,31 @@ export const store = {
     // so the caller cannot receive a success response while persistence is still
     // pending (or after one of the writes has failed).
     const firestoreWrites: Promise<void>[] = [];
-    if (cachedAuthor) {
-      firestoreWrites.push(
-        setFirestoreDoc('site_configs', 'author', cachedAuthor),
-        setFirestoreDoc('site_configs', 'author_profile', cachedAuthor)
-      );
-    }
-    if (cachedHomepageConfig) {
-      firestoreWrites.push(
-        setFirestoreDoc('site_configs', 'homepage', cachedHomepageConfig),
-        setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig)
-      );
-    }
-    if (cachedMpesaSettings) {
-      firestoreWrites.push(setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings));
-    }
-    if (Array.isArray(cachedCategories)) {
+    // Production mutations are durable at their individual save boundary. This
+    // button is therefore verification/snapshot-only on Vercel: bulk-writing a
+    // warm instance can overwrite a newer save or resurrect a deleted record.
+    if (!process.env.VERCEL) {
+      if (cachedAuthor) {
+        firestoreWrites.push(
+          setFirestoreDoc('site_configs', 'author', cachedAuthor),
+          setFirestoreDoc('site_configs', 'author_profile', cachedAuthor)
+        );
+      }
+      if (cachedHomepageConfig) {
+        firestoreWrites.push(
+          setFirestoreDoc('site_configs', 'homepage', cachedHomepageConfig),
+          setFirestoreDoc('site_configs', 'homepage_config', cachedHomepageConfig)
+        );
+      }
+      if (cachedMpesaSettings) {
+        firestoreWrites.push(setFirestoreDoc('site_configs', 'mpesa_settings', cachedMpesaSettings));
+      }
       for (const cat of cachedCategories) {
         firestoreWrites.push(setFirestoreDoc('categories', cat.id, cat));
       }
-    }
-    if (Array.isArray(cachedTopics)) {
       for (const top of cachedTopics) {
         firestoreWrites.push(setFirestoreDoc('topics', top.id, top));
       }
-    }
-    // Local development may explicitly promote its JSON-backed article state.
-    // Production articles are already durable and were refreshed above; writing
-    // the warm cache back would risk reverting a newer price or publication edit.
-    if (!process.env.VERCEL && Array.isArray(cachedArticles)) {
       for (const art of cachedArticles) {
         firestoreWrites.push(setFirestoreDoc('articles', art.id, art));
       }
@@ -6297,7 +6573,9 @@ export const store = {
       timestamp: new Date().toISOString(),
       piecesCount: cachedArticles.length,
       snapshotFilename: snapshot.filename,
-      message: `All ${cachedArticles.length} monographs, author profile, custom categories, topics, and configurations permanently saved to Cloud Firestore and baseline protected.`
+      message: process.env.VERCEL
+        ? `Verified the latest Cloud Firestore state for ${cachedArticles.length} monographs without rewriting newer production content.`
+        : `All ${cachedArticles.length} monographs, author profile, custom categories, topics, and configurations permanently saved to Cloud Firestore and baseline protected.`
     };
   },
 

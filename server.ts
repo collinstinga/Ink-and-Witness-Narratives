@@ -894,12 +894,10 @@ export async function createApp() {
     message: { success: false, error: "Purchase recovery limit reached. Please wait before trying again." }
   });
 
-  // Prevent every page view from re-running the same Firestore-heavy public
-  // reads. Authenticated and token-bearing requests are never shared-cached.
-  const cacheablePublicPaths = new Set([
-    '/api/health', '/api/author', '/api/articles', '/api/categories',
-    '/api/topics'
-  ]);
+  // Mutable publishing data must never be served from an older shared CDN
+  // snapshot. The consolidated bootstrap route performs one coherent read,
+  // while the health check is the only endpoint safe to share-cache here.
+  const cacheablePublicPaths = new Set(['/api/health']);
   app.use((req: Request, res: Response, next: NextFunction) => {
     const hasCredentials = Boolean(
       req.headers.authorization || req.headers.cookie ||
@@ -909,6 +907,28 @@ export async function createApp() {
       res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
     }
     next();
+  });
+
+  // The public catalogue does not need affiliate ledgers. Hydrate that larger
+  // subsystem only when a referral, affiliate, payment, or writer-admin request
+  // actually needs it, while coalescing concurrent first requests.
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    const affiliateDependent =
+      req.path.startsWith('/api/affiliate') ||
+      req.path.startsWith('/api/admin') ||
+      req.path.startsWith('/api/mpesa') ||
+      req.path.startsWith('/api/payments') ||
+      req.path.startsWith('/r/');
+    if (!affiliateDependent) return next();
+    try {
+      await store.ensureAffiliateStoreInitialized();
+      return next();
+    } catch (error) {
+      console.error('[Affiliate Store] Deferred initialization failed:', error);
+      return res.status(503).json({
+        error: 'Affiliate and payment services are temporarily unavailable. Please retry.'
+      });
+    }
   });
 
   const servePersistentAsset = async (req: Request, res: Response) => {
@@ -946,6 +966,86 @@ export async function createApp() {
   // PUBLIC API ROUTES
   // ==========================================
 
+  // One coherent, non-cacheable payload for the public application's initial
+  // render. The browser previously fanned out to six endpoints at once, which
+  // could start six cold serverless instances and mix CDN responses from
+  // different content versions. A single request avoids both failure modes.
+  app.get('/api/public/bootstrap', async (req: Request, res: Response) => {
+    const startedAt = Date.now();
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    try {
+      // Always check the shared article version marker. This costs one targeted
+      // read on warm instances and scans the catalogue only after an actual
+      // writer mutation, preventing an older instance from moving the UI back.
+      const [articles] = await Promise.all([
+        store.getFreshArticles(false, true).catch(error => {
+          console.warn('[Public Bootstrap] Article freshness check failed; serving last known good catalogue:', error);
+          return store.getArticles(false);
+        }),
+        store.refreshPublicMetadata()
+      ]);
+      const homepage = await store.getFreshHomepageConfig().catch(error => {
+        console.warn('[Public Bootstrap] Homepage freshness check failed; serving last known good configuration:', error);
+        return store.getHomepageConfig();
+      });
+      const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
+      const publicArticles = articles.map(article =>
+        toPublicArticleSummary(article, defaultPriceKes)
+      );
+
+      const sessionUser = (req as any).user;
+      res.json({
+        generatedAt: new Date().toISOString(),
+        session: sessionUser ? {
+          authenticated: true,
+          user: {
+            id: sessionUser.id,
+            email: sessionUser.email,
+            name: sessionUser.name,
+            role: sessionUser.role
+          }
+        } : { authenticated: false, user: null },
+        author: store.getAuthorProfile(),
+        articles: publicArticles,
+        categories: store.getCategories(),
+        topics: store.getTopics(false, true),
+        homepage: {
+          config: homepage.config,
+          mostSellingPieces: homepage.mostSellingPieces.map(article =>
+            toPublicArticleSummary(article, defaultPriceKes)
+          ),
+          pieceOfTheWeek: homepage.pieceOfTheWeek
+            ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
+            : undefined
+        },
+        newsletter: {
+          enabled: newsletterFeatureEnabled(),
+          consentVersion: NEWSLETTER_CONSENT_VERSION,
+          doubleOptIn: true
+        }
+      });
+      console.log(JSON.stringify({
+        level: 'info',
+        message: 'public_bootstrap_complete',
+        durationMs: Date.now() - startedAt,
+        articleCount: publicArticles.length
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        message: 'public_bootstrap_failed',
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      }));
+      res.status(503).json({ error: 'The latest site content is temporarily unavailable. Please retry.' });
+    }
+  });
+
   // Health check
   app.get("/api/health", (_req: Request, res: Response) => {
     res.json({
@@ -959,6 +1059,7 @@ export async function createApp() {
 
   // Public Author Profile
   app.get("/api/author", (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
     res.json(store.getAuthorProfile());
   });
 
@@ -1180,6 +1281,7 @@ export async function createApp() {
 
   // Public Custom Categories (Dynamically managed by writer Jake)
   app.get("/api/categories", (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
     try {
       const categories = store.getCategories();
       res.json(categories);
@@ -1190,6 +1292,7 @@ export async function createApp() {
 
   // Public Topics Catalogue (Dynamically managed by writer Jake)
   app.get("/api/topics", (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
     try {
       const isAdmin = (req as any).user?.role === 'admin';
       const includeHidden = req.query.includeHidden === 'true' && isAdmin;
@@ -1203,6 +1306,7 @@ export async function createApp() {
 
   // Public Topic details with assigned published pieces
   app.get("/api/topics/:idOrSlug", (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
     try {
       const { idOrSlug } = req.params;
       const topic = store.getTopicById(idOrSlug);
@@ -1265,9 +1369,9 @@ export async function createApp() {
         toPublicArticleSummary(article, mpesaSettings.defaultPriceKes || 1050)
       );
 
-      // Bound stale pricing at the CDN; do not continue serving it for minutes
-      // while revalidating after the writer changes a piece's price.
-      res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, must-revalidate');
+      // Pricing and publish-state changes are security-sensitive. Never let an
+      // older shared response replace the latest catalogue after a refresh.
+      res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
       res.json(publicArticles);
     } catch (error) {
       console.error('Public article catalog refresh failed:', error);
@@ -2873,7 +2977,7 @@ export async function createApp() {
       if (!name || !name.trim()) {
         return res.status(400).json({ error: "Category name is required." });
       }
-      const category = store.saveCategory({ name: name.trim(), description, order });
+      const category = await store.saveCategory({ name: name.trim(), description, order });
       res.status(201).json({ success: true, category });
     } catch (err: any) {
       console.error("Create category error:", err);
@@ -2888,7 +2992,7 @@ export async function createApp() {
       if (!name || !name.trim()) {
         return res.status(400).json({ error: "Category name is required." });
       }
-      const category = store.saveCategory({ id, name: name.trim(), description, order });
+      const category = await store.saveCategory({ id, name: name.trim(), description, order });
       res.json({ success: true, category });
     } catch (err: any) {
       console.error("Update category error:", err);
@@ -2899,7 +3003,7 @@ export async function createApp() {
   app.delete("/api/admin/categories/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const deleted = store.deleteCategory(id);
+      const deleted = await store.deleteCategory(id);
       if (!deleted) {
         return res.status(404).json({ error: "Category not found." });
       }
@@ -2916,7 +3020,7 @@ export async function createApp() {
       if (!Array.isArray(ids)) {
         return res.status(400).json({ error: "Invalid category IDs array." });
       }
-      const reordered = store.reorderCategories(ids);
+      const reordered = await store.reorderCategories(ids);
       res.json({ success: true, categories: reordered });
     } catch (err: any) {
       console.error("Reorder categories error:", err);
@@ -2941,7 +3045,7 @@ export async function createApp() {
       if (!name || !name.trim()) {
         return res.status(400).json({ error: "Topic name is required." });
       }
-      const topic = store.saveTopic({
+      const topic = await store.saveTopic({
         name: name.trim(),
         description,
         slug,
@@ -2963,7 +3067,7 @@ export async function createApp() {
       if (!name || !name.trim()) {
         return res.status(400).json({ error: "Topic name is required." });
       }
-      const topic = store.saveTopic({
+      const topic = await store.saveTopic({
         id,
         name: name.trim(),
         description,
@@ -2982,7 +3086,7 @@ export async function createApp() {
   app.delete("/api/admin/topics/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const deleted = store.deleteTopic(id);
+      const deleted = await store.deleteTopic(id);
       if (!deleted) {
         return res.status(404).json({ error: "Topic not found." });
       }
@@ -2999,7 +3103,7 @@ export async function createApp() {
       if (!Array.isArray(ids)) {
         return res.status(400).json({ error: "Invalid topic IDs array." });
       }
-      const reordered = store.reorderTopics(ids);
+      const reordered = await store.reorderTopics(ids);
       res.json({ success: true, topics: reordered });
     } catch (err: any) {
       console.error("Reorder topics error:", err);
@@ -3014,7 +3118,7 @@ export async function createApp() {
       if (!Array.isArray(pieceIds)) {
         return res.status(400).json({ error: "pieceIds must be an array of article IDs." });
       }
-      const updatedTopic = store.assignPiecesToTopic(id, pieceIds);
+      const updatedTopic = await store.assignPiecesToTopic(id, pieceIds);
       res.json({ success: true, topic: updatedTopic });
     } catch (err: any) {
       console.error("Assign pieces to topic error:", err);

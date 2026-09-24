@@ -349,9 +349,34 @@ export const affiliateStore = {
     affiliateSessionInvalidationEpochs.clear();
     affiliateDirectoryReady = false;
 
+    // Start independent Firestore reads together. These collections do not
+    // depend on one another, and awaiting them serially adds several network
+    // round trips to every cold serverless instance.
+    type StartupRead<T> =
+      | { ok: true; value: T }
+      | { ok: false; error: unknown };
+    const captureStartupRead = <T>(promise: Promise<T>): Promise<StartupRead<T>> =>
+      promise.then(
+        value => ({ ok: true, value }),
+        error => ({ ok: false, error })
+      );
+    const useStartupRead = async <T>(pending: Promise<StartupRead<T>>): Promise<T> => {
+      const result = await pending;
+      if (result.ok === false) throw result.error;
+      return result.value;
+    };
+    const startupReads = {
+      settings: captureStartupRead(getFirestoreDoc<AffiliateSettings>('site_configs', 'affiliate_settings')),
+      affiliates: captureStartupRead(getAllFirestoreDocs<AffiliateAccount>('affiliates')),
+      commissions: captureStartupRead(getAllFirestoreDocs<AffiliateSaleCommission>('affiliate_commissions')),
+      payouts: captureStartupRead(getAllFirestoreDocs<AffiliatePayoutRequest>('affiliate_payouts')),
+      campaigns: captureStartupRead(getAllFirestoreDocs<AffiliateCampaign>('affiliate_campaigns')),
+      audit: captureStartupRead(getAllFirestoreDocs<AffiliateAuditLogEntry>('affiliate_audit'))
+    };
+
     // 1. Load Settings from Firestore / JSON
     try {
-      const fsSettings = await getFirestoreDoc<AffiliateSettings>('site_configs', 'affiliate_settings');
+      const fsSettings = await useStartupRead(startupReads.settings);
       if (fsSettings) {
         cachedSettings = normalizeAffiliateSettings({ ...cachedSettings, ...fsSettings });
         writeJsonFileSync(SETTINGS_FILE, cachedSettings);
@@ -369,7 +394,7 @@ export const affiliateStore = {
 
     // 2. Load Affiliates from Firestore / JSON
     try {
-      const fsAffiliates = await getAllFirestoreDocs<AffiliateAccount>('affiliates');
+      const fsAffiliates = await useStartupRead(startupReads.affiliates);
       if (fsAffiliates && fsAffiliates.length > 0) {
         cachedAffiliates = fsAffiliates.map(a => ({
           ...a,
@@ -399,7 +424,7 @@ export const affiliateStore = {
 
     // 3. Load Commissions from Firestore / JSON
     try {
-      const fsCommissions = await getAllFirestoreDocs<AffiliateSaleCommission>('affiliate_commissions');
+      const fsCommissions = await useStartupRead(startupReads.commissions);
       if (fsCommissions && fsCommissions.length > 0) {
         cachedCommissions = fsCommissions;
         writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
@@ -420,7 +445,7 @@ export const affiliateStore = {
 
     // 4. Load Payouts from Firestore / JSON
     try {
-      const fsPayouts = await getAllFirestoreDocs<AffiliatePayoutRequest>('affiliate_payouts');
+      const fsPayouts = await useStartupRead(startupReads.payouts);
       if (fsPayouts && fsPayouts.length > 0) {
         cachedPayouts = fsPayouts;
         writeJsonFileSync(PAYOUTS_FILE, cachedPayouts);
@@ -441,7 +466,7 @@ export const affiliateStore = {
 
     // 5. Load Campaigns from Firestore / JSON
     try {
-      const fsCampaigns = await getAllFirestoreDocs<AffiliateCampaign>('affiliate_campaigns');
+      const fsCampaigns = await useStartupRead(startupReads.campaigns);
       if (fsCampaigns && fsCampaigns.length > 0) {
         cachedCampaigns = fsCampaigns;
         writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
@@ -462,7 +487,7 @@ export const affiliateStore = {
 
     // 6. Load Audit Logs from Firestore / JSON
     try {
-      const fsAudit = await getAllFirestoreDocs<AffiliateAuditLogEntry>('affiliate_audit');
+      const fsAudit = await useStartupRead(startupReads.audit);
       if (fsAudit && fsAudit.length > 0) {
         cachedAuditLogs = fsAudit;
         writeJsonFileSync(AUDIT_FILE, cachedAuditLogs);

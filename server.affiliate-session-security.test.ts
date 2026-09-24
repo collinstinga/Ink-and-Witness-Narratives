@@ -89,6 +89,10 @@ const storeMocks = vi.hoisted(() => {
     getFreshArticles: vi.fn(async (includeDrafts?: boolean, _forceRefresh?: boolean) => getArticles(includeDrafts)),
     getArticleById,
     getFreshArticleById: vi.fn(async (id: string, includeDrafts?: boolean, _forceRefresh?: boolean) => getArticleById(id, includeDrafts)),
+    refreshPublicMetadata: vi.fn(async () => undefined),
+    getAuthorProfile: vi.fn(),
+    getCategories: vi.fn(),
+    getTopics: vi.fn(),
     affiliates: affiliateMocks
   };
   const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>();
@@ -203,6 +207,9 @@ describe('affiliate session route boundaries', () => {
     storeMocks.getArticles.mockReturnValue([{ ...publicArticleFixture }]);
     storeMocks.getArticleById.mockReturnValue({ ...publicArticleFixture });
     storeMocks.getMpesaSettings.mockReturnValue({ defaultPriceKes: 300 });
+    storeMocks.getAuthorProfile.mockReturnValue({ name: 'Jake' });
+    storeMocks.getCategories.mockReturnValue([{ id: 'category-1', name: 'Essays', order: 1 }]);
+    storeMocks.getTopics.mockReturnValue([{ id: 'topic-1', name: 'Memory', slug: 'memory' }]);
     storeMocks.getHomepageConfig.mockReturnValue({
       config: { welcomeBackground: {}, mostSellingPieceIds: [] },
       startHerePieces: [{ ...publicArticleFixture }],
@@ -526,6 +533,28 @@ describe('affiliate session route boundaries', () => {
     expect(homepage.mostSellingPieces[0]).toMatchObject({ content: '', isUnlocked: false });
     expect(homepage.mostSellingPieces[0]).not.toHaveProperty('coverImageOriginal');
     expect(JSON.stringify(homepage)).not.toContain(publicArticleFixture.content);
+  });
+
+  it('returns one coherent no-store bootstrap payload and checks the shared article version', async () => {
+    const response = await fetch(`${baseUrl}/api/public/bootstrap`);
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
+    expect(storeMocks.getFreshArticles).toHaveBeenCalledWith(false, true);
+    expect(storeMocks.refreshPublicMetadata).toHaveBeenCalledTimes(1);
+    expect(storeMocks.getFreshHomepageConfig).toHaveBeenCalledTimes(1);
+    expect(body).toMatchObject({
+      author: { name: 'Jake' },
+      categories: [{ id: 'category-1', name: 'Essays' }],
+      topics: [{ id: 'topic-1', name: 'Memory' }],
+      newsletter: { doubleOptIn: true }
+    });
+    expect(body.articles[0]).toMatchObject({ content: '', isUnlocked: false });
+    expect(body.articles[0]).not.toHaveProperty('coverImageOriginal');
+    expect(JSON.stringify(body)).not.toContain(publicArticleFixture.content);
   });
 
   it('keeps legacy reading times visible and carries an explicit hidden setting to public summaries', async () => {

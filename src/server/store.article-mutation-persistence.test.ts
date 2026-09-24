@@ -307,4 +307,54 @@ describe('article catalog mutations', () => {
     expect(await reader.getFreshArticles(true, true)).toEqual([]);
     expect(firestore.documents.has(firestore.keyFor('articles', originalArticle.id))).toBe(false);
   }, 60_000);
+
+  it('persists taxonomy changes without overwriting newer article fields and publishes a metadata marker', async () => {
+    firestore.documents.set(firestore.keyFor('categories', 'category-essays'), {
+      id: 'category-essays',
+      name: 'Essays',
+      slug: 'essays',
+      order: 1,
+      isEnabled: true
+    });
+    const { store } = await import('./store.js');
+    await store.init();
+
+    // Model an out-of-band/newer content save that this warm instance has not
+    // observed. The taxonomy mutation must merge only taxonomy fields.
+    firestore.documents.set(firestore.keyFor('articles', originalArticle.id), {
+      ...structuredClone(originalArticle),
+      title: 'Newer remote title',
+      content: 'Newer remote content',
+      priceKes: 500,
+      prices: { KES: 500 }
+    } as unknown as Record<string, unknown>);
+    firestore.batchCommit.mockClear();
+
+    await expect(store.saveCategory({
+      id: 'category-essays',
+      name: 'Memoir'
+    })).resolves.toMatchObject({ name: 'Memoir', slug: 'memoir' });
+
+    const persisted = firestore.documents.get(firestore.keyFor('articles', originalArticle.id));
+    expect(persisted).toMatchObject({
+      title: 'Newer remote title',
+      content: 'Newer remote content',
+      priceKes: 500,
+      prices: { KES: 500 },
+      category: 'Memoir'
+    });
+    expect(firestore.documents.get(firestore.keyFor('site_configs', 'public_metadata')))
+      .toMatchObject({ version: expect.any(String), updatedAt: expect.any(String) });
+    expect(firestore.batchCommit.mock.calls[0]?.[0]).toContainEqual(expect.objectContaining({
+      type: 'set',
+      collectionName: 'articles',
+      documentId: originalArticle.id,
+      data: {
+        category: 'Memoir',
+        categories: undefined,
+        updatedAt: expect.any(String)
+      },
+      merge: true
+    }));
+  }, 60_000);
 });

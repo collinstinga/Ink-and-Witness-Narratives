@@ -92,7 +92,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
       window.removeEventListener('ink-homepage-updated', refreshAfterSave);
       window.removeEventListener('storage', refreshOtherTab);
     };
-  }, [articles]);
+  }, []);
 
   // Published articles list
   const publishedArticles = articles.filter(a => a.status === 'published' || !a.status);
@@ -124,7 +124,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
   // Background Settings
   const bgSettings = homepageConfig?.welcomeBackground || {
-    imageUrl: author?.welcomeBackgroundUrl || '/uploads/author_cover-1786702522341-772b89830648.jpg',
+    imageUrl: author?.welcomeBackgroundUrl || '',
     fit: 'cover',
     positionX: 50,
     positionY: 50,

@@ -298,29 +298,14 @@ describe('article price persistence', () => {
       .toBe(false);
   }, 60_000);
 
-  it('waits for cloud writes and rejects instead of reporting a false success', async () => {
+  it('rejects a failed cloud verification without bulk-writing a warm production snapshot', async () => {
     const { store } = await import('./store.js');
     await store.init();
     firestore.setFirestoreDoc.mockClear();
+    firestore.getAllFirestoreDocs.mockRejectedValueOnce(new Error('Firestore verification failed'));
 
-    let releaseWrites!: () => void;
-    firestore.state.writeGate = new Promise<void>(resolve => {
-      releaseWrites = resolve;
-    });
-    let saveResolved = false;
-    const savePromise = store.savePermanently('await-cloud-writes-test').then(result => {
-      saveResolved = true;
-      return result;
-    });
-
-    await vi.waitFor(() => expect(firestore.setFirestoreDoc).toHaveBeenCalled());
-    expect(saveResolved).toBe(false);
-    releaseWrites();
-    await expect(savePromise).resolves.toMatchObject({ success: true });
-    firestore.state.writeGate = null;
-
-    firestore.state.writeError = new Error('Firestore write failed');
-    await expect(store.savePermanently('cloud-write-failure-test'))
-      .rejects.toThrow('Firestore write failed');
+    await expect(store.savePermanently('cloud-verification-failure-test'))
+      .rejects.toThrow('Firestore verification failed');
+    expect(firestore.setFirestoreDoc).not.toHaveBeenCalled();
   }, 60_000);
 });

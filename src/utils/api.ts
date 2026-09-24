@@ -221,15 +221,60 @@ export async function safeFetchJson<T = any>(
   return data as T;
 }
 
+interface PublicBootstrapResponse {
+  generatedAt: string;
+  session: { authenticated: boolean; user: any | null };
+  author: AuthorProfile;
+  articles: Article[];
+  categories: Category[];
+  topics: Topic[];
+  homepage: {
+    config: HomepageConfig;
+    mostSellingPieces: Article[];
+    pieceOfTheWeek?: Article;
+  };
+  newsletter: {
+    enabled: boolean;
+    consentVersion: string;
+    doubleOptIn: boolean;
+  };
+}
+
+let publicBootstrapRequest: Promise<PublicBootstrapResponse> | null = null;
+
+function invalidatePublicBootstrap(): void {
+  publicBootstrapRequest = null;
+}
+
+function getPublicBootstrap(): Promise<PublicBootstrapResponse> {
+  if (!publicBootstrapRequest) {
+    const request = safeFetchJson<PublicBootstrapResponse>(
+      '/api/public/bootstrap',
+      { cache: 'no-store' },
+      'The latest site content is temporarily unavailable.'
+    );
+    publicBootstrapRequest = request;
+    void request.finally(() => {
+      // Keep the completed promise only through the current render turn. React
+      // can mount homepage/topic/newsletter children immediately after the
+      // catalogue resolves; they should consume that same coherent snapshot.
+      // A later task (manual refresh or navigation) always returns to the server.
+      setTimeout(() => {
+        if (publicBootstrapRequest === request) publicBootstrapRequest = null;
+      }, 0);
+    }).catch(() => {});
+  }
+  return publicBootstrapRequest;
+}
+
 export const api = {
   // Public APIs
   async getAuthor(): Promise<AuthorProfile> {
-    const res = await fetch('/api/author');
-    if (!res.ok) throw new Error('Failed to fetch author profile');
-    return res.json();
+    return (await getPublicBootstrap()).author;
   },
 
   async getArticles(forceFresh = false): Promise<Article[]> {
+    if (!forceFresh) return (await getPublicBootstrap()).articles;
     const url = forceFresh ? `/api/articles?refresh=${Date.now()}` : '/api/articles';
     const res = await fetch(url, forceFresh ? { cache: 'no-store' } : undefined);
     if (!res.ok) throw new Error('Failed to fetch articles');
@@ -237,9 +282,7 @@ export const api = {
   },
 
   async getCategories(): Promise<Category[]> {
-    const res = await fetch('/api/categories');
-    if (!res.ok) throw new Error('Failed to fetch categories');
-    return res.json();
+    return (await getPublicBootstrap()).categories;
   },
 
   async createCategory(name: string, description?: string, order?: number): Promise<Category> {
@@ -329,6 +372,7 @@ export const api = {
 
   // Topics Catalogue APIs
   async getTopics(includeHidden = false): Promise<Topic[]> {
+    if (!includeHidden) return (await getPublicBootstrap()).topics;
     const adminToken = getWriterToken();
     const headers: Record<string, string> = {};
     if (adminToken) {
@@ -493,7 +537,7 @@ export const api = {
     consentVersion: string;
     doubleOptIn: boolean;
   }> {
-    return safeFetchJson('/api/newsletter/config', undefined, 'Newsletter signup is unavailable.');
+    return (await getPublicBootstrap()).newsletter;
   },
 
   async subscribeNewsletter(input: {
@@ -810,6 +854,7 @@ export const api = {
     if (data.success && data.user?.role === 'admin') {
       setWriterToken('cookie-session');
     }
+    invalidatePublicBootstrap();
     return data;
   },
 
@@ -824,17 +869,26 @@ export const api = {
     if (!res.ok) {
       throw new Error(data.error || 'Account registration failed.');
     }
+    invalidatePublicBootstrap();
     return data;
   },
 
   async authGetMe(): Promise<{ authenticated: boolean; user: any | null }> {
     try {
-      const res = await fetch('/api/auth/me', { credentials: 'include' });
-      if (!res.ok) {
-        clearWriterToken();
-        return { authenticated: false, user: null };
+      let data: { authenticated: boolean; user: any | null };
+      try {
+        // On the initial render this shares the same request as the catalogue.
+        // If public content is unavailable, fall back to the independent session
+        // endpoint so a content outage cannot falsely log a valid user out.
+        data = (await getPublicBootstrap()).session;
+      } catch {
+        const res = await fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' });
+        if (!res.ok) {
+          clearWriterToken();
+          return { authenticated: false, user: null };
+        }
+        data = await res.json();
       }
-      const data = await res.json();
       if (data.authenticated && data.user?.role === 'admin') {
         setWriterToken('cookie-session');
       } else {
@@ -852,9 +906,11 @@ export const api = {
         method: 'POST',
         credentials: 'include'
       });
+      invalidatePublicBootstrap();
       clearWriterToken();
       return res.json();
     } catch {
+      invalidatePublicBootstrap();
       clearWriterToken();
       return { success: true };
     }
@@ -1267,9 +1323,7 @@ export const api = {
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
   }> {
-    const res = await fetch('/api/homepage', { cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to load homepage data');
-    return res.json();
+    return (await getPublicBootstrap()).homepage;
   },
 
   async getAdminHomepageData(): Promise<{
