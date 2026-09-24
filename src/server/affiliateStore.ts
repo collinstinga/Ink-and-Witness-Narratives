@@ -1449,9 +1449,23 @@ export const affiliateStore = {
       throw new Error(`Available balance (KES ${available.toLocaleString()}) has not reached the minimum payout threshold of KES ${minThreshold.toLocaleString()}.`);
     }
 
-    const amount = requestedAmountKes ? Math.min(requestedAmountKes, available) : available;
-    if (amount <= 0) {
-      throw new Error("Payout amount must be greater than zero.");
+    const amount = requestedAmountKes === undefined ? available : requestedAmountKes;
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      throw new Error("Payout amount must be a whole Kenyan-shilling amount greater than zero.");
+    }
+    if (amount < minThreshold) {
+      throw new Error(`Payout amount must be at least the configured minimum of KES ${minThreshold.toLocaleString()}.`);
+    }
+    if (amount > available) {
+      throw new Error(`Payout amount cannot exceed the available balance of KES ${available.toLocaleString()}.`);
+    }
+
+    const activePayout = cachedPayouts.find(payout =>
+      payout.affiliateId === affiliate.id
+      && ['PENDING', 'APPROVED', 'PROCESSING'].includes(payout.status)
+    );
+    if (activePayout) {
+      throw new Error(`A payout request for KES ${activePayout.amountKes.toLocaleString()} is already awaiting processing.`);
     }
 
     // Find all approved un-paid commissions for this affiliate

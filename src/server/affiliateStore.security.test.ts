@@ -174,6 +174,32 @@ describe('affiliate store credential boundaries', () => {
     expect(firestore.setDoc).not.toHaveBeenCalled();
   });
 
+  it('enforces the configured payout minimum and prevents duplicate active requests', async () => {
+    const previousThreshold = affiliateStore.getSettings().minPayoutThresholdKes;
+    const threshold = 750;
+    await affiliateStore.saveSettings({ minPayoutThresholdKes: threshold }, 'Payout Enforcement Test');
+
+    const affiliate = await affiliateStore.createAffiliate({
+      name: 'Payout Enforcement Affiliate',
+      email: 'payout-enforcement@example.test',
+      phone: '254700000010',
+      passwordHash: TEST_HASH
+    });
+    affiliateStore.updateAffiliate(affiliate.id, { balanceAvailableKes: 2_000 }, 'Payout Enforcement Test');
+
+    expect(() => affiliateStore.requestPayout(affiliate.id, threshold - 1)).toThrow(/at least the configured minimum/i);
+    expect(() => affiliateStore.requestPayout(affiliate.id, 2_001)).toThrow(/cannot exceed the available balance/i);
+    expect(() => affiliateStore.requestPayout(affiliate.id, 0)).toThrow(/greater than zero/i);
+    expect(() => affiliateStore.requestPayout(affiliate.id, 1_000.5)).toThrow(/whole Kenyan-shilling amount/i);
+
+    const payout = affiliateStore.requestPayout(affiliate.id, 1_250);
+    expect(payout.amountKes).toBe(1_250);
+    expect(() => affiliateStore.requestPayout(affiliate.id, 750)).toThrow(/already awaiting processing/i);
+
+    affiliateStore.processPayout(payout.id, 'reject', undefined, 'Test cleanup', 'Payout Enforcement Test');
+    await affiliateStore.saveSettings({ minPayoutThresholdKes: previousThreshold }, 'Payout Enforcement Test Cleanup');
+  });
+
   it('does not publish password hashes through list or audit responses', async () => {
     const created = await affiliateStore.createAffiliate({
       name: 'Security Test Affiliate',

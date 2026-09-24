@@ -996,6 +996,42 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 Affiliate Payout Requests Queue
               </h3>
 
+              {settingsForm && (
+                <form
+                  onSubmit={handleSaveSettings}
+                  className="rounded-xl border border-cyan-900/70 bg-cyan-950/20 p-4"
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                    <div className="flex-1">
+                      <label className="block text-xs font-mono text-cyan-200 mb-1" htmlFor="payout-threshold-quick-setting">
+                        Minimum affiliate payout request (KES)
+                      </label>
+                      <input
+                        id="payout-threshold-quick-setting"
+                        type="number"
+                        required
+                        min={1}
+                        max={10000000}
+                        step={1}
+                        value={settingsForm.minPayoutThresholdKes}
+                        onChange={(e) => updateSettingsForm({ minPayoutThresholdKes: Number(e.target.value) })}
+                        className="w-full sm:max-w-xs bg-slate-950 border border-cyan-800/80 rounded-xl px-3.5 py-2 text-sm text-cyan-300 font-mono font-bold focus:outline-none focus:border-cyan-400"
+                      />
+                      <p className="mt-1 text-[10px] font-mono text-slate-400">
+                        Affiliates cannot submit a request below this amount. You can change it whenever your payout policy changes.
+                      </p>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={savingSettings || !settingsDirty}
+                      className="rounded-xl bg-cyan-600 px-4 py-2.5 text-xs font-mono font-semibold text-white transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {savingSettings ? 'Saving...' : settingsDirty ? 'Save payout minimum' : 'Payout minimum saved'}
+                    </button>
+                  </div>
+                </form>
+              )}
+
               {(!summary?.payouts || summary.payouts.length === 0) ? (
                 <div className="py-16 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-400 text-xs">
                   No payout requests recorded.

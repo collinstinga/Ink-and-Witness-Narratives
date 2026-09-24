@@ -47,6 +47,7 @@ import {
 } from "./src/server/affiliateCredentials.js";
 import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/server/auth.js";
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
+import { isAllowedPublicWriteOrigin } from "./src/server/publicWriteOrigin.js";
 import { ImageValidationError, validateImageDataUrl } from "./src/server/imageSecurity.js";
 import { hasUnsafeMpesaSecretUpdate } from "./src/server/mpesaSecretStorage.js";
 import { isManualAccessBearerLicense } from "./src/server/manualAccessSecurity.js";
@@ -209,20 +210,32 @@ function newsletterResultPage(title: string, message: string): string {
 
 function requireSameOriginPublicWrite(req: Request, res: Response, next: NextFunction) {
   const origin = req.get('origin');
-  const fetchSite = req.get('sec-fetch-site');
   if (!origin) {
     return isProduction
       ? res.status(403).json({ success: false, error: 'This request must originate from Ink & Witness.' })
       : next();
   }
-  try {
-    const originUrl = new URL(origin);
-    const requestUrl = new URL(resolvePublicBaseUrl(req));
-    const crossSite = Boolean(fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite));
-    if (originUrl.origin !== requestUrl.origin || crossSite) {
-      return res.status(403).json({ success: false, error: 'This request must originate from Ink & Witness.' });
-    }
-  } catch {
+
+  const forwardedHost = req.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const host = forwardedHost || req.get('host');
+  const forwardedProtocol = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const protocol = forwardedProtocol || req.protocol || (isProduction ? 'https' : 'http');
+  const configuredBaseUrl = (
+    process.env.PUBLIC_BASE_URL
+    || process.env.APP_BASE_URL
+    || process.env.APP_URL
+    || process.env.VITE_PUBLIC_BASE_URL
+    || ''
+  ).trim();
+
+  const allowed = Boolean(host) && isAllowedPublicWriteOrigin({
+    origin,
+    requestOrigin: `${protocol}://${host}`,
+    configuredBaseUrl: configuredBaseUrl || undefined,
+    fetchSite: req.get('sec-fetch-site'),
+    production: isProduction
+  });
+  if (!allowed) {
     return res.status(403).json({ success: false, error: 'This request must originate from Ink & Witness.' });
   }
   return next();
@@ -4357,8 +4370,13 @@ ${currentDraft || prompt}
       const affiliate = (req as any).affiliate;
       const { amount, amountKes, notes } = req.body;
       const requestedAmt = amountKes !== undefined ? amountKes : amount;
+      const hasRequestedAmount = amountKes !== undefined || amount !== undefined;
 
-      const payout = store.affiliates.requestPayout(affiliate.id, requestedAmt ? Number(requestedAmt) : undefined, notes);
+      const payout = store.affiliates.requestPayout(
+        affiliate.id,
+        hasRequestedAmount ? Number(requestedAmt) : undefined,
+        notes
+      );
       const dashboard = store.affiliates.getAffiliateDashboard(affiliate.id);
 
       res.json({
