@@ -25,7 +25,7 @@ Completed locally: current collection/payment/access/editor/homepage/auth bounda
 
 ### UP-02 — Newsletter and reader retention
 
-Status: release integration complete locally; production provider activation awaiting owner terms acceptance
+Status: complete and active in production
 
 - Add consent-based subscriber records with unique normalized-email index, interests, work follows, status, timestamps, and signed unsubscribe flow.
 - Add writer-only subscriber search, segmentation, composition, preview, test-send, resumable campaign sending, and delivery history.
@@ -36,7 +36,9 @@ Checkpoint: subscription/unsubscribe security tests, campaign idempotency tests,
 
 Completed locally: double-opt-in subscriber storage, signed unsubscribe, server-only Resend adapter, writer subscriber/campaign UI, audience segmentation, preview/test send, deterministic delivery records, resumable sending, and provider-disabled public signup. Publishing now exposes an off-by-default release checkbox, creates one immutable campaign per piece, sends only to confirmed active subscribers, and can resume from both the editor and Newsletter history without duplicating completed deliveries. Retryable provider errors leave the current delivery queued. Signed Resend webhooks reconcile sent/delivered/failed/bounced/complained/suppressed outcomes, and bounce/complaint/suppression events stop future sends to that subscriber.
 
-External activation checkpoint: the Vercel Marketplace Resend resource is specified as the free plan for `inkandwitness-narratives.co.ke` in `eu-west-1`. Provisioning has not occurred because Vercel requires the account owner to review and accept the Resend Marketplace terms in the browser. No terms were accepted by the agent, no provider resource was created, and no production newsletter environment values were changed.
+Production activation checkpoint (2026-09-24): Vercel Marketplace resource `ink-witness-newsletter` is provisioned on Resend's free plan, attached only to Production, and configured in `eu-west-1`. The custom sending domain `inkandwitness-narratives.co.ke` is verified with DKIM plus SPF MX/TXT records on Vercel DNS. Production has server-only `RESEND_API_KEY` and `RESEND_WEBHOOK_SECRET`, plus the sender `Ink & Witness Narratives <updates@inkandwitness-narratives.co.ke>`.
+
+The signed Resend webhook uses the canonical non-redirecting endpoint `https://www.inkandwitness-narratives.co.ke/api/newsletter/webhooks/resend`. A first safety test exposed the apex-to-`www` HTTP 308 redirect before activation; the endpoint was corrected, then a fresh provider test to Resend's non-delivering `delivered@resend.dev` address produced one `email.sent` and one `email.delivered` event, each accepted by production with HTTP 200. No subscriber received a test message. `NEWSLETTER_ENABLED` stayed `false` until the domain, sender, signed webhook, and disabled-state deployment gates passed, and was enabled only for the final deployment.
 
 ### UP-03 — Canonical sales intelligence
 
@@ -84,14 +86,21 @@ Completed locally: safe shared Markdown rendering plus selection-aware bold/ital
 
 An additive chapter-schema checkpoint exists on branch `fix/homepage-manual-grant-piece-scope-2026-09-16` at commit `84f1df5`. It is intentionally excluded from production until its routes, editor workflow, reader table of contents, access controls, and regression tests are complete.
 
-## Verified local checkpoint — newsletter/editor foundation
+## Verified newsletter/editor release checkpoint
 
 - TypeScript: passed (`tsc --noEmit`).
 - Full automated suite: 403/403 passed across 43 files using two workers; the newsletter-focused suite passed 18/18 after the final provider-retry classification change.
 - Production build: Vite client and bundled server passed.
 - Diff integrity: `git diff --check` passed (line-ending warnings only).
 - React review: publish opt-in and delivery-resume changes passed the hooks, state ownership, accessibility, rendering, and TypeScript checklist.
-- Deployment/provider state: no Firestore migration, subscriber send, or production environment write was performed. Newsletter remains disabled until the Resend resource/domain, sender identity, API key, and webhook signing secret are configured.
+- Production commit: `226f0bb9d9e1011b85fac987096539ef3e49f77a` on `main` (`feat: add safe release newsletter delivery`).
+- Disabled-state production gate: deployment `dpl_8dPC2zLJAkFG5NLzaBEwRKW7HJis` returned homepage 200, newsletter config `enabled:false`, unsigned webhook 400, unauthenticated writer route 401, and disabled subscribe 503 without a subscriber write.
+- Active production deployment: `dpl_7wcvVqFqjsBPXcbHCJZ4AEXWSi7z`, custom domain `https://www.inkandwitness-narratives.co.ke`, status Ready on Node.js 24.x.
+- Active-state verification: newsletter config returned `enabled:true` with double opt-in, the public subscription form rendered, signed provider `sent`/`delivered` callbacks returned 200, unsigned callbacks returned 400, and writer campaign routes remained 401 without authentication.
+- Existing-content regression check: 10 published pieces, 3 Most Selling entries, and Piece of the Week remained available after deployment. No production migration or subscriber campaign was run.
+- Runtime log scan: no newsletter 5xx failure. Vercel classifies the existing Node `url.parse()` deprecation warning as an error even when requests return 200; this remains a separate maintenance item.
+- Visual residual: the legacy author cover `/uploads/author_cover-1786702522341-772b89830648.jpg` still returns 404, while the public-page fallback renders. This predates the newsletter release and remains in the media-persistence queue.
+- Rollback: set Production `NEWSLETTER_ENABLED=false` and redeploy to pause signup, confirmation, release, and campaign sends. If all outbound email—including the authenticated test-send route—must stop, disconnect/rotate the Resend API key as well. Deployment `dpl_8dPC2zLJAkFG5NLzaBEwRKW7HJis` is the verified disabled-state rollback artifact; `dpl_8ApxsVbDmkLCcC5C37jGYx7qpC3Z` is the pre-newsletter production baseline.
 
 ## Affiliate payout threshold durability hotfix
 
@@ -116,7 +125,7 @@ Checkpoint: category configuration, adult-content separation, preference fallbac
 
 ### UP-06 — Production migration and end-to-end release
 
-Status: pending
+Status: newsletter production release complete; sales backfill and later upgrade stages remain pending
 
 - Run read-only migration reports, create a recovery snapshot, then execute bounded idempotent backfills.
 - Deploy, verify the custom domain, inspect production logs, and test the complete visitor-to-publication journey.
@@ -135,4 +144,4 @@ Status: pending
 
 ## Resume instructions
 
-Resume by completing the UP-02 external activation gate: accept the Vercel Marketplace terms, provision the specified free Resend resource, verify the sender domain, configure the production sender and signed webhook, deploy the verified release commit, and exercise double opt-in plus a controlled test delivery. Then resume UP-04 from its isolated chapter-schema checkpoint. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing. Do not run the sales backfill until the UP-06 production snapshot and release gate.
+UP-02 is deployed and active. Resume UP-04 from its isolated chapter-schema checkpoint only after rebasing it onto production commit `226f0bb9d9e1011b85fac987096539ef3e49f77a`; do not merge the old checkpoint branch wholesale. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. Preserve the release-notification opt-in and standalone-piece compatibility while implementing chapter routes, editor workflow, reader table of contents, and access tests. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing. Do not run the sales backfill until the remaining UP-06 production snapshot and release gate.
