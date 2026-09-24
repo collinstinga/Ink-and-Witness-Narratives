@@ -64,13 +64,19 @@ const affiliateMocks = vi.hoisted(() => ({
   getAffiliateByCode: vi.fn(),
   getAffiliateById: vi.fn(),
   getAffiliateByIdFresh: vi.fn(),
+  getCommissions: vi.fn(),
+  getPayouts: vi.fn(),
+  getCampaigns: vi.fn(),
+  getAuditLogs: vi.fn(),
   createAffiliate: vi.fn(),
   updateAffiliate: vi.fn(),
   updateAffiliateCredential: vi.fn(),
   setAffiliateStatus: vi.fn(),
   toggleAffiliateLinks: vi.fn(),
   getAffiliateDashboard: vi.fn(),
-  getSettings: vi.fn()
+  getSettings: vi.fn(),
+  getSettingsFresh: vi.fn(),
+  saveSettings: vi.fn()
 }));
 
 const storeMocks = vi.hoisted(() => {
@@ -107,6 +113,7 @@ vi.mock('./src/server/store.js', () => ({
 }));
 vi.mock('./src/server/affiliateStore.js', () => ({
   affiliateStore: affiliateMocks,
+  AffiliateSettingsValidationError: class AffiliateSettingsValidationError extends Error {},
   sanitizeAffiliateForResponse: (value: Record<string, unknown>) => {
     const { passwordHash: _passwordHash, sessionVersion: _sessionVersion, ...safe } = value;
     return safe;
@@ -171,6 +178,10 @@ describe('affiliate session route boundaries', () => {
     affiliateMocks.getAffiliateByCode.mockReturnValue(undefined);
     affiliateMocks.getAffiliateById.mockReturnValue({ ...privateAffiliate });
     affiliateMocks.getAffiliateByIdFresh.mockResolvedValue({ ...privateAffiliate });
+    affiliateMocks.getCommissions.mockReturnValue([]);
+    affiliateMocks.getPayouts.mockReturnValue([]);
+    affiliateMocks.getCampaigns.mockReturnValue([]);
+    affiliateMocks.getAuditLogs.mockReturnValue([]);
     affiliateMocks.createAffiliate.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.updateAffiliate.mockImplementation((_id, patch) => ({
       ...privateAffiliate,
@@ -216,6 +227,16 @@ describe('affiliate session route boundaries', () => {
       minPayoutThresholdKes: 1000,
       defaultCommissionRate: 15
     });
+    affiliateMocks.getSettingsFresh.mockResolvedValue({
+      allowSelfRegistration: true,
+      minPayoutThresholdKes: 1000,
+      defaultCommissionRate: 15
+    });
+    affiliateMocks.saveSettings.mockImplementation(async patch => ({
+      allowSelfRegistration: true,
+      defaultCommissionRate: 15,
+      minPayoutThresholdKes: Number(patch.minPayoutThresholdKes)
+    }));
   });
 
   it('uses cacheable verification for GET and force-fresh verification for mutations', async () => {
@@ -378,6 +399,61 @@ describe('affiliate session route boundaries', () => {
     expect(affiliateMocks.updateAffiliate).not.toHaveBeenCalled();
     expect(affiliateMocks.setAffiliateStatus).not.toHaveBeenCalled();
     expect(affiliateMocks.toggleAffiliateLinks).not.toHaveBeenCalled();
+  });
+
+  it('routes affiliate settings saves before the dynamic affiliate ID route', async () => {
+    affiliateMocks.getAffiliateById.mockImplementationOnce(id =>
+      id === privateAffiliate.id ? { ...privateAffiliate } : undefined
+    );
+
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/settings`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ minPayoutThresholdKes: 500 })
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      success: true,
+      settings: { minPayoutThresholdKes: 500 }
+    });
+    expect(affiliateMocks.saveSettings).toHaveBeenCalledWith(
+      { minPayoutThresholdKes: 500 },
+      'Admin (Jake)'
+    );
+    expect(affiliateMocks.getAffiliateById).not.toHaveBeenCalledWith('settings');
+    expect(affiliateMocks.updateAffiliate).not.toHaveBeenCalled();
+  });
+
+  it('keeps named affiliate admin reads ahead of the dynamic affiliate detail route', async () => {
+    for (const path of ['settings', 'commissions', 'payouts', 'campaigns', 'audit-logs']) {
+      const response = await fetch(`${baseUrl}/api/admin/affiliates/${path}`, {
+        headers: { cookie: `iw_session=${adminSessionToken}` }
+      });
+      expect(response.status, path).toBe(200);
+      if (path === 'settings') {
+        expect(response.headers.get('cache-control')).toBe('private, no-store');
+      }
+    }
+
+    expect(affiliateMocks.getAffiliateById).not.toHaveBeenCalled();
+    expect(affiliateMocks.getSettingsFresh).toHaveBeenCalled();
+    expect(affiliateMocks.getCommissions).toHaveBeenCalled();
+    expect(affiliateMocks.getPayouts).toHaveBeenCalled();
+    expect(affiliateMocks.getCampaigns).toHaveBeenCalled();
+    expect(affiliateMocks.getAuditLogs).toHaveBeenCalled();
+
+    const detailResponse = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    expect(detailResponse.status).toBe(200);
+    expect(affiliateMocks.getAffiliateById).toHaveBeenCalledWith(privateAffiliate.id);
   });
 
   it('accepts an unchanged normalized email without forwarding identity mutation', async () => {

@@ -4401,6 +4401,7 @@ ${currentDraft || prompt}
   app.get("/api/admin/affiliates/summary", requireAdminAuth, (_req: Request, res: Response) => {
     try {
       const summary = store.affiliates.getAdminAffiliatesSummary();
+      res.setHeader('Cache-Control', 'private, no-store');
       res.json(summary);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch admin affiliates summary." });
@@ -4418,27 +4419,43 @@ ${currentDraft || prompt}
     }
   });
 
-  // Admin: Get Affiliate by ID
-  app.get("/api/admin/affiliates/:id", requireAdminAuth, (req: Request, res: Response) => {
+  // Admin: Settings (GET, POST, PUT). These static routes must be declared
+  // before /api/admin/affiliates/:id or Express will treat "settings" as an
+  // affiliate ID and the writer portal will receive "Affiliate not found."
+  const handleAdminSettings = async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
-      const affiliate = store.affiliates.getAffiliateById(id);
-      if (!affiliate) {
-        return res.status(404).json({ error: "Affiliate not found." });
-      }
-
-      const commissions = store.affiliates.getCommissions({ affiliateId: id });
-      const payouts = store.affiliates.getPayouts({ affiliateId: id });
-
+      const settings = await store.affiliates.saveSettings(req.body, 'Admin (Jake)');
       res.json({
-        affiliate: sanitizeAffiliateForResponse(affiliate),
-        commissions,
-        payouts
+        success: true,
+        settings,
+        message: "Affiliate system settings updated successfully."
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to fetch affiliate details." });
+      if (err instanceof AffiliateSettingsValidationError) {
+        res.status(400).json({ success: false, error: err.message });
+        return;
+      }
+      console.error('[AffiliateSettings] Failed to persist settings:', err);
+      res.status(503).json({
+        success: false,
+        error: "Affiliate settings could not be saved right now. Please try again."
+      });
+    }
+  };
+
+  app.get("/api/admin/affiliates/settings", requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const settings = await store.affiliates.getSettingsFresh();
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json(settings);
+    } catch (err: any) {
+      console.error('[AffiliateSettings] Failed to load current settings:', err);
+      res.status(503).json({ success: false, error: "Affiliate settings could not be loaded right now. Please retry." });
     }
   });
+
+  app.post("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
+  app.put("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
 
   // Admin: Create Affiliate
   app.post("/api/admin/affiliates", requireAdminAuth, async (req: Request, res: Response) => {
@@ -4719,40 +4736,6 @@ ${currentDraft || prompt}
     }
   });
 
-  // Admin: Settings (GET, POST, PUT)
-  const handleAdminSettings = async (req: Request, res: Response) => {
-    try {
-      const settings = await store.affiliates.saveSettings(req.body, 'Admin (Jake)');
-      res.json({
-        success: true,
-        settings,
-        message: "Affiliate system settings updated successfully."
-      });
-    } catch (err: any) {
-      if (err instanceof AffiliateSettingsValidationError) {
-        res.status(400).json({ success: false, error: err.message });
-        return;
-      }
-      console.error('[AffiliateSettings] Failed to persist settings:', err);
-      res.status(503).json({
-        success: false,
-        error: "Affiliate settings could not be saved right now. Please try again."
-      });
-    }
-  };
-
-  app.get("/api/admin/affiliates/settings", requireAdminAuth, (_req: Request, res: Response) => {
-    try {
-      const settings = store.affiliates.getSettings();
-      res.json(settings);
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch settings." });
-    }
-  });
-
-  app.post("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
-  app.put("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
-
   // Admin: Audit Logs
   app.get("/api/admin/affiliates/audit-logs", requireAdminAuth, (req: Request, res: Response) => {
     try {
@@ -4761,6 +4744,30 @@ ${currentDraft || prompt}
       res.json(logs);
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message || "Failed to fetch audit logs." });
+    }
+  });
+
+  // Admin: Get Affiliate by ID. Keep this catch-all single-segment route
+  // after every named affiliate endpoint so values such as "campaigns" and
+  // "audit-logs" can never be mistaken for affiliate IDs.
+  app.get("/api/admin/affiliates/:id", requireAdminAuth, (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const affiliate = store.affiliates.getAffiliateById(id);
+      if (!affiliate) {
+        return res.status(404).json({ error: "Affiliate not found." });
+      }
+
+      const commissions = store.affiliates.getCommissions({ affiliateId: id });
+      const payouts = store.affiliates.getPayouts({ affiliateId: id });
+
+      res.json({
+        affiliate: sanitizeAffiliateForResponse(affiliate),
+        commissions,
+        payouts
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to fetch affiliate details." });
     }
   });
 

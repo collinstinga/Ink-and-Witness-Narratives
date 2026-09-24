@@ -126,11 +126,20 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     setError('');
 
     try {
-      const res = await api.getAdminAffiliatesSummary();
+      const [res, freshSettings] = await Promise.all([
+        api.getAdminAffiliatesSummary(),
+        isRefresh ? Promise.resolve(null) : api.getAdminAffiliateSettings()
+      ]);
       if (requestId !== summaryRequestIdRef.current) return;
-      setSummary(res);
-      if (res.settings && !settingsDirtyRef.current) {
-        setSettingsForm(res.settings);
+      const currentSettings = freshSettings || res.settings;
+      setSummary(current => isRefresh && current?.settings
+        ? { ...res, settings: current.settings }
+        : { ...res, settings: currentSettings });
+      // A background refresh must not overwrite the settings returned by a
+      // successful durable save with an older cached summary from another
+      // warm serverless instance.
+      if (currentSettings && !settingsDirtyRef.current && !isRefresh) {
+        setSettingsForm(currentSettings);
       }
     } catch (err: any) {
       if (requestId === summaryRequestIdRef.current) {

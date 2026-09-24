@@ -2133,6 +2133,7 @@ export const api = {
     return safeFetchJson<AdminAffiliatesSummary>(
       '/api/admin/affiliates/summary',
       {
+        cache: 'no-store',
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load affiliates summary.'
@@ -2378,6 +2379,7 @@ export const api = {
     return safeFetchJson<AffiliateSettings>(
       '/api/admin/affiliates/settings',
       {
+        cache: 'no-store',
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load affiliate settings.'

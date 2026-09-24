@@ -148,6 +148,22 @@ describe('affiliate store credential boundaries', () => {
     }, 'Threshold Durability Test Cleanup');
   });
 
+  it('refreshes payout settings from the durable source of truth', async () => {
+    const previousSettings = affiliateStore.getSettings();
+    const durableThreshold = previousSettings.minPayoutThresholdKes === 4321 ? 4322 : 4321;
+    firestore.documents.set('site_configs/affiliate_settings', {
+      ...previousSettings,
+      minPayoutThresholdKes: durableThreshold
+    });
+
+    const fresh = await affiliateStore.getSettingsFresh();
+
+    expect(fresh.minPayoutThresholdKes).toBe(durableThreshold);
+    expect(affiliateStore.getSettings().minPayoutThresholdKes).toBe(durableThreshold);
+
+    await affiliateStore.saveSettings(previousSettings, 'Fresh Settings Test Cleanup');
+  });
+
   it('keeps the existing payout threshold when durable settings persistence fails', async () => {
     const before = affiliateStore.getSettings();
     const attemptedThreshold = before.minPayoutThresholdKes === 5555 ? 5556 : 5555;

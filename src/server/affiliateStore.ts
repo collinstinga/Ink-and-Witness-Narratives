@@ -522,6 +522,15 @@ export const affiliateStore = {
     return { ...cachedSettings };
   },
 
+  async getSettingsFresh(): Promise<AffiliateSettings> {
+    const persisted = await getFirestoreDoc<AffiliateSettings>('site_configs', 'affiliate_settings');
+    if (persisted) {
+      cachedSettings = normalizeAffiliateSettings(persisted);
+      writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+    }
+    return { ...cachedSettings };
+  },
+
   async saveSettings(patch: Partial<AffiliateSettings>, actor = 'Admin'): Promise<AffiliateSettings> {
     validateAffiliateSettingsPatch(patch);
     const prev = { ...cachedSettings };
