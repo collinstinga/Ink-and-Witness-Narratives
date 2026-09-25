@@ -720,7 +720,6 @@ function getGeminiClient(): GoogleGenAI | null {
 }
 
 export async function createApp() {
-  await ensureStoreInitialized();
   const app = express();
 
   // Trust Cloud Run / reverse proxy for accurate client IP resolution & rate limiting
@@ -772,8 +771,6 @@ export async function createApp() {
     }
     return next(err);
   });
-  app.use(loadSessionUser);
-
   // Rate limiters for security
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -909,28 +906,6 @@ export async function createApp() {
     next();
   });
 
-  // The public catalogue does not need affiliate ledgers. Hydrate that larger
-  // subsystem only when a referral, affiliate, payment, or writer-admin request
-  // actually needs it, while coalescing concurrent first requests.
-  app.use(async (req: Request, res: Response, next: NextFunction) => {
-    const affiliateDependent =
-      req.path.startsWith('/api/affiliate') ||
-      req.path.startsWith('/api/admin') ||
-      req.path.startsWith('/api/mpesa') ||
-      req.path.startsWith('/api/payments') ||
-      req.path.startsWith('/r/');
-    if (!affiliateDependent) return next();
-    try {
-      await store.ensureAffiliateStoreInitialized();
-      return next();
-    } catch (error) {
-      console.error('[Affiliate Store] Deferred initialization failed:', error);
-      return res.status(503).json({
-        error: 'Affiliate and payment services are temporarily unavailable. Please retry.'
-      });
-    }
-  });
-
   const servePersistentAsset = async (req: Request, res: Response) => {
     try {
       const rawId = req.params.assetId || req.params.filename;
@@ -961,6 +936,47 @@ export async function createApp() {
   app.get('/uploads/:filename', servePersistentAsset);
   // Local-development fallback for files not yet migrated into Firestore.
   app.use('/uploads', express.static(path.join(process.cwd(), 'data', 'uploads')));
+
+  // Immutable image delivery only needs a targeted uploaded_assets lookup.
+  // Keep it ahead of the full store and session middleware so a cold cover
+  // request does not scan the catalogue, users, homepage, likes, and comments
+  // or perform an unnecessary authentication lookup for every image.
+  app.use(async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      await ensureStoreInitialized();
+      return next();
+    } catch (error) {
+      console.error('[Data Store] Deferred initialization failed:', error);
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      return res.status(503).json({
+        error: 'The site data service is temporarily unavailable. Please retry.'
+      });
+    }
+  });
+  app.use(loadSessionUser);
+
+  // The public catalogue does not need affiliate ledgers. Hydrate that larger
+  // subsystem only when a referral, affiliate, payment, or writer-admin request
+  // actually needs it, while coalescing concurrent first requests.
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    const affiliateDependent =
+      req.path.startsWith('/api/affiliate') ||
+      req.path.startsWith('/api/admin') ||
+      req.path.startsWith('/api/mpesa') ||
+      req.path.startsWith('/api/payments') ||
+      req.path.startsWith('/r/');
+    if (!affiliateDependent) return next();
+    try {
+      await store.ensureAffiliateStoreInitialized();
+      return next();
+    } catch (error) {
+      console.error('[Affiliate Store] Deferred initialization failed:', error);
+      return res.status(503).json({
+        error: 'Affiliate and payment services are temporarily unavailable. Please retry.'
+      });
+    }
+  });
 
   // ==========================================
   // PUBLIC API ROUTES
