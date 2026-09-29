@@ -25,9 +25,80 @@ import { MyLibraryModal } from './components/MyLibraryModal.js';
 import { TipAuthorModal } from './components/TipAuthorModal.js';
 import { SupportModal } from './components/SupportModal.js';
 import { SignInModal } from './components/auth/SignInModal.js';
-import { WriterDashboard } from './components/writer/WriterDashboard.js';
-import { AffiliatePortal } from './components/affiliate/AffiliatePortal.js';
 import { initReferralTracking } from './utils/affiliateReferral.js';
+
+const WriterDashboard = React.lazy(async () => {
+  const module = await import('./components/writer/WriterDashboard.js');
+  return { default: module.WriterDashboard };
+});
+
+const AffiliatePortal = React.lazy(async () => {
+  const module = await import('./components/affiliate/AffiliatePortal.js');
+  return { default: module.AffiliatePortal };
+});
+
+function DeferredFeatureFallback({ label }: { label: string }) {
+  return (
+    <div
+      className="fixed inset-0 z-[120] grid place-items-center bg-[#080d17]/95 px-6 text-slate-100"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="rounded-2xl border border-sky-500/30 bg-slate-950/90 px-6 py-5 text-center shadow-2xl">
+        <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+        <p className="font-mono text-sm text-sky-200">Loading {label}…</p>
+      </div>
+    </div>
+  );
+}
+
+type DeferredFeatureBoundaryProps = {
+  label: string;
+  children: React.ReactNode;
+};
+
+class DeferredFeatureBoundary extends React.Component<
+  DeferredFeatureBoundaryProps,
+  { failed: boolean }
+> {
+  declare readonly props: DeferredFeatureBoundaryProps;
+
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error(`[DeferredFeatureBoundary] Failed to load ${this.props.label}.`, error);
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div
+          className="fixed inset-0 z-[120] grid place-items-center bg-[#080d17]/95 px-6 text-slate-100"
+          role="alert"
+        >
+          <div className="max-w-md rounded-2xl border border-rose-500/30 bg-slate-950/90 px-6 py-5 text-center shadow-2xl">
+            <p className="font-mono text-sm text-rose-200">
+              {this.props.label} could not finish loading.
+            </p>
+            <button
+              type="button"
+              className="mt-4 rounded-lg bg-sky-500 px-4 py-2 font-semibold text-slate-950 transition hover:bg-sky-400"
+              onClick={() => window.location.reload()}
+            >
+              Reload safely
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 // Primary Navigation & History State Interface
 export interface NavState {
@@ -858,26 +929,30 @@ export default function App() {
   if (isWriterStudioOpen) {
     const historyState = (window.history.state as any) || {};
     return (
-      <WriterDashboard
-        onClose={handleCloseWriterStudio}
-        currentUser={currentUser}
-        onLoginSuccess={handleAuthSuccess}
-        onLogout={handleLogout}
-        onPreviewArticle={(art) => {
-          handleOpenReader(art);
-        }}
-        initialTab={historyState.writerTab || undefined}
-        initialSubTab={historyState.writerSubTab || undefined}
-        initialPieceId={historyState.writerPieceId || null}
-        onNavigateTab={(tab, subTab, pieceId) => {
-          navigate({
-            isWriterStudioOpen: true,
-            writerTab: tab,
-            writerSubTab: subTab,
-            writerPieceId: pieceId
-          }, 'replace');
-        }}
-      />
+      <DeferredFeatureBoundary label="Writer Studio">
+        <React.Suspense fallback={<DeferredFeatureFallback label="Writer Studio" />}>
+          <WriterDashboard
+            onClose={handleCloseWriterStudio}
+            currentUser={currentUser}
+            onLoginSuccess={handleAuthSuccess}
+            onLogout={handleLogout}
+            onPreviewArticle={(art) => {
+              handleOpenReader(art);
+            }}
+            initialTab={historyState.writerTab || undefined}
+            initialSubTab={historyState.writerSubTab || undefined}
+            initialPieceId={historyState.writerPieceId || null}
+            onNavigateTab={(tab, subTab, pieceId) => {
+              navigate({
+                isWriterStudioOpen: true,
+                writerTab: tab,
+                writerSubTab: subTab,
+                writerPieceId: pieceId
+              }, 'replace');
+            }}
+          />
+        </React.Suspense>
+      </DeferredFeatureBoundary>
     );
   }
 
@@ -1167,11 +1242,17 @@ export default function App() {
       />
 
       {/* 6. Secure Affiliate & Referral Sales Portal */}
-      <AffiliatePortal
-        isOpen={isAffiliatePortalOpen}
-        onClose={handleCloseAffiliates}
-        articles={articles}
-      />
+      {isAffiliatePortalOpen && (
+        <DeferredFeatureBoundary label="Affiliate Portal">
+          <React.Suspense fallback={<DeferredFeatureFallback label="Affiliate Portal" />}>
+            <AffiliatePortal
+              isOpen
+              onClose={handleCloseAffiliates}
+              articles={articles}
+            />
+          </React.Suspense>
+        </DeferredFeatureBoundary>
+      )}
 
       {/* 7. Unified Authentication Modal (Public /sign-in) */}
       <SignInModal
