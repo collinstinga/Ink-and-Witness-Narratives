@@ -6,6 +6,11 @@ interface VercelRewrite {
   destination: string;
 }
 
+interface VercelHeaderRule {
+  source: string;
+  headers: Array<{ key: string; value: string }>;
+}
+
 describe('Vercel affiliate routing', () => {
   it('rewrites /r/:code to the affiliate redirect API before the API catch-all', () => {
     const config = JSON.parse(
@@ -21,5 +26,26 @@ describe('Vercel affiliate routing', () => {
       destination: '/api/index?path=affiliate/redirect/:code'
     });
     expect(apiCatchAllIndex).toBeGreaterThan(affiliateRewriteIndex);
+  });
+});
+
+describe('Vercel static asset caching', () => {
+  it('caches only content-hashed Vite assets immutably in the browser', () => {
+    const config = JSON.parse(
+      readFileSync(new URL('./vercel.json', import.meta.url), 'utf8')
+    ) as { headers?: VercelHeaderRule[] };
+    const headerRules = config.headers ?? [];
+    const cacheControlRules = headerRules.flatMap(rule =>
+      rule.headers
+        .filter(header => header.key.toLowerCase() === 'cache-control')
+        .map(header => ({ source: rule.source, value: header.value }))
+    );
+
+    expect(cacheControlRules).toEqual([
+      {
+        source: '/assets/(.*)',
+        value: 'public, max-age=31536000, immutable'
+      }
+    ]);
   });
 });
