@@ -29,7 +29,12 @@ type AttributionPayload = {
   exp: number;
 };
 
-type AttributionOptions = { now?: number; signingSecret?: string; maxAgeMs?: number };
+type AttributionOptions = {
+  now?: number;
+  signingSecret?: string;
+  maxAgeMs?: number;
+  allowCrossArticle?: boolean;
+};
 
 function resolveSigningSecret(explicitSecret?: unknown): string | null {
   const hasExplicitSecret = explicitSecret !== undefined;
@@ -116,7 +121,7 @@ export function verifyAffiliateAttributionCookie(
     payload.exp <= payload.iat ||
     payload.exp - payload.iat > AFFILIATE_ATTRIBUTION_MAX_AGE_MS ||
     now > payload.exp ||
-    (normalized.articleId && normalized.articleId !== articleId)
+    (!options.allowCrossArticle && normalized.articleId && normalized.articleId !== articleId)
   ) return null;
   return { ...normalized, issuedAt: payload.iat, expiresAt: payload.exp };
 }

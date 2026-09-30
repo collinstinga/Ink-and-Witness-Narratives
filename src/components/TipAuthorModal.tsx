@@ -31,10 +31,10 @@ type TipStep = 'AMOUNT_SELECT' | 'AWAITING_PIN' | 'SUCCESS' | 'ERROR';
 type TipTab = 'STK_PUSH' | 'BUY_GOODS' | 'SEND_MONEY' | 'INTERNATIONAL';
 
 const DEFAULT_SUPPORTED_CURRENCIES: SupportedCurrency[] = [
-  { code: 'KES', name: 'Kenyan Shilling', symbol: 'KSh', flag: '🇰🇪', defaultPresets: [300, 500, 1000, 2500, 5000] },
-  { code: 'USD', name: 'US Dollar', symbol: '$', flag: '🇺🇸', defaultPresets: [3, 5, 10, 25, 50] },
-  { code: 'EUR', name: 'Euro', symbol: '€', flag: '🇪🇺', defaultPresets: [3, 5, 10, 25, 50] },
-  { code: 'GBP', name: 'British Pound', symbol: '£', flag: '🇬🇧', defaultPresets: [3, 5, 10, 20, 40] },
+  { code: 'KES', name: 'Kenyan Shilling', symbol: 'KSh', flag: '🇰🇪', defaultPresets: [50, 100, 300, 500, 1000] },
+  { code: 'USD', name: 'US Dollar', symbol: '$', flag: '🇺🇸', defaultPresets: [1, 3, 5, 10, 25] },
+  { code: 'EUR', name: 'Euro', symbol: '€', flag: '🇪🇺', defaultPresets: [1, 3, 5, 10, 25] },
+  { code: 'GBP', name: 'British Pound', symbol: '£', flag: '🇬🇧', defaultPresets: [1, 3, 5, 10, 20] },
   { code: 'CAD', name: 'Canadian Dollar', symbol: 'CA$', flag: '🇨🇦', defaultPresets: [5, 10, 15, 30, 60] },
   { code: 'AUD', name: 'Australian Dollar', symbol: 'A$', flag: '🇦🇺', defaultPresets: [5, 10, 15, 35, 70] },
   { code: 'ZAR', name: 'South African Rand', symbol: 'R', flag: '🇿🇦', defaultPresets: [50, 100, 200, 500, 1000] },
@@ -65,7 +65,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
   const [rateTimestamp, setRateTimestamp] = useState<string>('');
   const [ratesLoading, setRatesLoading] = useState<boolean>(false);
   const [ratesSource, setRatesSource] = useState<string>('Live Exchange');
-  const [minTipKes, setMinTipKes] = useState<number>(300);
+  const minTipKes = 1;
 
   // Amount Selection
   const [selectedPreset, setSelectedPreset] = useState<number>(500);
@@ -103,7 +103,6 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
         }
         if (data.timestamp) setRateTimestamp(data.timestamp);
         if (data.source) setRatesSource(data.source);
-        if (data.minTipKes) setMinTipKes(data.minTipKes);
       }
     } catch (err) {
       console.warn('Could not refresh exchange rates, using fallback cache:', err);
@@ -161,18 +160,19 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
   const enteredAmount = customAmount ? parseFloat(customAmount) || 0 : selectedPreset;
   const effectiveOriginalAmount = Math.max(0, enteredAmount);
 
-  // Compute converted KES amount (rounded integer, min minTipKes)
+  // Daraja charges whole Kenyan shillings. Readers may choose any positive
+  // amount that converts to at least KSh 1.
   const convertedKesRaw = currency === 'KES' 
-    ? effectiveOriginalAmount 
+    ? Math.round(effectiveOriginalAmount)
     : Math.round(effectiveOriginalAmount * currentRateToKes);
 
   // Compute minimum in selected currency
   const minRequiredInCurrency = currency === 'KES' 
     ? minTipKes 
-    : Math.ceil((minTipKes / currentRateToKes) * 10) / 10;
+    : Math.max(0.01, Math.ceil((minTipKes / currentRateToKes) * 100) / 100);
 
   const isBelowMinimum = convertedKesRaw < minTipKes || effectiveOriginalAmount <= 0;
-  const effectiveKesAmount = Math.max(minTipKes, convertedKesRaw);
+  const effectiveKesAmount = convertedKesRaw;
 
   const handleCopyTill = () => {
     navigator.clipboard.writeText(tillNumber);
@@ -275,7 +275,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
     }
 
     if (isBelowMinimum) {
-      setErrorMessage(`The minimum tip is equivalent to KSh ${minTipKes} (${activeCurrencyObj.symbol} ${minRequiredInCurrency} ${currency}).`);
+      setErrorMessage('Enter any positive amount that converts to at least KSh 1.');
       return;
     }
 
@@ -464,7 +464,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-xs font-mono text-slate-300">
-                    Choose Tip Amount <span className="text-slate-400">({activeCurrencyObj.symbol} {minRequiredInCurrency} min)</span>:
+                    Choose a Tip Amount <span className="text-slate-400">or enter your own</span>:
                   </label>
                   <span className="text-[11px] font-mono text-emerald-400">
                     M-Pesa Till 1618656
@@ -515,12 +515,12 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
                       value={customAmount}
                       onChange={(e) => setCustomAmount(e.target.value)}
                       min={minRequiredInCurrency}
-                      step={currency === 'KES' ? '50' : '1'}
-                      placeholder={`Enter custom amount in ${currency} (min ${activeCurrencyObj.symbol} ${minRequiredInCurrency})`}
+                      step={currency === 'KES' ? '1' : '0.01'}
+                      placeholder={`Enter any amount in ${currency}`}
                       className="w-full pl-10 pr-24 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white font-mono text-xs focus:outline-none focus:border-rose-500 transition-colors"
                     />
                     <span className="absolute right-3 top-2.5 text-[11px] font-mono text-slate-500">
-                      Min {activeCurrencyObj.symbol} {minRequiredInCurrency}
+                      Your choice
                     </span>
                   </div>
                 </div>
@@ -953,7 +953,7 @@ export const TipAuthorModal: React.FC<TipAuthorModalProps> = ({
             <span>Safaricom M-Pesa Till {tillNumber}</span>
           </span>
           <span className="text-slate-400">
-            Minimum tip: KSh {minTipKes}
+            Any amount from KSh 1
           </span>
         </div>
       </div>

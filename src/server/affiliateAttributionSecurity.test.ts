@@ -47,6 +47,25 @@ describe('signed affiliate payment attribution', () => {
       .toMatchObject({ ref: 'partner_7', campaign: 'launch' });
   });
 
+  it('allows an explicitly trusted continuation purchase while retaining signed origin metadata', () => {
+    const token = createAffiliateAttributionCookieValue(
+      { ref: 'partner_7', campaign: 'launch', articleId: 'origin_piece' },
+      { now: NOW, signingSecret: SECRET }
+    );
+
+    expect(verifyAffiliateAttributionCookie(token, 'next_piece', {
+      now: NOW,
+      signingSecret: SECRET,
+      allowCrossArticle: true
+    })).toEqual({
+      ref: 'partner_7',
+      campaign: 'launch',
+      articleId: 'origin_piece',
+      issuedAt: NOW,
+      expiresAt: NOW + 30 * 24 * 60 * 60 * 1000
+    });
+  });
+
   it('cryptographically enforces a shorter configured attribution window', () => {
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
     const token = createAffiliateAttributionCookieValue(

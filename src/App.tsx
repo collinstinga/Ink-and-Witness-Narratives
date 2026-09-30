@@ -1199,6 +1199,16 @@ export default function App() {
         onAccessUnlocked={handleSupportUnlocked}
         activeTab={currentLockedTab}
         onTabChange={handleLockedTabChange}
+        articles={articles}
+        onReadArticle={handleOpenReader}
+        isArticleUnlocked={(candidate) =>
+          candidate.isPaid === false ||
+          candidate.isUnlocked === true ||
+          Boolean(
+            effectiveUnlockedTokens[candidate.id] ||
+            (candidate.slug && effectiveUnlockedTokens[candidate.slug])
+          )
+        }
       />
 
       {/* 2. M-Pesa Checkout Modal */}

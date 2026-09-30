@@ -274,7 +274,7 @@ let cachedMpesaSettings: StoredMpesaSettings = {
   callbackUrl: process.env.MPESA_CALLBACK_URL || '',
   defaultPriceKes: 1050,
   tippingEnabled: true,
-  minTipKes: 300,
+  minTipKes: 1,
   secretStorageVersion: MPESA_SECRET_STORAGE_VERSION
 };
 
@@ -5144,6 +5144,7 @@ export const store = {
       paybillNumber: (process.env.MPESA_PAYBILL_NUMBER || cachedMpesaSettings.paybillNumber || '').trim(),
       tillName: (process.env.MPESA_TILL_NAME || cachedMpesaSettings.tillName || 'Ink & Witness').trim(),
       accountReference: (process.env.MPESA_ACCOUNT_REF || cachedMpesaSettings.accountReference || 'INKWITNESS').trim(),
+      minTipKes: 1,
       transactionType: configuredTransactionType,
       callbackUrl: (process.env.MPESA_CALLBACK_URL || cachedMpesaSettings.callbackUrl || '').trim(),
       env: (process.env.MPESA_ENV === 'sandbox' ? 'sandbox' : 'production') as 'sandbox' | 'production'

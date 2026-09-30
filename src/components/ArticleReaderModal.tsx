@@ -47,6 +47,9 @@ import { Article, AuthorProfile, User } from '../types.js';
 import { api, getArticleReceipt } from '../utils/api.js';
 import { chooseNarrationVoice, cleanTextForNarration, splitNarrationText } from '../utils/narration.js';
 import { SafeMarkdown } from './common/SafeMarkdown.js';
+import { ArticleCard } from './ArticleCard.js';
+
+const EMPTY_ARTICLES: Article[] = [];
 
 interface ArticleReaderModalProps {
   article: Article | null;
@@ -63,6 +66,9 @@ interface ArticleReaderModalProps {
   onAccessUnlocked?: (articleId: string) => void;
   activeTab?: 'preview' | 'synopsis';
   onTabChange?: (tab: 'preview' | 'synopsis') => void;
+  articles?: Article[];
+  onReadArticle?: (article: Article) => void;
+  isArticleUnlocked?: (article: Article) => boolean;
 }
 
 interface SpeechChunk {
@@ -72,6 +78,58 @@ interface SpeechChunk {
   text: string;
   rawIndex?: number;
   pauseAfterMs?: number;
+}
+
+export function selectReaderRecommendations(
+  currentArticle: Article | null,
+  articles: Article[],
+  limit = 4
+): Article[] {
+  if (!currentArticle || limit <= 0) return [];
+
+  const available = articles.filter(candidate =>
+    candidate.id !== currentArticle.id && candidate.status === 'published'
+  );
+  const byId = new Map(available.map(candidate => [candidate.id, candidate]));
+  const selected: Article[] = [];
+  const selectedIds = new Set<string>();
+
+  for (const relatedId of currentArticle.manualRelatedPieceIds || []) {
+    const candidate = byId.get(relatedId);
+    if (!candidate || selectedIds.has(candidate.id)) continue;
+    selected.push(candidate);
+    selectedIds.add(candidate.id);
+    if (selected.length >= limit) return selected;
+  }
+
+  const currentCategories = new Set(
+    [currentArticle.category, ...(currentArticle.categories || [])].filter(Boolean)
+  );
+  const currentTags = new Set(currentArticle.tags || []);
+  const currentTopics = new Set(currentArticle.topics || []);
+  const relevance = (candidate: Article) => {
+    let score = 0;
+    const candidateCategories = [candidate.category, ...(candidate.categories || [])];
+    if (candidateCategories.some(category => currentCategories.has(category))) score += 8;
+    score += (candidate.tags || []).filter(tag => currentTags.has(tag)).length * 3;
+    score += (candidate.topics || []).filter(topic => currentTopics.has(topic)).length * 2;
+    if (candidate.featured) score += 1;
+    return score;
+  };
+  const publishedTime = (candidate: Article) => {
+    const parsed = Date.parse(candidate.publishedAt || candidate.createdAt || '');
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const fallback = available
+    .filter(candidate => !selectedIds.has(candidate.id))
+    .sort((left, right) => relevance(right) - relevance(left) || publishedTime(right) - publishedTime(left));
+
+  for (const candidate of fallback) {
+    selected.push(candidate);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }
 
 export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
@@ -88,7 +146,10 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   onOpenSupport,
   onAccessUnlocked,
   activeTab,
-  onTabChange
+  onTabChange,
+  articles = EMPTY_ARTICLES,
+  onReadArticle,
+  isArticleUnlocked
 }) => {
   const [copiedQuote, setCopiedQuote] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -334,6 +395,13 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
   const audioChunksRef = useRef(audioChunks);
   audioChunksRef.current = audioChunks;
+
+  const readerRecommendations = useMemo(
+    () => effectiveUnlocked
+      ? selectReaderRecommendations(article, articles)
+      : [],
+    [article, articles, effectiveUnlocked]
+  );
 
   // Initialize Speech Synthesis Voices
   useEffect(() => {
@@ -1672,6 +1740,44 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
             </div>
           </div>
+
+          {effectiveUnlocked && onReadArticle && readerRecommendations.length > 0 && (
+            <section
+              id="reader-more-pieces"
+              aria-labelledby="reader-more-pieces-title"
+              className="my-10 rounded-3xl border border-sky-500/25 bg-gradient-to-b from-slate-900/90 to-[#0a1220] p-5 sm:p-7 shadow-2xl"
+            >
+              <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-400">
+                    Continue through Ink &amp; Witness
+                  </p>
+                  <h4 id="reader-more-pieces-title" className="mt-1 font-display text-xl font-bold text-white sm:text-2xl">
+                    Choose your next piece
+                  </h4>
+                </div>
+                <p className="max-w-md text-xs leading-relaxed text-slate-400 sm:text-right">
+                  Explore another published piece. Free pieces open immediately; paid pieces remain available to preview and unlock securely.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {readerRecommendations.map(recommendation => (
+                  <ArticleCard
+                    key={recommendation.id}
+                    article={recommendation}
+                    isUnlocked={isArticleUnlocked
+                      ? isArticleUnlocked(recommendation)
+                      : recommendation.isPaid === false || recommendation.isUnlocked === true}
+                    onRead={onReadArticle}
+                    onUnlock={onUnlockRequest}
+                    onSelectTag={onSelectTag}
+                    onTipAuthor={onTipAuthor}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* Author Footer Card */}
           <footer className="border-t border-slate-800 pt-8 mt-12 bg-slate-900/50 p-6 rounded-2xl space-y-4">

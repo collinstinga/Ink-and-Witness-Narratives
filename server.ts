@@ -1502,7 +1502,7 @@ export async function createApp() {
       env: mpesaSettings.env,
       defaultPriceKes: mpesaSettings.defaultPriceKes || 1050,
       tippingEnabled: mpesaSettings.tippingEnabled !== false,
-      minTipKes: mpesaSettings.minTipKes || 300,
+      minTipKes: 1,
       hasConsumerKey: Boolean(mpesaSettings.consumerKey),
       hasConsumerSecret: Boolean(mpesaSettings.consumerSecret),
       hasPasskey: Boolean(mpesaSettings.passkey),
@@ -1518,7 +1518,7 @@ export async function createApp() {
       res.json({
         ...ratesData,
         supportedCurrencies: SUPPORTED_CURRENCIES,
-        minTipKes: mpesaSettings.minTipKes || 300,
+        minTipKes: 1,
         tippingEnabled: mpesaSettings.tippingEnabled !== false,
       });
     } catch (err: any) {
@@ -1805,7 +1805,7 @@ export async function createApp() {
       }
 
       let articleTitle = "Ink & Witness Reader Access";
-      let chargeAmount = Number(amount) || 300;
+      let chargeAmount = Number(amount);
       const type = isTip ? "TIP" : "PURCHASE";
       let canonicalArticleId = articleId;
 
@@ -1833,9 +1833,13 @@ export async function createApp() {
       }
 
       if (isTip) {
-        // Enforce server-side minimum tip (default 300 KES)
-        const minTip = mpesaSettings.minTipKes || 300;
-        chargeAmount = Math.max(minTip, Math.round(Number(amount) || minTip));
+        // Daraja accepts whole-shilling amounts. Tips are intentionally flexible:
+        // any reader-selected amount of at least KSh 1 is valid.
+        const requestedTip = Number(amount);
+        if (!Number.isFinite(requestedTip) || requestedTip < 1) {
+          return res.status(400).json({ error: 'Enter a tip amount of at least KSh 1.' });
+        }
+        chargeAmount = Math.round(requestedTip);
         if (!articleTitle || articleTitle === "Ink & Witness Reader Access") {
           articleTitle = "Ink & Witness Author Tip";
         }
@@ -1844,7 +1848,8 @@ export async function createApp() {
       const formattedPhone = formatKenyanPhone(rawPhone);
       const trustedAttribution = verifyAffiliateAttributionCookie(
         (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
-        canonicalArticleId || "general_tip"
+        canonicalArticleId || "general_tip",
+        { allowCrossArticle: true }
       );
 
       const stkResult = await initiateStkPush({
@@ -1925,7 +1930,8 @@ export async function createApp() {
       const chargeAmount = resolveArticlePriceKes(article, mpesaSettings.defaultPriceKes || 1050);
       const trustedAttribution = verifyAffiliateAttributionCookie(
         (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
-        canonicalArticleId
+        canonicalArticleId,
+        { allowCrossArticle: true }
       );
 
       const randomSuffix = Math.floor(100000 + Math.random() * 900000).toString();
@@ -3724,7 +3730,7 @@ export async function createApp() {
         'paymentType', 'storeNumber', 'tillNumber', 'tillName', 'paybillNumber',
         'shortcode', 'accountReference', 'defaultPriceKes', 'env',
         'businessPhone', 'whatsappNumber',
-        'callPhoneNumber', 'tippingEnabled', 'minTipKes'
+        'callPhoneNumber', 'tippingEnabled'
       ];
       const toUpdate: any = Object.fromEntries(
         allowedFields

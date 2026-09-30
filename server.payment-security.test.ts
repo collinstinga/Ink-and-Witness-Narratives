@@ -282,6 +282,31 @@ describe('public payment route security', () => {
     expect(body.amount).toBe(825);
   });
 
+  it('accepts a reader-selected tip of KSh 1 without applying the legacy KSh 300 floor', async () => {
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        articleId: 'article_1',
+        phoneNumber: '0712345678',
+        amount: 1,
+        isTip: true,
+        currency: 'KES',
+        originalAmount: 1,
+        exchangeRate: 1
+      })
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      articleId: 'article_1',
+      amount: 1,
+      type: 'TIP'
+    }));
+    expect(body.amount).toBe(1);
+  });
+
   it.each([
     ['missing', undefined, true],
     ['zero', 0, false],
@@ -365,7 +390,7 @@ describe('public payment route security', () => {
     }));
   });
 
-  it('does not reuse a piece-scoped attribution for another piece', async () => {
+  it('continues a signed affiliate attribution across a subsequent piece purchase', async () => {
     const signed = createAffiliateAttributionCookieValue({
       ref: 'PARTNER_7',
       articleId: 'another_piece'
@@ -382,16 +407,16 @@ describe('public payment route security', () => {
 
     expect(response.status).toBe(200);
     expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
-      affiliateCode: undefined,
+      affiliateCode: 'partner_7',
       campaignCode: undefined
     }));
   });
 
-  it('uses signed attribution and ignores forged affiliate fields for bank orders', async () => {
+  it('continues signed attribution and ignores forged affiliate fields for a later bank order', async () => {
     const signed = createAffiliateAttributionCookieValue({
       ref: 'PARTNER_7',
       campaign: 'LAUNCH_2026',
-      articleId: 'article_1'
+      articleId: 'origin_piece'
     });
 
     const response = await fetch(`${baseUrl}/api/payments/bank-order`, {
