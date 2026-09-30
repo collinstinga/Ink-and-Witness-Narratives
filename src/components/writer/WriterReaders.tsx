@@ -16,7 +16,8 @@ import {
   Shield,
   UserCheck,
   Lock,
-  Info
+  Info,
+  Mail
 } from 'lucide-react';
 import { ReaderLicense, Article, ManualAccessGrant } from '../../types.js';
 import { api } from '../../utils/api.js';
@@ -46,6 +47,8 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   // Reset / Action state
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [passwordResetEmail, setPasswordResetEmail] = useState('');
+  const [passwordResetSending, setPasswordResetSending] = useState(false);
 
   const fetchData = async (): Promise<boolean> => {
     try {
@@ -203,6 +206,28 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
     }
   };
 
+  const handleSendPasswordReset = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const email = passwordResetEmail.trim().toLowerCase();
+    if (!email) {
+      setBannerMessage({ type: 'error', text: 'Enter the reader account email address.' });
+      return;
+    }
+    try {
+      setPasswordResetSending(true);
+      const result = await api.adminSendReaderPasswordReset(email);
+      setPasswordResetEmail('');
+      setBannerMessage({ type: 'success', text: result.message });
+    } catch (error) {
+      setBannerMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'The password reset email could not be sent.'
+      });
+    } finally {
+      setPasswordResetSending(false);
+    }
+  };
+
   // Filtered manual grants
   const filteredGrants = manualGrants.filter(g => {
     const q = searchQuery.toLowerCase();
@@ -277,7 +302,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
 
       {/* Global Status Banner */}
       {bannerMessage && (
-        <div className={`p-4 rounded-xl text-xs flex items-start justify-between gap-3 animate-in fade-in ${
+        <div role={bannerMessage.type === 'error' ? 'alert' : 'status'} aria-live="polite" className={`p-4 rounded-xl text-xs flex items-start justify-between gap-3 animate-in fade-in ${
           bannerMessage.type === 'success' 
             ? 'bg-emerald-950/70 border border-emerald-500/50 text-emerald-200' 
             : 'bg-rose-950/70 border border-rose-500/50 text-rose-200'
@@ -291,6 +316,8 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
             <span>{bannerMessage.text}</span>
           </div>
           <button 
+            type="button"
+            aria-label="Dismiss message"
             onClick={() => setBannerMessage(null)}
             className="text-xs opacity-70 hover:opacity-100 cursor-pointer font-mono"
           >
@@ -298,6 +325,42 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
           </button>
         </div>
       )}
+
+      <section className="rounded-2xl border border-sky-800/50 bg-sky-950/20 p-5" aria-labelledby="reader-password-help-title">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 rounded-xl border border-sky-700/50 bg-sky-950/60 p-2.5 text-sky-300">
+            <Mail className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 id="reader-password-help-title" className="font-serif text-lg font-bold text-white">Help a reader reset their password</h2>
+            <p className="mt-1 text-xs leading-relaxed text-slate-400">
+              Send a one-hour, single-use reset link to the email on their reader account. You cannot view or choose their password.
+            </p>
+            <form onSubmit={handleSendPasswordReset} className="mt-4 flex flex-col gap-3 sm:flex-row">
+              <label className="sr-only" htmlFor="reader-password-reset-email">Reader account email</label>
+              <input
+                id="reader-password-reset-email"
+                type="email"
+                value={passwordResetEmail}
+                onChange={event => setPasswordResetEmail(event.target.value)}
+                placeholder="reader@example.com"
+                autoComplete="off"
+                required
+                className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-[#080d17] px-3.5 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-sky-500"
+              />
+              <button
+                type="submit"
+                disabled={passwordResetSending}
+                aria-busy={passwordResetSending}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {passwordResetSending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+                {passwordResetSending ? 'Sending…' : 'Send reset link'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </section>
 
       {/* Section Switcher Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-800/80">

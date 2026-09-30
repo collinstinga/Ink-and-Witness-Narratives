@@ -121,6 +121,31 @@ export function buildNewsletterConfirmationEmail(options: {
   };
 }
 
+export function buildReaderPasswordResetEmail(options: {
+  name?: string;
+  resetUrl: string;
+  expiresInMinutes?: number;
+}): { subject: string; html: string; text: string } {
+  const resetUrl = safeHttpUrl(options.resetUrl);
+  if (!resetUrl) throw new Error('A secure password reset URL is required.');
+  const greeting = options.name ? `Hello ${options.name},` : 'Hello,';
+  const expiresInMinutes = Number.isFinite(options.expiresInMinutes)
+    ? Math.max(1, Math.round(options.expiresInMinutes!))
+    : 60;
+  const body = `${greeting}\n\nA password reset was requested for your Ink & Witness reader account. Use the secure link below within ${expiresInMinutes} minutes. The link works once.\n\nIf you did not request this, you can ignore this email and your password will remain unchanged.`;
+  return {
+    subject: 'Reset your Ink & Witness reader password',
+    html: emailShell({
+      preheader: 'Securely reset your Ink & Witness reader password.',
+      heading: 'Reset your reader password',
+      bodyHtml: textToParagraphs(body),
+      ctaLabel: 'Choose a new password',
+      ctaUrl: resetUrl
+    }),
+    text: `${body}\n\nChoose a new password: ${resetUrl}`
+  };
+}
+
 export function buildNewsletterCampaignEmail(options: {
   content: NewsletterCampaignContent;
   recipientName?: string;

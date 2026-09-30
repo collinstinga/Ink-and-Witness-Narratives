@@ -38,7 +38,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
   onOpenWriterStudio,
   onLogout
 }) => {
-  const [mode, setMode] = useState<'signin' | 'register'>(initialMode);
+  const [mode, setMode] = useState<'signin' | 'register' | 'forgot'>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -131,15 +131,22 @@ export const SignInModal: React.FC<SignInModalProps> = ({
     setError(null);
     setSuccessMsg(null);
 
-    if (!email.trim() || !password.trim()) {
-      setError('Please provide both email and password.');
+    if (!email.trim()) {
+      setError('Please provide your email address.');
+      return;
+    }
+    if (mode !== 'forgot' && !password.trim()) {
+      setError('Please provide your password.');
       return;
     }
 
     setLoading(true);
 
     try {
-      if (mode === 'signin') {
+      if (mode === 'forgot') {
+        const res = await api.authRequestPasswordReset(email.trim());
+        setSuccessMsg(res.message || 'If a reader account exists for that email, a reset link has been sent.');
+      } else if (mode === 'signin') {
         const res = await api.authLogin(email.trim(), password);
         if (res.success && res.user) {
           setSuccessMsg(`Welcome back, ${res.user.name || res.user.email}!`);
@@ -212,6 +219,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
               onClick={() => {
                 setMode('signin');
                 setError(null);
+                setSuccessMsg(null);
               }}
               className={`py-2 px-3 rounded-xl text-xs font-mono font-medium transition-all cursor-pointer ${
                 mode === 'signin'
@@ -227,6 +235,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
               onClick={() => {
                 setMode('register');
                 setError(null);
+                setSuccessMsg(null);
               }}
               className={`py-2 px-3 rounded-xl text-xs font-mono font-medium transition-all cursor-pointer ${
                 mode === 'register'
@@ -241,8 +250,13 @@ export const SignInModal: React.FC<SignInModalProps> = ({
 
         {/* Form Body */}
         <div className="p-6">
+          {mode === 'forgot' && (
+            <div className="mb-4 rounded-xl border border-sky-800/60 bg-sky-950/30 p-3.5 text-xs leading-relaxed text-sky-100">
+              Enter the email used for your reader account. If it matches an account, we will send a secure one-hour reset link.
+            </div>
+          )}
           {error && (
-            <div className="mb-4 p-3.5 rounded-xl bg-rose-950/80 border border-rose-800 text-rose-200 text-xs flex items-start gap-2.5 animate-in fade-in">
+            <div role="alert" className="mb-4 p-3.5 rounded-xl bg-rose-950/80 border border-rose-800 text-rose-200 text-xs flex items-start gap-2.5 animate-in fade-in">
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               <div>
                 <p className="font-semibold text-rose-300">Authentication Error</p>
@@ -252,7 +266,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
           )}
 
           {successMsg && (
-            <div className="mb-4 p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-800 text-emerald-200 text-xs flex items-start gap-2.5 animate-in fade-in">
+            <div role="status" aria-live="polite" className="mb-4 p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-800 text-emerald-200 text-xs flex items-start gap-2.5 animate-in fade-in">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <p className="leading-relaxed font-medium">{successMsg}</p>
             </div>
@@ -261,7 +275,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'register' && (
               <div>
-                <label className="block text-xs font-mono uppercase tracking-wider text-slate-300 mb-1.5">
+                <label htmlFor="auth-name-input" className="block text-xs font-mono uppercase tracking-wider text-slate-300 mb-1.5">
                   Full Name
                 </label>
                 <div className="relative">
@@ -279,7 +293,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
             )}
 
             <div>
-              <label className="block text-xs font-mono uppercase tracking-wider text-slate-300 mb-1.5">
+              <label htmlFor="auth-email-input" className="block text-xs font-mono uppercase tracking-wider text-slate-300 mb-1.5">
                 Email Address
               </label>
               <div className="relative">
@@ -297,37 +311,69 @@ export const SignInModal: React.FC<SignInModalProps> = ({
               </div>
             </div>
 
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs font-mono uppercase tracking-wider text-slate-300">
-                  Password
-                </label>
+            {mode !== 'forgot' && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label htmlFor="auth-password-input" className="block text-xs font-mono uppercase tracking-wider text-slate-300">
+                    Password
+                  </label>
+                  {mode === 'signin' && (
+                    <button
+                      type="button"
+                      id="auth-forgot-password-btn"
+                      onClick={() => {
+                        setMode('forgot');
+                        setPassword('');
+                        setError(null);
+                        setSuccessMsg(null);
+                      }}
+                      className="text-[11px] font-mono text-sky-400 hover:text-sky-300 underline underline-offset-2"
+                    >
+                      Forgot password?
+                    </button>
+                  )}
+                </div>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5 pointer-events-none" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    id="auth-password-input"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={mode === 'register' ? 'Min 8 chars, with a letter and number' : '••••••••••••'}
+                    required
+                    className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-[#070b14] border border-slate-700 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-3 text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                {mode === 'register' && (
+                  <p className="text-[11px] text-slate-400 mt-1 font-sans">
+                    Must contain at least 8 characters, one letter, and one number or special character.
+                  </p>
+                )}
               </div>
-              <div className="relative">
-                <KeyRound className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5 pointer-events-none" />
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  id="auth-password-input"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === 'register' ? 'Min 8 chars, 1 uppercase, 1 number' : '••••••••••••'}
-                  required
-                  className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-[#070b14] border border-slate-700 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-sans"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-3 text-slate-500 hover:text-slate-300 transition-colors"
-                >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              {mode === 'register' && (
-                <p className="text-[11px] text-slate-400 mt-1 font-sans">
-                  Must contain at least 8 characters, one uppercase letter, and one number.
-                </p>
-              )}
-            </div>
+            )}
+
+            {mode === 'forgot' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('signin');
+                  setError(null);
+                  setSuccessMsg(null);
+                }}
+                className="text-xs font-mono text-slate-400 hover:text-white underline underline-offset-2"
+              >
+                Back to sign in
+              </button>
+            )}
 
             <button
               type="submit"
@@ -342,7 +388,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
                 </span>
               ) : (
                 <span className="flex items-center gap-2">
-                  <span>{mode === 'signin' ? 'Sign In to Account' : 'Create Reader Account'}</span>
+                  <span>{mode === 'signin' ? 'Sign In to Account' : mode === 'register' ? 'Create Reader Account' : 'Email Reset Link'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </span>
               )}

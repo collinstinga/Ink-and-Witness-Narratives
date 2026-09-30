@@ -35,6 +35,7 @@ import {
 import {
   AUTH_SESSION_STORAGE_VERSION,
   createSignedAuthSessionToken,
+  getActiveReaderSessionPointerId,
   getAuthSessionTokenKind,
   getAuthSessionDocumentId,
   isAuthSessionDocumentId,
@@ -201,10 +202,6 @@ let cachedComments: PieceComment[] = [];
 const AUTH_SESSION_CACHE_TTL_MS = 60 * 1000;
 const READER_SESSION_CACHE_TTL_MS = 15 * 1000;
 const ACTIVE_READER_SESSION_COLLECTION = 'active_reader_sessions';
-
-function activeReaderSessionPointerId(userId: string): string {
-  return crypto.createHash('sha256').update(`active-reader-session:v1:${userId}`, 'utf8').digest('hex');
-}
 const MISSING_AUTH_SESSION_CACHE_TTL_MS = 30 * 1000;
 const MAX_MISSING_AUTH_SESSION_CACHE_ENTRIES = 1000;
 const READER_LICENSE_CACHE_TTL_MS = 60 * 1000;
@@ -6950,6 +6947,73 @@ export const store = {
     return null;
   },
 
+  async getFreshUserByEmail(email: string): Promise<UserRecord | null> {
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    if (!normalizedEmail || normalizedEmail.length > 254) return null;
+
+    const cached = this.getUserByEmail(normalizedEmail);
+    let documentId = cached?.id || '';
+    let stored: UserRecord | null = null;
+
+    const queryCurrentIdentity = async (): Promise<void> => {
+      const snapshot = await getDb()
+        .collection('users')
+        .where('email', '==', normalizedEmail)
+        .limit(2)
+        .get();
+      // Duplicate identities must fail closed rather than selecting an
+      // arbitrary credential record.
+      if (snapshot.docs.length !== 1) {
+        documentId = '';
+        stored = null;
+        return;
+      }
+      documentId = snapshot.docs[0].id;
+      stored = snapshot.docs[0].data() as UserRecord;
+    };
+
+    if (documentId) {
+      stored = await getFirestoreDoc<UserRecord>('users', documentId);
+      if (!stored) {
+        cachedUsers.delete(documentId);
+        await queryCurrentIdentity();
+      }
+    } else {
+      await queryCurrentIdentity();
+    }
+
+    const role = stored?.role;
+    const storedEmail = typeof stored?.email === 'string' ? stored.email.trim().toLowerCase() : '';
+    const storedName = typeof stored?.name === 'string' ? stored.name.trim() : '';
+    const passwordHash = typeof stored?.passwordHash === 'string' ? stored.passwordHash : '';
+    const createdAt = typeof stored?.createdAt === 'string' ? stored.createdAt : '';
+    if (
+      !stored ||
+      stored.id !== documentId ||
+      !/^user_[A-Za-z0-9_-]{8,120}$/.test(documentId) ||
+      storedEmail !== normalizedEmail ||
+      !storedName ||
+      (role !== 'client' && role !== 'admin') ||
+      !/^\$argon2id\$/.test(passwordHash) ||
+      !createdAt
+    ) {
+      if (cached) cachedUsers.delete(cached.id);
+      return null;
+    }
+
+    const fresh: UserRecord = {
+      id: documentId,
+      email: storedEmail,
+      name: storedName,
+      role,
+      passwordHash,
+      createdAt,
+      ...(typeof stored.updatedAt === 'string' ? { updatedAt: stored.updatedAt } : {})
+    };
+    cachedUsers.set(documentId, fresh);
+    return fresh;
+  },
+
   getUserById(id: string): UserRecord | null {
     if (!id) return null;
     return cachedUsers.get(id) || null;
@@ -7046,7 +7110,7 @@ export const store = {
     if (user.role === 'client') {
       const db = getDb();
       const pointerRef = db.collection(ACTIVE_READER_SESSION_COLLECTION)
-        .doc(activeReaderSessionPointerId(user.id));
+        .doc(getActiveReaderSessionPointerId(user.id)!);
       let previousDocumentId: string | null = null;
       await db.runTransaction(async transaction => {
         const previous = await transaction.get(pointerRef);
@@ -7120,7 +7184,7 @@ export const store = {
         if (storedSession.role === 'client') {
           const activePointer = await getFirestoreDoc<{ sessionDocumentId?: unknown }>(
             ACTIVE_READER_SESSION_COLLECTION,
-            activeReaderSessionPointerId(storedSession.userId)
+            getActiveReaderSessionPointerId(storedSession.userId)!
           );
           if (
             (storedSession.activeReaderSession && !activePointer)
@@ -7258,6 +7322,45 @@ export const store = {
       const batch = getDb().batch();
       for (const document of documents.slice(offset, offset + 450)) batch.delete(document.ref);
       await batch.commit();
+    }
+  },
+
+  async applyPasswordResetUser(user: UserRecord): Promise<void> {
+    const existing = cachedUsers.get(user.id);
+    if (
+      user.role !== 'client' ||
+      !/^user_[A-Za-z0-9_-]{8,120}$/.test(user.id) ||
+      !user.email ||
+      !user.name ||
+      !user.createdAt ||
+      (existing && (
+        existing.role !== 'client' ||
+        existing.email.toLowerCase() !== user.email.toLowerCase()
+      )) ||
+      !/^\$argon2id\$/.test(user.passwordHash)
+    ) {
+      throw new Error('The password reset result did not match a reader account.');
+    }
+
+    cachedUsers.set(user.id, {
+      ...(existing || user),
+      id: user.id,
+      email: user.email.trim().toLowerCase(),
+      name: user.name,
+      role: 'client',
+      createdAt: user.createdAt,
+      passwordHash: user.passwordHash,
+      updatedAt: user.updatedAt || new Date().toISOString()
+    });
+    writeJsonFileSync(USERS_FILE, Array.from(cachedUsers.values()));
+
+    try {
+      await this.invalidateAllUserSessions(user.id);
+    } catch {
+      // The active-reader pointer was already removed atomically with the
+      // password update. A failed cleanup cannot restore an old session, but a
+      // later maintenance pass may still delete its inert document.
+      console.warn('[Auth Security] Password changed; stale session document cleanup will be retried later.');
     }
   },
 

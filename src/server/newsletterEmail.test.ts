@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildNewsletterCampaignEmail,
   buildNewsletterConfirmationEmail,
+  buildReaderPasswordResetEmail,
   isRetryableNewsletterProviderError,
   isNewsletterProviderConfigured,
   NewsletterProviderConfigurationError,
@@ -36,6 +37,21 @@ describe('newsletter email provider', () => {
     expect(email.subject).toContain('Confirm');
     expect(email.html).toContain('&lt;Reader&gt;');
     expect(email.html).not.toContain('Hello <Reader>');
+  });
+
+  it('builds a one-time reader password reset email without exposing credentials', () => {
+    const email = buildReaderPasswordResetEmail({
+      name: 'Amina <Reader>',
+      resetUrl: 'https://www.inkandwitness-narratives.co.ke/password-reset?token=pr1_safe-token',
+      expiresInMinutes: 60
+    });
+
+    expect(email.subject).toContain('Reset');
+    expect(email.html).toContain('Choose a new password');
+    expect(email.html).toContain('Amina &lt;Reader&gt;');
+    expect(email.html).toContain('https://www.inkandwitness-narratives.co.ke/password-reset?token=pr1_safe-token');
+    expect(email.text).toContain('works once');
+    expect(email.text).not.toContain('temporary password');
   });
 
   it('renders a campaign without allowing raw HTML or unsafe links', () => {

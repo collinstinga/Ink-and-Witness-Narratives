@@ -17,7 +17,8 @@ import {
   NewsletterCampaignStatus,
   NewsletterSubscriber,
   PaymentTransaction,
-  User
+  User,
+  UserRecord
 } from "./src/types.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import {
@@ -60,11 +61,18 @@ import {
 import {
   buildNewsletterCampaignEmail,
   buildNewsletterConfirmationEmail,
+  buildReaderPasswordResetEmail,
   isRetryableNewsletterProviderError,
   isNewsletterProviderConfigured,
   NewsletterProviderConfigurationError,
   sendNewsletterEmail
 } from "./src/server/newsletterEmail.js";
+import { passwordResetStore } from "./src/server/passwordResetStore.js";
+import {
+  PASSWORD_RESET_TOKEN_PATTERN,
+  PASSWORD_RESET_TOKEN_TTL_MS,
+  hashPasswordResetToken
+} from "./src/server/passwordResetSecurity.js";
 import {
   newsletterOutcomeForResendEvent,
   verifyResendWebhook
@@ -202,10 +210,47 @@ function newsletterCapabilityPage(options: {
 </form></main></body></html>`;
 }
 
-function newsletterResultPage(title: string, message: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>
+function escapeCapabilityHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function passwordResetCapabilityPage(token: string, error?: string): string {
+  const safeToken = PASSWORD_RESET_TOKEN_PATTERN.test(token) ? token : '';
+  const errorMessage = error
+    ? `<p role="alert" style="margin:0 0 18px;padding:12px 14px;border:1px solid #be123c;border-radius:10px;background:#4c0519;color:#fecdd3;font:600 13px Arial,sans-serif;line-height:1.5;">${escapeCapabilityHtml(error)}</p>`
+    : '';
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Reset your reader password</title></head>
 <body style="margin:0;background:#080d17;color:#e2e8f0;font-family:Georgia,serif;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;">
-<main style="width:min(560px,100%);background:#0f172a;border:1px solid #334155;border-radius:20px;padding:34px;box-sizing:border-box;"><p style="font:700 12px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#38bdf8;">Ink &amp; Witness Narratives</p><h1 style="font-size:30px;color:#fff;">${title}</h1><p style="line-height:1.7;color:#cbd5e1;">${message}</p><a href="/" style="color:#38bdf8;">Return to Ink &amp; Witness</a></main></body></html>`;
+<main style="width:min(560px,100%);background:#0f172a;border:1px solid #334155;border-radius:20px;padding:34px;box-sizing:border-box;box-shadow:0 24px 80px rgba(0,0,0,.35);">
+<p style="font:700 12px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#38bdf8;">Ink &amp; Witness Narratives</p>
+<h1 style="font-size:30px;margin:18px 0 12px;color:#fff;">Choose a new password</h1>
+<p style="line-height:1.7;color:#cbd5e1;">Use at least eight characters, including a letter and a number or special character. This link works once.</p>
+${errorMessage}
+<form method="post" action="/api/auth/password-reset" style="margin-top:24px;display:grid;gap:16px;">
+<input type="hidden" name="token" value="${safeToken}">
+<label style="display:grid;gap:7px;font:600 13px Arial,sans-serif;color:#cbd5e1;">New password
+<input type="password" name="password" autocomplete="new-password" minlength="8" maxlength="256" required style="box-sizing:border-box;width:100%;border:1px solid #475569;border-radius:10px;background:#080d17;color:#fff;padding:12px 14px;font-size:16px;"></label>
+<label style="display:grid;gap:7px;font:600 13px Arial,sans-serif;color:#cbd5e1;">Confirm new password
+<input type="password" name="confirmPassword" autocomplete="new-password" minlength="8" maxlength="256" required style="box-sizing:border-box;width:100%;border:1px solid #475569;border-radius:10px;background:#080d17;color:#fff;padding:12px 14px;font-size:16px;"></label>
+<button type="submit" style="border:0;border-radius:10px;background:#0284c7;color:white;font-weight:700;padding:13px 20px;cursor:pointer;">Reset password</button>
+</form></main></body></html>`;
+}
+
+function newsletterResultPage(
+  title: string,
+  message: string,
+  returnHref = '/',
+  returnLabel = 'Return to Ink & Witness'
+): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${escapeCapabilityHtml(title)}</title></head>
+<body style="margin:0;background:#080d17;color:#e2e8f0;font-family:Georgia,serif;min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;">
+<main style="width:min(560px,100%);background:#0f172a;border:1px solid #334155;border-radius:20px;padding:34px;box-sizing:border-box;"><p style="font:700 12px Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#38bdf8;">Ink &amp; Witness Narratives</p><h1 style="font-size:30px;color:#fff;">${escapeCapabilityHtml(title)}</h1><p style="line-height:1.7;color:#cbd5e1;">${escapeCapabilityHtml(message)}</p><a href="${escapeCapabilityHtml(returnHref)}" style="color:#38bdf8;">${escapeCapabilityHtml(returnLabel)}</a></main></body></html>`;
 }
 
 function requireSameOriginPublicWrite(req: Request, res: Response, next: NextFunction) {
@@ -315,6 +360,39 @@ async function ensureArticleReleaseNewsletter(req: Request, article: Article) {
     audience: { type: 'all' },
     createdBy: String((req as any).user?.id || (req as any).user?.email || 'admin')
   });
+}
+
+async function sendReaderPasswordResetEmail(req: Request, user: UserRecord): Promise<void> {
+  if (user.role !== 'client') throw new Error('Only reader accounts can use this password recovery flow.');
+  const issued = await passwordResetStore.issue(user.id);
+  const tokenHash = hashPasswordResetToken(issued.token);
+  if (!tokenHash) {
+    await passwordResetStore.discard(issued.token).catch(() => {});
+    throw new Error('A secure password reset token could not be created.');
+  }
+  const resetUrl = new URL('/password-reset', resolvePublicBaseUrl(req));
+  resetUrl.searchParams.set('token', issued.token);
+  const email = buildReaderPasswordResetEmail({
+    name: user.name,
+    resetUrl: resetUrl.toString(),
+    expiresInMinutes: PASSWORD_RESET_TOKEN_TTL_MS / 60_000
+  });
+  try {
+    await sendNewsletterEmail({
+      to: user.email,
+      ...email,
+      idempotencyKey: `reader-password-reset-${tokenHash}`
+    });
+  } catch (error) {
+    await passwordResetStore.discard(issued.token).catch(() => {});
+    throw error;
+  }
+}
+
+async function waitForGenericAuthResponse(startedAt: number): Promise<void> {
+  const minimumMs = 500 + crypto.randomInt(0, 151);
+  const remaining = startedAt + minimumMs - Date.now();
+  if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
 }
 
 function resolveArticlePriceKes(article: Article, defaultPriceKes: number): number {
@@ -1138,6 +1216,24 @@ export async function createApp() {
     legacyHeaders: false,
     validate: { xForwardedForHeader: false, default: false },
     message: { accepted: true }
+  });
+
+  const passwordResetRequestLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: 'Too many password reset requests. Please wait before trying again.' }
+  });
+
+  const passwordResetCapabilityLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: 'Too many password reset attempts. Please request a new link later.' }
   });
 
   app.get('/api/newsletter/config', (_req: Request, res: Response) => {
@@ -2290,6 +2386,116 @@ export async function createApp() {
   // UNIFIED AUTHENTICATION API (PUBLIC)
   // ==========================================
 
+  app.post(
+    '/api/auth/password-reset/request',
+    passwordResetRequestLimiter,
+    requireSameOriginPublicWrite,
+    publicWriteValidators.passwordResetRequest,
+    async (req: Request, res: Response) => {
+      const startedAt = Date.now();
+      res.setHeader('Cache-Control', 'no-store');
+      const email = String(req.body.email || '').trim().toLowerCase();
+      try {
+        const user = await store.getFreshUserByEmail(email);
+        const duplicate = isDuplicatePublicWrite('reader-password-reset', [email], 60_000);
+        if (user?.role === 'client' && !duplicate) {
+          await sendReaderPasswordResetEmail(req, user);
+        }
+      } catch (error) {
+        const category = error instanceof NewsletterProviderConfigurationError
+          ? 'email delivery is not configured'
+          : 'delivery or storage was temporarily unavailable';
+        console.warn(`[Auth Security] Reader password reset request accepted, but ${category}.`);
+      }
+      await waitForGenericAuthResponse(startedAt);
+      return res.status(202).json({
+        success: true,
+        message: 'If a reader account exists for that email, a password reset link has been sent.'
+      });
+    }
+  );
+
+  app.get('/api/auth/password-reset', passwordResetCapabilityLimiter, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    if (!PASSWORD_RESET_TOKEN_PATTERN.test(token)) {
+      return res.status(400).type('html').send(newsletterResultPage(
+        'Reset link unavailable',
+        'This password reset link is invalid or incomplete. Request a new link from the reader sign-in screen.',
+        '/#sign-in',
+        'Return to reader sign in'
+      ));
+    }
+    try {
+      if (!await passwordResetStore.isActive(token)) {
+        return res.status(410).type('html').send(newsletterResultPage(
+          'Reset link unavailable',
+          'This password reset link has expired or has already been used. Request a new link from the reader sign-in screen.',
+          '/#sign-in',
+          'Request another reset link'
+        ));
+      }
+      return res.type('html').send(passwordResetCapabilityPage(token));
+    } catch {
+      return res.status(503).type('html').send(newsletterResultPage(
+        'Password reset temporarily unavailable',
+        'Account services could not verify this link. Please try again shortly.'
+      ));
+    }
+  });
+
+  app.post('/api/auth/password-reset', passwordResetCapabilityLimiter, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const confirmPassword = typeof req.body?.confirmPassword === 'string' ? req.body.confirmPassword : '';
+    const htmlForm = Boolean(req.is('application/x-www-form-urlencoded'));
+    const reject = (status: number, message: string) => htmlForm
+      ? res.status(status).type('html').send(passwordResetCapabilityPage(token, message))
+      : res.status(status).json({ success: false, error: message });
+
+    if (!PASSWORD_RESET_TOKEN_PATTERN.test(token)) {
+      return reject(400, 'This password reset link is invalid. Request a new link from the sign-in screen.');
+    }
+    if (!password || password.length > 256 || password !== confirmPassword) {
+      return reject(400, 'Enter the same new password in both fields.');
+    }
+    const strength = validatePasswordStrength(password);
+    if (!strength.valid) {
+      return reject(400, strength.error || 'Choose a stronger password.');
+    }
+
+    try {
+      const passwordHash = await hashPassword(password);
+      const result = await passwordResetStore.consume(token, passwordHash);
+      if (!result) {
+        return reject(410, 'This password reset link has expired or has already been used. Request a new link.');
+      }
+      await store.applyPasswordResetUser(result.user).catch(() => {
+        console.warn('[Auth Security] Password reset completed; local session cleanup will finish on the next request.');
+      });
+      clearSessionCookie(res);
+      if (htmlForm) {
+        return res.type('html').send(newsletterResultPage(
+          'Password updated',
+          'Your reader password has been changed. All previous reader sessions have been signed out.',
+          '/#sign-in',
+          'Sign in with your new password'
+        ));
+      }
+      return res.json({ success: true, message: 'Password updated. Sign in with your new password.' });
+    } catch {
+      return reject(
+        503,
+        'Password reset could not be confirmed. Try signing in with the new password; if it does not work, request a new link.'
+      );
+    }
+  });
+
   // Public unified login for both clients and administrators
   app.post("/api/auth/login", loginLimiter, publicWriteValidators.authLogin, async (req: Request, res: Response) => {
     try {
@@ -2299,7 +2505,10 @@ export async function createApp() {
       }
 
       const cleanEmail = email.trim().toLowerCase();
-      const user = store.getUserByEmail(cleanEmail);
+      // Always verify the current Firestore credential. This prevents a warm
+      // serverless instance from accepting an old password after another
+      // instance completed a reset.
+      const user = await store.getFreshUserByEmail(cleanEmail);
 
       // Generic response to prevent user enumeration
       if (!user) {
@@ -3212,6 +3421,34 @@ export async function createApp() {
       res.status(500).json({ error: err.message || "Failed to load readers." });
     }
   });
+
+  app.post(
+    '/api/admin/readers/password-reset',
+    requireAdminAuth,
+    passwordResetRequestLimiter,
+    publicWriteValidators.passwordResetRequest,
+    async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const email = String(req.body.email || '').trim().toLowerCase();
+      try {
+        const user = await store.getFreshUserByEmail(email);
+        if (!user || user.role !== 'client') {
+          return res.status(404).json({ success: false, error: 'No reader account was found for that email address.' });
+        }
+        await sendReaderPasswordResetEmail(req, user);
+        return res.status(202).json({
+          success: true,
+          message: 'A secure password reset link was sent to the reader. You cannot view or set their password.'
+        });
+      } catch (error) {
+        if (error instanceof NewsletterProviderConfigurationError) {
+          return res.status(503).json({ success: false, error: 'Password reset email delivery is not configured.' });
+        }
+        console.error('[Auth Security] Writer-assisted reader reset could not be sent.');
+        return res.status(503).json({ success: false, error: 'The password reset email could not be sent. Please retry.' });
+      }
+    }
+  );
 
   // Writer: Comments Moderation
   app.get("/api/admin/comments", requireAdminAuth, (_req: Request, res: Response) => {

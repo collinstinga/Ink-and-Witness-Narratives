@@ -309,6 +309,10 @@ export const publicWriteValidators = {
     name: { kind: 'string', maxLength: 120, normalize: 'trim' }
   }, { maxBytes: 4_096 }),
 
+  passwordResetRequest: validateJsonBody({
+    email: { kind: 'string', required: true, maxLength: 254, pattern: EMAIL, normalize: 'lower' }
+  }, { maxBytes: 2_048 }),
+
   linkPurchase: validateJsonBody({
     query: { kind: 'string', required: true, maxLength: 160, normalize: 'trim' }
   }, { maxBytes: 2_048 }),

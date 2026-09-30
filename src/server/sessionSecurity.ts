@@ -60,6 +60,13 @@ export function getAuthSessionDocumentId(value: unknown): string | null {
   return `v2_${digest}`;
 }
 
+export function getActiveReaderSessionPointerId(userId: unknown): string | null {
+  if (typeof userId !== 'string' || !/^user_[A-Za-z0-9_-]{8,120}$/.test(userId)) return null;
+  return crypto.createHash('sha256')
+    .update(`active-reader-session:v1:${userId}`, 'utf8')
+    .digest('hex');
+}
+
 export function isAuthSessionDocumentId(value: unknown): value is string {
   return typeof value === 'string' && SESSION_DOCUMENT_ID_PATTERN.test(value);
 }

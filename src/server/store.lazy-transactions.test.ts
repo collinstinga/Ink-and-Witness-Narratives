@@ -54,7 +54,7 @@ const dbMocks = vi.hoisted(() => {
   const remoteUser = {
     id: 'user_remote_reader',
     email: 'reader@example.test',
-    passwordHash: 'test-password-hash',
+    passwordHash: '$argon2id$old-test-password-hash',
     role: 'client' as const,
     name: 'Remote Reader',
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -92,10 +92,13 @@ const dbMocks = vi.hoisted(() => {
     batchCommit,
     getAllFirestoreDocs: vi.fn(async (collectionName: string) => {
       if (collectionName === 'transactions') return [remoteTransaction];
-      if (collectionName === 'users') return [remoteUser];
+      if (collectionName === 'users') return [structuredClone(remoteUser)];
       return [];
     }),
     getFirestoreDoc: vi.fn(async (collectionName: string, docId: string) => {
+      if (collectionName === 'users' && docId === remoteUser.id) {
+        return structuredClone(remoteUser);
+      }
       if (collectionName === 'transactions' && docId === directTransaction.checkoutRequestId) {
         return structuredClone(directTransactionState.current);
       }
@@ -197,6 +200,25 @@ describe('lazy transaction hydration', () => {
     await store.ensureUsersHydrated();
     expect(dbMocks.getAllFirestoreDocs.mock.calls
       .filter(([collectionName]) => collectionName === 'users')).toHaveLength(1);
+  });
+
+  it('refreshes the current password record before authentication on a warm instance', async () => {
+    const previousHash = dbMocks.remoteUser.passwordHash;
+    dbMocks.remoteUser.passwordHash = '$argon2id$new-password-after-reset';
+    try {
+      const fresh = await store.getFreshUserByEmail(dbMocks.remoteUser.email);
+
+      expect(fresh).toMatchObject({
+        id: dbMocks.remoteUser.id,
+        email: dbMocks.remoteUser.email,
+        passwordHash: '$argon2id$new-password-after-reset'
+      });
+      expect(dbMocks.getFirestoreDoc).toHaveBeenCalledWith('users', dbMocks.remoteUser.id);
+      expect(store.getUserByEmail(dbMocks.remoteUser.email)?.passwordHash)
+        .toBe('$argon2id$new-password-after-reset');
+    } finally {
+      dbMocks.remoteUser.passwordHash = previousHash;
+    }
   });
 
   it('loads a checkout directly without scanning the transaction ledger', async () => {

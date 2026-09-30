@@ -873,6 +873,42 @@ export const api = {
     return data;
   },
 
+  async authRequestPasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch('/api/auth/password-reset/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Password reset could not be requested. Please try again.');
+    }
+    return data;
+  },
+
+  async adminSendReaderPasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+    const activeToken = getWriterToken();
+    const res = await fetch('/api/admin/readers/password-reset', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-token': activeToken || ''
+      },
+      credentials: 'include',
+      body: JSON.stringify({ email })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) {
+      clearWriterToken();
+      throw new Error('Writer session expired. Please log in again.');
+    }
+    if (!res.ok) {
+      throw new Error(data.error || 'The password reset email could not be sent.');
+    }
+    return data;
+  },
+
   async authGetMe(): Promise<{ authenticated: boolean; user: any | null }> {
     try {
       let data: { authenticated: boolean; user: any | null };

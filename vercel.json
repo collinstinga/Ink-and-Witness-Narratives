@@ -59,6 +59,10 @@
       "destination": "/api/index?path=newsletter/unsubscribe"
     },
     {
+      "source": "/password-reset",
+      "destination": "/api/index?path=auth/password-reset"
+    },
+    {
       "source": "/r/:code",
       "destination": "/api/index?path=affiliate/redirect/:code"
     },
