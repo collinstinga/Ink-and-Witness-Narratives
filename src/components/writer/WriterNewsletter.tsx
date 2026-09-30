@@ -206,7 +206,7 @@ export const WriterNewsletter: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="font-serif text-2xl font-bold text-white">Newsletter &amp; Reader Retention</h1>
+          <h1 className="font-serif text-2xl font-bold text-white">Email Terminal</h1>
           <p className="mt-1 text-xs text-slate-400">Consent-based reader updates with explicit audience control. A release email is sent only when explicitly selected during publishing.</p>
         </div>
         <button type="button" onClick={() => void loadOverview()} disabled={loading} className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50">

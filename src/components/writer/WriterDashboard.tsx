@@ -419,6 +419,21 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
         <div className="flex items-center gap-2">
           <button
+            id="mobile-email-terminal-btn"
+            onClick={() => handleTabChange('newsletter')}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-mono flex items-center gap-1.5 cursor-pointer ${
+              currentTab === 'newsletter'
+                ? 'bg-sky-900 border-sky-500 text-white'
+                : 'bg-slate-900 border-slate-800 text-slate-300'
+            }`}
+            title="Open Email Terminal"
+            aria-label="Open Email Terminal"
+          >
+            <Mail className="w-3.5 h-3.5 text-sky-400" />
+            <span>Email</span>
+          </button>
+
+          <button
             id="mobile-save-permanently-btn"
             onClick={handleSavePermanently}
             disabled={savingPermanently}
@@ -712,7 +727,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
           >
             <div className="flex items-center gap-2.5">
               <Mail className="w-4 h-4 text-sky-400" />
-              <span>Newsletter</span>
+              <span>Email Terminal</span>
             </div>
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-950 text-sky-300 border border-sky-800">
               Subscribers

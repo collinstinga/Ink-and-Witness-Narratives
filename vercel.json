@@ -51,6 +51,14 @@
   ],
   "rewrites": [
     {
+      "source": "/newsletter/confirm",
+      "destination": "/api/index?path=newsletter/confirm"
+    },
+    {
+      "source": "/newsletter/unsubscribe",
+      "destination": "/api/index?path=newsletter/unsubscribe"
+    },
+    {
       "source": "/r/:code",
       "destination": "/api/index?path=affiliate/redirect/:code"
     },

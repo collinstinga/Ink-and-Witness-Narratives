@@ -12,6 +12,7 @@ import {
 import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle } from './types.js';
 import { api, getStoredTokens } from './utils/api.js';
 import { applyFavicon } from './utils/favicon.js';
+import { resolveDirectWriterTab } from './utils/writerNavigation.js';
 
 import { Navbar, PublicViewType } from './components/Navbar.js';
 import { HomeView } from './components/views/HomeView.js';
@@ -326,12 +327,8 @@ export default function App() {
         } else {
           writerTab = 'pieces';
         }
-      } else if (second === 'drafts' || second === 'published' || second === 'categories' || 
-                 second === 'media' || second === 'analytics' || second === 'readers' || 
-                 second === 'payments' || second === 'tips' || second === 'comments' || second === 'settings') {
-        writerTab = second as WriterNavTab;
       } else {
-        writerTab = 'overview';
+        writerTab = resolveDirectWriterTab(second) || 'overview';
       }
     } else if (normalizedHash === 'affiliates' || normalizedHash === 'affiliate' || normalizedHash === 'partners') {
       isAffiliatePortalOpen = true;

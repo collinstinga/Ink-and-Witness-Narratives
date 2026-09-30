@@ -1250,7 +1250,7 @@ export async function createApp() {
     }
   );
 
-  app.get('/newsletter/confirm', newsletterCapabilityLimiter, (req: Request, res: Response) => {
+  app.get(['/newsletter/confirm', '/api/newsletter/confirm'], newsletterCapabilityLimiter, (req: Request, res: Response) => {
     const token = typeof req.query.token === 'string' ? req.query.token : '';
     res.setHeader('Cache-Control', 'no-store');
     res.type('html').send(newsletterCapabilityPage({
@@ -1285,7 +1285,7 @@ export async function createApp() {
     }
   );
 
-  app.get('/newsletter/unsubscribe', newsletterCapabilityLimiter, (req: Request, res: Response) => {
+  app.get(['/newsletter/unsubscribe', '/api/newsletter/unsubscribe'], newsletterCapabilityLimiter, (req: Request, res: Response) => {
     const token = typeof req.query.token === 'string' ? req.query.token : '';
     res.setHeader('Cache-Control', 'no-store');
     res.type('html').send(newsletterCapabilityPage({
