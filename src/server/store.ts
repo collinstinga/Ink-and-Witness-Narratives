@@ -122,6 +122,8 @@ const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 
 // Memory Cache synced with disk
 let cachedUsers: Map<string, UserRecord> = new Map();
+let usersHydrated = false;
+let usersHydrationPromise: Promise<void> | null = null;
 let cachedAuthSessions: Map<string, AuthSession> = new Map();
 let cachedAuthSessionVerifiedAt: Map<string, number> = new Map();
 let authSessionLookupPromises: Map<string, Promise<AuthSession | null>> = new Map();
@@ -520,6 +522,48 @@ async function persistArticleCatalogReplacement(
     console.warn('[Data Store] Firestore article restore unavailable; using local JSON fallback:', error);
   }
   return catalogVersion;
+}
+
+async function hydrateUsersOnce(): Promise<void> {
+  if (usersHydrated) return;
+  if (!usersHydrationPromise) {
+    usersHydrationPromise = (async () => {
+      // Authentication must fail closed when Firestore is unavailable. Only a
+      // successful collection read may establish an empty user directory or
+      // trigger first-admin provisioning.
+      const fsUsers = await getAllFirestoreDocs<UserRecord>('users');
+      const nextUsers = new Map<string, UserRecord>();
+      if (fsUsers.length > 0) {
+        for (const user of fsUsers) {
+          if (user?.id) nextUsers.set(user.id, user);
+        }
+        writeJsonFileSync(USERS_FILE, Array.from(nextUsers.values()));
+      } else if (fs.existsSync(USERS_FILE)) {
+        const raw = fs.readFileSync(USERS_FILE, 'utf-8');
+        const parsed: UserRecord[] = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          for (const user of parsed) {
+            if (!user?.id) continue;
+            nextUsers.set(user.id, user);
+            setFirestoreDoc('users', user.id, user).catch(() => {});
+          }
+        }
+      }
+
+      cachedUsers = nextUsers;
+      usersHydrated = true;
+      try {
+        await store.initAdminUser();
+      } catch (error) {
+        console.warn('[Auth Security] Error initializing admin user:', error);
+      }
+    })().catch(error => {
+      usersHydrationPromise = null;
+      usersHydrated = false;
+      throw error;
+    });
+  }
+  await usersHydrationPromise;
 }
 
 async function hydrateAffiliateStoreOnce(): Promise<void> {
@@ -1759,6 +1803,9 @@ export const store = {
     publicMetadataRefreshPromise = null;
     affiliateStoreInitializationPromise = null;
     affiliateStoreInitialized = false;
+    cachedUsers.clear();
+    usersHydrated = false;
+    usersHydrationPromise = null;
     const startupStartedAt = Date.now();
 
     // Begin independent Firestore reads together. Each result remains wrapped so
@@ -1781,7 +1828,6 @@ export const store = {
     );
 
     const startupReads = {
-      users: captureStartupRead(getAllFirestoreDocs<UserRecord>('users')),
       articleCatalog: articleCatalogRead,
       publicMetadata: captureStartupRead(
         getFirestoreDoc<{ version?: string }>('site_configs', 'public_metadata')
@@ -1818,41 +1864,22 @@ export const store = {
     // Check if the store has already been initialized previously
     const alreadyInitialized = fs.existsSync(INITIALIZED_FILE) || fs.existsSync(ARTICLES_FILE);
 
-    // 0. Load Users from persistent Firestore / JSON file. Never provision an
-    // admin after a failed cloud read: an outage must not look like an empty DB.
-    cachedUsers.clear();
-    let usersLoaded = false;
-    try {
-      const fsUsers = await useStartupRead(startupReads.users);
-      usersLoaded = true;
-      if (fsUsers && fsUsers.length > 0) {
-        for (const user of fsUsers) {
-          cachedUsers.set(user.id, user);
-        }
-        writeJsonFileSync(USERS_FILE, Array.from(cachedUsers.values()));
-      } else if (fs.existsSync(USERS_FILE)) {
-        const raw = fs.readFileSync(USERS_FILE, 'utf-8');
-        const parsed: UserRecord[] = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          for (const user of parsed) {
-            cachedUsers.set(user.id, user);
-            setFirestoreDoc('users', user.id, user).catch(() => {});
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[Data Store] Error loading users from Firestore:', err);
-    }
-
-    // Provision admin user securely from environment secrets if needed
-    if (usersLoaded) {
+    // 0. Public page loads and hashed cookie-session lookups do not need the
+    // complete user directory. Defer that collection scan on Vercel until an
+    // account operation (login, registration, status, library, or linking)
+    // actually needs it. Local development keeps eager hydration, and the
+    // environment switch provides a production rollback without a code change.
+    const eagerUserBootstrap = !process.env.VERCEL ||
+      process.env.EAGER_USER_BOOTSTRAP?.trim().toLowerCase() === 'true';
+    if (eagerUserBootstrap) {
       try {
-        await this.initAdminUser();
+        await hydrateUsersOnce();
       } catch (err) {
-        console.warn('[Data Store] Error initializing admin user:', err);
+        console.warn('[Data Store] Error loading users from Firestore:', err);
+        console.warn('[Auth Security] Skipping admin provisioning because the users collection could not be read.');
       }
     } else {
-      console.warn('[Auth Security] Skipping admin provisioning because the users collection could not be read.');
+      console.log('[Data Store] User directory hydration deferred until an account-dependent request.');
     }
 
     // 0b. Primary auth sessions are loaded by a one-document hashed lookup when
@@ -2283,6 +2310,10 @@ export const store = {
         console.warn('[Data Store] Error checking/creating startup snapshot:', e);
       }
     }
+  },
+
+  async ensureUsersHydrated(): Promise<void> {
+    await hydrateUsersOnce();
   },
 
   async ensureAffiliateStoreInitialized(): Promise<void> {
@@ -3480,6 +3511,7 @@ export const store = {
     articleTitle: string;
     accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
   }>> {
+    await hydrateUsersOnce();
     const user = this.getUserById(userIdOrEmail) || this.getUserByEmail(userIdOrEmail);
     const userEmail = user ? user.email.toLowerCase() : userIdOrEmail.toLowerCase();
     const userPhone = phone || '';
@@ -3603,9 +3635,6 @@ export const store = {
   },
 
   async linkUserPurchase(userId: string, query: string): Promise<{ success: boolean; message: string; linkedCount: number }> {
-    const user = this.getUserById(userId);
-    if (!user) return { success: false, message: "User not found", linkedCount: 0 };
-
     const token = query.trim();
     if (!isSafeLegacyReaderLicenseToken(token)) {
       return {
@@ -3614,6 +3643,10 @@ export const store = {
         linkedCount: 0
       };
     }
+
+    await hydrateUsersOnce();
+    const user = this.getUserById(userId);
+    if (!user) return { success: false, message: "User not found", linkedCount: 0 };
 
     const licenseRef = getDb().collection('reader_licenses').doc(token);
     const linkedLicense = await getDb().runTransaction(async firestoreTransaction => {

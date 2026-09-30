@@ -15,6 +15,8 @@ const storeMocks = vi.hoisted(() => {
     })),
     getAuthSession: vi.fn(),
     getArticles: vi.fn(() => []),
+    getAllUsers: vi.fn(() => []),
+    ensureUsersHydrated: vi.fn(async () => undefined),
     ensureAffiliateStoreInitialized: vi.fn(async () => undefined),
     affiliates: {}
   };
@@ -131,5 +133,40 @@ describe('persistent asset delivery', () => {
     expect(storeMocks.init).toHaveBeenCalledTimes(1);
     expect(storeMocks.getArticles).toHaveBeenCalledTimes(2);
     expect(storeMocks.getArticles).toHaveBeenCalledWith(false);
+  });
+
+  it('hydrates users only for account-directory routes', async () => {
+    const publicResponse = await fetch(`${baseUrl}/api/health`);
+
+    expect(publicResponse.status).toBe(200);
+    expect(storeMocks.ensureUsersHydrated).not.toHaveBeenCalled();
+
+    const accountResponse = await fetch(`${baseUrl}/api/auth/status`);
+
+    expect(accountResponse.status).toBe(200);
+    expect(await accountResponse.json()).toEqual({ hasAdmin: false, totalUsers: 0 });
+    expect(storeMocks.ensureUsersHydrated).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let anonymous library requests force a user-directory scan', async () => {
+    const response = await fetch(`${baseUrl}/api/user/library`);
+
+    expect(response.status).toBe(401);
+    expect(storeMocks.ensureUsersHydrated).not.toHaveBeenCalled();
+  });
+
+  it('fails account requests closed when deferred user hydration is unavailable', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    storeMocks.ensureUsersHydrated.mockRejectedValueOnce(new Error('temporary user directory outage'));
+
+    const response = await fetch(`${baseUrl}/api/auth/status`);
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      error: 'Account services are temporarily unavailable. Please retry.'
+    });
+    errorSpy.mockRestore();
   });
 });

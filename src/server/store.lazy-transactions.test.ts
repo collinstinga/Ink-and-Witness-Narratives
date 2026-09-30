@@ -51,6 +51,16 @@ const dbMocks = vi.hoisted(() => {
     accessSource: 'MPESA_PURCHASE' as const
   };
 
+  const remoteUser = {
+    id: 'user_remote_reader',
+    email: 'reader@example.test',
+    passwordHash: 'test-password-hash',
+    role: 'client' as const,
+    name: 'Remote Reader',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  };
+
   const recentTransaction = {
     id: 'tx_recent',
     checkoutRequestId: 'checkout_recent',
@@ -71,6 +81,7 @@ const dbMocks = vi.hoisted(() => {
 
   return {
     remoteTransaction,
+    remoteUser,
     directTransaction,
     directTransactionState,
     directReaderLicense,
@@ -79,9 +90,11 @@ const dbMocks = vi.hoisted(() => {
     settingsState,
     batchSet,
     batchCommit,
-    getAllFirestoreDocs: vi.fn(async (collectionName: string) =>
-      collectionName === 'transactions' ? [remoteTransaction] : []
-    ),
+    getAllFirestoreDocs: vi.fn(async (collectionName: string) => {
+      if (collectionName === 'transactions') return [remoteTransaction];
+      if (collectionName === 'users') return [remoteUser];
+      return [];
+    }),
     getFirestoreDoc: vi.fn(async (collectionName: string, docId: string) => {
       if (collectionName === 'transactions' && docId === directTransaction.checkoutRequestId) {
         return structuredClone(directTransactionState.current);
@@ -164,6 +177,26 @@ describe('lazy transaction hydration', () => {
 
     expect(startupTransactionReads).toHaveLength(0);
     expect(() => store.getTransactions()).toThrow(/must be hydrated/i);
+  });
+
+  it('defers and coalesces the user directory scan until account work needs it', async () => {
+    const startupUserReads = dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'users');
+    expect(startupUserReads).toHaveLength(0);
+    expect(store.getUserByEmail(dbMocks.remoteUser.email)).toBeNull();
+
+    await Promise.all([
+      store.ensureUsersHydrated(),
+      store.ensureUsersHydrated()
+    ]);
+
+    expect(dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'users')).toHaveLength(1);
+    expect(store.getUserByEmail(dbMocks.remoteUser.email)).toMatchObject(dbMocks.remoteUser);
+
+    await store.ensureUsersHydrated();
+    expect(dbMocks.getAllFirestoreDocs.mock.calls
+      .filter(([collectionName]) => collectionName === 'users')).toHaveLength(1);
   });
 
   it('loads a checkout directly without scanning the transaction ledger', async () => {

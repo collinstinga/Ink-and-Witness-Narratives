@@ -956,6 +956,31 @@ export async function createApp() {
   });
   app.use(loadSessionUser);
 
+  // Anonymous reading and cookie-session verification do not need a scan of
+  // every account. Hydrate the user directory only for the small set of public
+  // routes that performs synchronous directory lookups. Authenticated library
+  // methods hydrate themselves after the route has verified the session, so an
+  // anonymous request cannot force a full account scan.
+  const userDirectoryDependentPaths = new Set([
+    '/api/auth/login',
+    '/api/auth/register',
+    '/api/auth/status'
+  ]);
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    if (!userDirectoryDependentPaths.has(req.path)) return next();
+    try {
+      await store.ensureUsersHydrated();
+      return next();
+    } catch (error) {
+      console.error('[Data Store] Deferred user directory initialization failed:', error);
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      return res.status(503).json({
+        error: 'Account services are temporarily unavailable. Please retry.'
+      });
+    }
+  });
+
   // The public catalogue does not need affiliate ledgers. Hydrate that larger
   // subsystem only when a referral, affiliate, payment, or writer-admin request
   // actually needs it, while coalescing concurrent first requests.
