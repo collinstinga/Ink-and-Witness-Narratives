@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { 
   X, 
   Lock, 
@@ -41,15 +41,33 @@ import {
   KeyRound,
   AlertCircle,
   Unlock,
-  Shield
+  Shield,
+  Star,
+  Music2,
+  Bell
 } from 'lucide-react';
-import { Article, AuthorProfile, User } from '../types.js';
+import {
+  Article,
+  AuthorProfile,
+  PieceSocialProof,
+  ReaderArticleProgress,
+  ReaderReactionType,
+  User
+} from '../types.js';
 import { api, getArticleReceipt } from '../utils/api.js';
 import { chooseNarrationVoice, cleanTextForNarration, splitNarrationText } from '../utils/narration.js';
 import { SafeMarkdown } from './common/SafeMarkdown.js';
 import { ArticleCard } from './ArticleCard.js';
 
 const EMPTY_ARTICLES: Article[] = [];
+
+const REACTION_LABELS: Array<{ type: ReaderReactionType; label: string }> = [
+  { type: 'this_hurt', label: 'This hurt' },
+  { type: 'felt_seen', label: 'I felt seen' },
+  { type: 'beautiful', label: 'Beautiful' },
+  { type: 'reread', label: 'I need to reread this' },
+  { type: 'damn', label: 'Damn' }
+];
 
 interface ArticleReaderModalProps {
   article: Article | null;
@@ -168,6 +186,21 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const [manualRequiresAuth, setManualRequiresAuth] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
   const [isLocallyUnlocked, setIsLocallyUnlocked] = useState(false);
+  const [readingProgress, setReadingProgress] = useState<ReaderArticleProgress | null>(null);
+  const [activeBlockId, setActiveBlockId] = useState('reader-para-0');
+  const [socialProof, setSocialProof] = useState<PieceSocialProof | null>(null);
+  const [socialLoading, setSocialLoading] = useState(false);
+  const [reactionSaving, setReactionSaving] = useState(false);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewText, setReviewText] = useState('');
+  const [reviewSaving, setReviewSaving] = useState(false);
+  const [reviewNotice, setReviewNotice] = useState('');
+  const [followSaving, setFollowSaving] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const progressSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestProgressRef = useRef<{ percent: number; blockId: string; activeChapterId?: string; activeChapterTitle?: string; chapterPercent?: number } | null>(null);
+  const lastSavedPercentRef = useRef(-1);
+  const lastSavedBlockIdRef = useRef('');
 
   const effectiveUnlocked = isUnlocked || isLocallyUnlocked;
 
@@ -178,6 +211,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     setManualError(null);
     setManualSuccess(null);
     setManualActivationToken('');
+    setActiveBlockId('reader-para-0');
   }, [article?.id]);
 
   const handleVerifyManualAccess = async (e?: React.FormEvent) => {
@@ -402,6 +436,199 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       : [],
     [article, articles, effectiveUnlocked]
   );
+
+  const chapterMarkers = useMemo(() => {
+    if (!article?.content) return [];
+    return article.content.split('\n\n').map((paragraph, index) => {
+      const match = paragraph.trim().match(/^#{1,3}\s+(.+)/);
+      return match ? { index, blockId: `reader-para-${index}`, title: match[1].trim() } : null;
+    }).filter((marker): marker is { index: number; blockId: string; title: string } => Boolean(marker));
+  }, [article?.content]);
+
+  const refreshSocialProof = async (articleId: string) => {
+    setSocialLoading(true);
+    try {
+      setSocialProof(await api.getPieceSocialProof(articleId));
+    } catch {
+      setSocialProof(null);
+    } finally {
+      setSocialLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen || !article?.id) return;
+    void refreshSocialProof(article.id);
+  }, [isOpen, article?.id, currentUser?.id]);
+
+  useEffect(() => {
+    if (!isOpen || !article?.id || !effectiveUnlocked || !currentUser || currentUser.role !== 'client') {
+      setReadingProgress(null);
+      latestProgressRef.current = null;
+      lastSavedPercentRef.current = -1;
+      lastSavedBlockIdRef.current = '';
+      return;
+    }
+    latestProgressRef.current = null;
+    let active = true;
+    api.saveReaderProgress(article.id, {})
+      .then(({ progress }) => {
+        if (!active) return;
+        setReadingProgress(progress);
+        setActiveBlockId(progress?.blockId || 'reader-para-0');
+        lastSavedPercentRef.current = progress?.percent ?? -1;
+        lastSavedBlockIdRef.current = progress?.blockId || '';
+        const container = scrollContainerRef.current;
+        window.setTimeout(() => {
+          if (!active || !container || !progress) return;
+          const target = progress.blockId ? document.getElementById(progress.blockId) : null;
+          if (target) target.scrollIntoView({ block: 'center' });
+          else if (container.scrollHeight > container.clientHeight) {
+            container.scrollTop = (progress.percent / 100) * (container.scrollHeight - container.clientHeight);
+          }
+        }, 180);
+      })
+      .catch(() => setReadingProgress(null));
+    return () => { active = false; };
+  }, [isOpen, article?.id, effectiveUnlocked, currentUser?.id, currentUser?.role]);
+
+  const persistLatestProgress = useCallback(() => {
+    if (!article || !currentUser || currentUser.role !== 'client' || !latestProgressRef.current) return;
+    const payload = latestProgressRef.current;
+    if (Math.abs(payload.percent - lastSavedPercentRef.current) < 2 && payload.blockId === lastSavedBlockIdRef.current) return;
+    lastSavedPercentRef.current = payload.percent;
+    lastSavedBlockIdRef.current = payload.blockId;
+    void api.saveReaderProgress(article.id, payload)
+      .then(result => setReadingProgress(result.progress))
+      .catch(() => {
+        // Reading remains uninterrupted; a later scroll/close retries the checkpoint.
+        lastSavedPercentRef.current = -1;
+        lastSavedBlockIdRef.current = '';
+      });
+  }, [article?.id, currentUser?.id, currentUser?.role]);
+
+  const handleReaderScroll = () => {
+    const container = scrollContainerRef.current;
+    if (!container || !article || !effectiveUnlocked || !currentUser || currentUser.role !== 'client') return;
+    const scrollable = Math.max(1, container.scrollHeight - container.clientHeight);
+    const percent = Math.max(0, Math.min(100, (container.scrollTop / scrollable) * 100));
+    const blocks = Array.from(
+      container.querySelectorAll<HTMLElement>('[id^="reader-para-"]')
+    ) as HTMLElement[];
+    const containerTop = container.getBoundingClientRect().top;
+    let active = blocks[0];
+    for (const block of blocks) {
+      if (block.getBoundingClientRect().top <= containerTop + container.clientHeight * 0.35) active = block;
+      else break;
+    }
+    const blockId = active?.id || activeBlockId;
+    setActiveBlockId(blockId);
+    const blockIndex = Number(blockId.replace('reader-para-', '')) || 0;
+    const chapterIndex = chapterMarkers.reduce((found, marker, index) => marker.index <= blockIndex ? index : found, -1);
+    const chapter = chapterIndex >= 0 ? chapterMarkers[chapterIndex] : undefined;
+    const nextChapter = chapterIndex >= 0 ? chapterMarkers[chapterIndex + 1] : undefined;
+    const chapterSpan = Math.max(1, (nextChapter?.index ?? blocks.length) - (chapter?.index ?? 0));
+    latestProgressRef.current = {
+      percent: Math.round(percent * 10) / 10,
+      blockId,
+      ...(chapter ? {
+        activeChapterId: chapter.blockId,
+        activeChapterTitle: chapter.title,
+        chapterPercent: Math.max(0, Math.min(100, ((blockIndex - chapter.index) / chapterSpan) * 100))
+      } : {})
+    };
+    const now = new Date().toISOString();
+    setReadingProgress(previous => {
+      const latest = latestProgressRef.current!;
+      return {
+        articleId: article.id,
+        percent: 0,
+        bookmarks: [],
+        startedAt: now,
+        ...(previous || {}),
+        ...latest,
+        furthestPercent: Math.max(previous?.furthestPercent ?? previous?.percent ?? 0, latest.percent),
+        lastReadAt: now
+      };
+    });
+    if (progressSaveTimerRef.current) clearTimeout(progressSaveTimerRef.current);
+    progressSaveTimerRef.current = setTimeout(persistLatestProgress, 10_000);
+  };
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    return () => {
+      if (progressSaveTimerRef.current) clearTimeout(progressSaveTimerRef.current);
+      persistLatestProgress();
+    };
+  }, [isOpen, persistLatestProgress]);
+
+  const handleBookmark = async () => {
+    if (!article || !currentUser) {
+      onOpenAuth?.('signin');
+      return;
+    }
+    try {
+      const block = document.getElementById(activeBlockId);
+      const label = block?.textContent?.trim().slice(0, 140) || article.title;
+      const result = await api.toggleReaderBookmark(article.id, activeBlockId, label);
+      setReadingProgress(result.progress);
+      showToast(result.bookmarked ? 'Passage bookmarked' : 'Bookmark removed');
+    } catch (error: any) {
+      showToast(error?.message || 'Bookmark could not be updated.');
+    }
+  };
+
+  const handleReaction = async (reaction: ReaderReactionType) => {
+    if (!article || !currentUser) {
+      onOpenAuth?.('signin');
+      return;
+    }
+    setReactionSaving(true);
+    try {
+      const result = await api.setPieceReaction(article.id, reaction);
+      setSocialProof(previous => previous ? {
+        ...previous,
+        reactionCounts: result.reactionCounts,
+        currentReaction: result.currentReaction
+      } : previous);
+    } catch (error: any) {
+      showToast(error?.message || 'Reaction could not be saved.');
+    } finally {
+      setReactionSaving(false);
+    }
+  };
+
+  const handleReviewSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!article || !currentUser) return onOpenAuth?.('signin');
+    setReviewSaving(true);
+    setReviewNotice('');
+    try {
+      const result = await api.savePieceReview(article.id, reviewRating, reviewText);
+      setReviewText('');
+      setReviewNotice(result.message);
+      await refreshSocialProof(article.id);
+    } catch (error: any) {
+      setReviewNotice(error?.message || 'Review could not be saved.');
+    } finally {
+      setReviewSaving(false);
+    }
+  };
+
+  const handleFollowWork = async () => {
+    if (!article) return;
+    if (!currentUser) return onOpenAuth?.('signin');
+    setFollowSaving(true);
+    try {
+      const result = await api.followNewsletterWork(article.id);
+      showToast(result.message);
+    } catch (error: any) {
+      showToast(error?.message || 'Notification preference could not be saved.');
+    } finally {
+      setFollowSaving(false);
+    }
+  };
 
   // Initialize Speech Synthesis Voices
   useEffect(() => {
@@ -654,12 +881,12 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     return `https://inkandwitness.com/?monograph=${article.slug || article.id}`;
   };
 
-  const showToast = (msg: string) => {
+  function showToast(msg: string) {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage(null);
     }, 3000);
-  };
+  }
 
   // 1. Share on X (formerly Twitter)
   const handleShareToX = (customQuote?: string) => {
@@ -791,6 +1018,23 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                 )}
                 <span>{isAudioActive ? (isPlaying ? 'Playing Audio' : 'Audio Paused') : 'Audio'}</span>
               </button>
+
+              {effectiveUnlocked && (
+                <button
+                  id="reader-bookmark-btn"
+                  type="button"
+                  onClick={() => void handleBookmark()}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    readingProgress?.bookmarks.some(bookmark => bookmark.blockId === activeBlockId)
+                      ? 'border-amber-600 bg-amber-950/70 text-amber-300'
+                      : 'border-slate-700 bg-slate-800 text-slate-300 hover:border-amber-700 hover:text-amber-300'
+                  }`}
+                  title="Save or remove a bookmark at the current passage"
+                >
+                  <Bookmark className="h-3.5 w-3.5" />
+                  <span>Bookmark</span>
+                </button>
+              )}
 
               {/* Font size toggles */}
               <div className="flex items-center gap-1 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-xs font-mono text-slate-400 shrink-0">
@@ -1079,7 +1323,41 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
         )}
 
         {/* Scrollable Reader Body */}
-        <div id="article-reader-scroll" className="overflow-y-auto px-6 sm:px-12 py-8 flex-1 space-y-8">
+        <div
+          id="article-reader-scroll"
+          ref={scrollContainerRef}
+          onScroll={handleReaderScroll}
+          className="overflow-y-auto px-6 sm:px-12 py-8 flex-1 space-y-8"
+        >
+          {effectiveUnlocked && currentUser?.role === 'client' && readingProgress && (
+            <div className="sticky top-0 z-10 -mx-2 rounded-xl border border-sky-800/60 bg-slate-950/95 px-3 py-2 shadow-lg backdrop-blur">
+              <div className="mb-1 flex items-center justify-between gap-3 text-[10px] font-mono text-slate-400">
+                <span className="truncate">
+                  {readingProgress.activeChapterTitle || 'Continue where you left off'}
+                  {readingProgress.chapterPercent !== undefined ? ` • ${Math.round(readingProgress.chapterPercent)}% of chapter` : ''}
+                </span>
+                <span className="shrink-0 text-sky-300">{Math.round(readingProgress.percent)}% read</span>
+              </div>
+              <div className="h-1 overflow-hidden rounded-full bg-slate-800">
+                <div className="h-full rounded-full bg-sky-500 transition-[width]" style={{ width: `${readingProgress.percent}%` }} />
+              </div>
+              {readingProgress.bookmarks.length > 0 && (
+                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-0.5" aria-label="Saved bookmarks">
+                  {readingProgress.bookmarks.map(bookmark => (
+                    <button
+                      key={bookmark.id}
+                      type="button"
+                      onClick={() => document.getElementById(bookmark.blockId)?.scrollIntoView({ block: 'center', behavior: 'smooth' })}
+                      className="max-w-[14rem] shrink-0 truncate rounded-full border border-amber-800/70 bg-amber-950/50 px-2 py-1 text-[9px] text-amber-200 hover:border-amber-600"
+                      title={bookmark.label}
+                    >
+                      <Bookmark className="mr-1 inline h-2.5 w-2.5" />{bookmark.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           
           {/* Header Title Section */}
           <header className="border-b border-slate-800/80 pb-8 space-y-4">
@@ -1693,6 +1971,38 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
               )}
             </div>
 
+            {effectiveUnlocked && article.behindThePiece?.enabled && (
+              <section className="rounded-3xl border border-amber-500/25 bg-gradient-to-br from-amber-950/25 via-slate-950 to-slate-900 p-5 sm:p-7" aria-labelledby="behind-piece-title">
+                <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400">Writer&apos;s Notes</p>
+                <h3 id="behind-piece-title" className="mt-1 font-display text-xl font-bold text-white">Behind the Piece</h3>
+                {article.behindThePiece.inspiration && (
+                  <p className="mt-4 border-l-2 border-amber-500/50 pl-4 font-serif italic leading-relaxed text-slate-300">
+                    {article.behindThePiece.inspiration}
+                  </p>
+                )}
+                {article.behindThePiece.note && (
+                  <div className="mt-5 text-sm leading-relaxed text-slate-200">
+                    <SafeMarkdown markdown={article.behindThePiece.note} variant="reader" />
+                  </div>
+                )}
+                {(article.behindThePiece.songTitle || article.behindThePiece.songUrl) && (
+                  <a
+                    href={article.behindThePiece.songUrl || undefined}
+                    target={article.behindThePiece.songUrl ? '_blank' : undefined}
+                    rel={article.behindThePiece.songUrl ? 'noopener noreferrer' : undefined}
+                    className="mt-5 inline-flex items-center gap-3 rounded-2xl border border-amber-700/50 bg-slate-950/70 px-4 py-3 text-sm text-amber-200"
+                  >
+                    <Music2 className="h-4 w-4 text-amber-400" />
+                    <span>
+                      <span className="block font-semibold">{article.behindThePiece.songTitle || 'Associated song'}</span>
+                      {article.behindThePiece.songArtist && <span className="block text-xs text-slate-400">{article.behindThePiece.songArtist}</span>}
+                    </span>
+                    {article.behindThePiece.songUrl && <ExternalLink className="h-3.5 w-3.5" />}
+                  </a>
+                )}
+              </section>
+            )}
+
             {/* Featured Quote Box */}
             <div className="p-5 rounded-2xl bg-slate-950/80 border border-slate-800/90 relative">
               <Quote className="w-8 h-8 text-sky-500/20 absolute top-4 left-4 pointer-events-none" />
@@ -1740,6 +2050,120 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
             </div>
           </div>
+
+          <section className="my-10 space-y-5 rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 sm:p-7" aria-labelledby="reader-response-title">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-400">Reader response</p>
+                <h4 id="reader-response-title" className="mt-1 font-display text-xl font-bold text-white">What this piece left behind</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleFollowWork()}
+                disabled={followSaving}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-sky-700 bg-sky-950/70 px-4 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/70 disabled:opacity-60"
+              >
+                <Bell className="h-4 w-4" />
+                <span>{followSaving ? 'Saving…' : 'Notify Me About Updates'}</span>
+              </button>
+            </div>
+
+            {socialProof && (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  ['Purchased', socialProof.purchaseCount],
+                  ['Views', socialProof.viewCount],
+                  ['Completed reads', socialProof.completedReadCount],
+                  ['Verified reviews', socialProof.verifiedReviewCount]
+                ].map(([label, value]) => (
+                  <div key={String(label)} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-center">
+                    <p className="font-display text-xl font-bold text-white">{Number(value).toLocaleString()}</p>
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{String(label)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {effectiveUnlocked && (
+              <div>
+                <p className="mb-2 text-xs text-slate-400">React privately. Only totals are public.</p>
+                <div className="flex flex-wrap gap-2">
+                  {REACTION_LABELS.map(item => (
+                    <button
+                      key={item.type}
+                      type="button"
+                      disabled={reactionSaving}
+                      onClick={() => void handleReaction(item.type)}
+                      aria-pressed={socialProof?.currentReaction === item.type}
+                      className={`rounded-full border px-3 py-1.5 text-xs transition-colors disabled:opacity-60 ${
+                        socialProof?.currentReaction === item.type
+                          ? 'border-sky-500 bg-sky-950 text-sky-200'
+                          : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-sky-700'
+                      }`}
+                    >
+                      {item.label} <span className="ml-1 font-mono text-slate-500">{socialProof?.reactionCounts[item.type] || 0}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {socialProof && socialProof.verifiedReviewCount > 0 && (
+              <div className="space-y-3 border-t border-slate-800 pt-5">
+                <div className="flex items-center gap-2 text-sm text-amber-300">
+                  <Star className="h-4 w-4 fill-amber-400" />
+                  <span className="font-bold">{socialProof.averageRating.toFixed(1)} / 5</span>
+                  <span className="text-xs text-slate-500">from verified readers</span>
+                </div>
+                {socialProof.testimonials.length > 0 && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {socialProof.testimonials.map(testimonial => (
+                      <blockquote key={testimonial.id} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                        <div className="mb-2 text-xs text-amber-400">{'★'.repeat(testimonial.rating)}{'☆'.repeat(5 - testimonial.rating)}</div>
+                        <p className="font-serif text-sm italic leading-relaxed text-slate-200">“{testimonial.review}”</p>
+                        <footer className="mt-2 text-[10px] font-mono uppercase tracking-wider text-emerald-400">Verified reader</footer>
+                      </blockquote>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {effectiveUnlocked && currentUser?.role === 'client' && (
+              <form onSubmit={handleReviewSubmit} className="space-y-3 border-t border-slate-800 pt-5">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Leave a verified review</p>
+                    <p className="text-[11px] text-slate-500">Available after 80% reading progress. The writer decides which written testimonials appear publicly.</p>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-slate-400">
+                    Rating
+                    <select value={reviewRating} onChange={event => setReviewRating(Number(event.target.value))} className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-amber-300">
+                      {[5, 4, 3, 2, 1].map(value => <option key={value} value={value}>{value} / 5</option>)}
+                    </select>
+                  </label>
+                </div>
+                <textarea
+                  value={reviewText}
+                  onChange={event => setReviewText(event.target.value)}
+                  minLength={10}
+                  maxLength={2000}
+                  rows={3}
+                  placeholder={readingProgress && (readingProgress.furthestPercent ?? readingProgress.percent) >= 80 ? 'Share what stayed with you…' : 'Continue reading to 80% to leave a review.'}
+                  disabled={!readingProgress || (readingProgress.furthestPercent ?? readingProgress.percent) < 80 || reviewSaving}
+                  className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500 disabled:opacity-50"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-slate-400" role="status">{reviewNotice}</p>
+                  <button type="submit" disabled={reviewSaving || reviewText.trim().length < 10 || !readingProgress || (readingProgress.furthestPercent ?? readingProgress.percent) < 80} className="rounded-xl bg-sky-600 px-4 py-2 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50">
+                    {reviewSaving ? 'Saving…' : 'Submit Review'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {socialLoading && <p className="text-xs text-slate-500">Loading reader responses…</p>}
+          </section>
 
           {effectiveUnlocked && onReadArticle && readerRecommendations.length > 0 && (
             <section

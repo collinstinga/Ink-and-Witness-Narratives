@@ -102,7 +102,111 @@ export interface Article {
   seoTitle?: string;
   metaDescription?: string;
   manualRelatedPieceIds?: string[];
+  behindThePiece?: {
+    enabled: boolean;
+    note?: string;
+    inspiration?: string;
+    songTitle?: string;
+    songArtist?: string;
+    songUrl?: string;
+  };
   isUnlocked?: boolean;
+}
+
+export type ReaderReactionType =
+  | 'this_hurt'
+  | 'felt_seen'
+  | 'beautiful'
+  | 'reread'
+  | 'damn';
+
+export interface ReaderBookmark {
+  id: string;
+  blockId: string;
+  label: string;
+  createdAt: string;
+}
+
+export interface ReaderArticleProgress {
+  articleId: string;
+  percent: number;
+  /** Highest point reached, kept separately from the current resume position. */
+  furthestPercent?: number;
+  blockId?: string;
+  activeChapterId?: string;
+  activeChapterTitle?: string;
+  chapterPercent?: number;
+  bookmarks: ReaderBookmark[];
+  startedAt: string;
+  lastReadAt: string;
+  completedAt?: string;
+}
+
+export interface ReaderHomeItem {
+  article: Article & { isUnlocked?: boolean };
+  progress?: ReaderArticleProgress;
+  viewedAt?: string;
+  accessSource?: LibraryAccessSource;
+}
+
+export interface ContentCollection {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  pieceIds: string[];
+  coverImage?: string;
+  order: number;
+  isPublished: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContentBundle {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  pieceIds: string[];
+  priceKes: number;
+  coverImage?: string;
+  isPublished: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PieceReview {
+  id: string;
+  articleId: string;
+  rating: number;
+  review: string;
+  status: 'pending' | 'approved' | 'hidden';
+  featured: boolean;
+  verifiedReader: true;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PieceSocialProof {
+  articleId: string;
+  reactionCounts: Record<ReaderReactionType, number>;
+  currentReaction?: ReaderReactionType;
+  verifiedReviewCount: number;
+  averageRating: number;
+  completedReadCount: number;
+  purchaseCount: number;
+  viewCount: number;
+  testimonials: PieceReview[];
+}
+
+export interface ReaderHomeResponse {
+  success: true;
+  continueReading: ReaderHomeItem[];
+  purchased: ReaderHomeItem[];
+  recentlyViewed: ReaderHomeItem[];
+  recommendations: ReaderHomeItem[];
+  collections: Array<ContentCollection & { pieces: Article[] }>;
+  bundles: Array<ContentBundle & { pieces: Article[] }>;
 }
 
 export interface PieceLike {
@@ -685,6 +789,10 @@ export interface PaymentTransaction {
   merchantRequestId?: string;
   articleId: string;
   articleTitle?: string;
+  purchaseKind?: 'piece' | 'bundle';
+  bundleId?: string;
+  /** Immutable entitlement snapshot captured before payment initiation. */
+  bundlePieceIds?: string[];
   phoneNumber?: string; // Sanitized or masked
   senderName?: string;
   amount: number; // KES amount charged
@@ -909,6 +1017,7 @@ export type WriterNavTab =
   | 'published' 
   | 'homepage'
   | 'topics'
+  | 'reader-experience'
   | 'media'
   | 'affiliates'
   | 'payments' 

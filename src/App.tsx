@@ -9,7 +9,7 @@ import {
   ArrowRight,
   LifeBuoy
 } from 'lucide-react';
-import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle } from './types.js';
+import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle, ContentBundle } from './types.js';
 import { api, getStoredTokens } from './utils/api.js';
 import { applyFavicon } from './utils/favicon.js';
 import { resolveDirectWriterTab } from './utils/writerNavigation.js';
@@ -167,6 +167,7 @@ export default function App() {
   const currentUserRef = React.useRef<User | null>(null);
   const accountLibraryRequestIdRef = React.useRef(0);
   const authSessionRequestIdRef = React.useRef(0);
+  const bundleCheckoutActiveRef = React.useRef(false);
 
   useEffect(() => {
     currentUserRef.current = currentUser;
@@ -592,6 +593,13 @@ export default function App() {
   };
 
   const handleCloseCheckout = () => {
+    if (bundleCheckoutActiveRef.current) {
+      bundleCheckoutActiveRef.current = false;
+      setActiveCheckoutArticle(null);
+      setIsLibraryOpen(true);
+      void refreshAccountLibrary(currentUserRef.current);
+      return;
+    }
     if (window.history.state && (window.history.state as any).isCheckoutOpen) {
       window.history.back();
     } else {
@@ -904,7 +912,17 @@ export default function App() {
     };
     setUnlockedTokens(updated);
     unlockedTokensRef.current = updated;
-    loadArticleForReader(article.id);
+    if (article.id.startsWith('bundle:')) {
+      void refreshAccountLibrary(currentUserRef.current);
+    } else {
+      loadArticleForReader(article.id);
+    }
+  };
+
+  const handlePurchaseBundle = (_bundle: ContentBundle, checkoutArticle: Article) => {
+    bundleCheckoutActiveRef.current = true;
+    setIsLibraryOpen(false);
+    setActiveCheckoutArticle(checkoutArticle);
   };
 
   // Sync document title with active article or view
@@ -1225,6 +1243,7 @@ export default function App() {
         isLoading={accountLibraryLoading}
         error={accountLibraryError}
         onReadArticle={handleOpenReader}
+        onPurchaseBundle={handlePurchaseBundle}
         onExploreCatalog={() => {
           handleCloseLibrary();
           handleNavigateView('all-pieces');

@@ -36,6 +36,7 @@ const DEFAULT_CONFIRMATION_TTL_MS = 24 * 60 * 60 * 1000;
 const MIN_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const MAX_CONFIRMATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ADMIN_PAGE_SIZE = 100;
+const MAX_FOLLOWED_WORKS = 100;
 const MAX_CAMPAIGN_BODY_LENGTH = 200_000;
 const SUBSCRIBER_ID_PATTERN = /^sub_[A-Za-z0-9_-]{12,}$/;
 const CAMPAIGN_ID_PATTERN = /^nlc_[A-Za-z0-9_-]{12,}$/;
@@ -665,6 +666,40 @@ async function countDocuments(query: any): Promise<number> {
 }
 
 export const newsletterStore = {
+  async followWork(emailInput: unknown, workIdInput: unknown): Promise<{ found: boolean; status?: NewsletterSubscriberStatus }> {
+    const email = normalizeNewsletterEmail(emailInput);
+    const workId = typeof workIdInput === 'string' ? workIdInput.trim() : '';
+    if (!email || !SAFE_REFERENCE_ID.test(workId)) {
+      throw new NewsletterValidationError('A valid reader email and work identifier are required.');
+    }
+    const emailHash = newsletterEmailIndexId(email);
+    const db = getDb();
+    const indexRef = db.collection(NEWSLETTER_COLLECTIONS.emailIndex).doc(emailHash);
+    return db.runTransaction(async transaction => {
+      const indexSnapshot = await transaction.get(indexRef);
+      if (!indexSnapshot.exists) return { found: false };
+      const index = normalizeEmailIndexRecord(emailHash, indexSnapshot.data());
+      if (!index) throw new NewsletterIntegrityError();
+      const subscriberRef = db.collection(NEWSLETTER_COLLECTIONS.subscribers).doc(index.subscriberId);
+      const subscriberSnapshot = await transaction.get(subscriberRef);
+      const subscriber = subscriberSnapshot.exists
+        ? normalizeStoredSubscriber(index.subscriberId, subscriberSnapshot.data())
+        : null;
+      if (!subscriber || subscriber.email !== email || subscriber.emailIndexId !== emailHash) {
+        throw new NewsletterIntegrityError();
+      }
+      if (subscriber.status === 'suppressed' || subscriber.status === 'unsubscribed') {
+        return { found: true, status: subscriber.status };
+      }
+      const followedWorkIds = [...new Set([...(subscriber.followedWorkIds || []), workId])].slice(0, MAX_FOLLOWED_WORKS);
+      transaction.set(subscriberRef, {
+        followedWorkIds,
+        updatedAt: nowIso()
+      }, { merge: true });
+      return { found: true, status: subscriber.status };
+    });
+  },
+
   async requestSubscription(
     input: NewsletterSubscribeInput,
     options: NewsletterSubscriptionOptions = {}
@@ -715,6 +750,10 @@ export const newsletterStore = {
       // revive a provider/legal suppression. The response remains identical.
       if (existing?.status === 'active' || existing?.status === 'suppressed') return null;
 
+      const mergedFollowedWorkIds = [...new Set([
+        ...(existing?.followedWorkIds || []),
+        ...followedWorkIds
+      ])].slice(0, MAX_FOLLOWED_WORKS);
       const subscriber: StoredNewsletterSubscriber = {
         storageVersion: STORAGE_VERSION,
         id: subscriberId,
@@ -723,7 +762,7 @@ export const newsletterStore = {
         nameSearch: (name || '').toLocaleLowerCase('en'),
         ...(name ? { name } : {}),
         interests,
-        ...(followedWorkIds.length > 0 ? { followedWorkIds } : {}),
+        ...(mergedFollowedWorkIds.length > 0 ? { followedWorkIds: mergedFollowedWorkIds } : {}),
         status: 'pending',
         consentSource: input.consentSource,
         consentVersion,

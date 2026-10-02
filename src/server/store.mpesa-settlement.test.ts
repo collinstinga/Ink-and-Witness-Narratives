@@ -169,6 +169,70 @@ describe('atomic M-Pesa settlement', () => {
     expect(firestoreMock.documents.has(`reader_licenses/${result.downloadToken}`)).toBe(true);
   });
 
+  it('atomically grants every snapshotted bundle piece permanently to the signed-in reader', async () => {
+    firestoreMock.documents.set('transactions/checkout_bundle', pendingTransaction('checkout_bundle', {
+      articleId: 'bundle:healing-pair',
+      articleTitle: 'The Healing Pair',
+      purchaseKind: 'bundle',
+      bundleId: 'healing-pair',
+      bundlePieceIds: ['piece_1', 'piece_2', 'piece_3'],
+      userId: 'reader_bundle',
+      userEmail: 'reader.bundle@example.com',
+      buyer: {
+        userId: 'reader_bundle',
+        email: 'reader.bundle@example.com',
+        phoneNumber: '254712345678'
+      }
+    }));
+
+    const first = await store.settleMpesaTransaction(
+      'checkout_bundle',
+      settlement('checkout_bundle', 'SIABUNDLE01')
+    );
+    const retry = await store.settleMpesaTransaction(
+      'checkout_bundle',
+      settlement('checkout_bundle', 'SIABUNDLE01')
+    );
+
+    expect(first.outcome).toBe('committed');
+    expect(retry.outcome).toBe('duplicate');
+    const licenses = Array.from(firestoreMock.documents.entries())
+      .filter(([key]) => key.startsWith('reader_licenses/'))
+      .map(([, value]) => value);
+    expect(licenses).toHaveLength(3);
+    expect(licenses.map(license => license.articleId).sort()).toEqual(['piece_1', 'piece_2', 'piece_3']);
+    expect(licenses).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        userId: 'reader_bundle',
+        email: 'reader.bundle@example.com',
+        expiresAt: 253402300799999,
+        receipt: 'SIABUNDLE01',
+        accessSource: 'MPESA_PURCHASE'
+      })
+    ]));
+  });
+
+  it('rejects a malformed bundle snapshot without settling payment or granting partial access', async () => {
+    firestoreMock.documents.set('transactions/checkout_invalid_bundle', pendingTransaction('checkout_invalid_bundle', {
+      articleId: 'bundle:invalid',
+      purchaseKind: 'bundle',
+      bundleId: 'invalid',
+      bundlePieceIds: ['piece_1']
+    }));
+
+    const result = await store.settleMpesaTransaction(
+      'checkout_invalid_bundle',
+      settlement('checkout_invalid_bundle', 'SIAINVALID1')
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'rejected',
+      error: 'The bundle entitlement snapshot failed validation.'
+    });
+    expect(firestoreMock.documents.get('transactions/checkout_invalid_bundle').status).toBe('PENDING');
+    expect(Array.from(firestoreMock.documents.keys()).some(key => key.startsWith('reader_licenses/'))).toBe(false);
+  });
+
   it('serializes concurrent retries so only one license is created', async () => {
     firestoreMock.documents.set('transactions/checkout_1', pendingTransaction('checkout_1'));
 

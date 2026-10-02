@@ -183,6 +183,37 @@ describe('newsletter store', () => {
     expect((await newsletterStore.getCampaign(campaign.id))?.sentCount).toBe(1);
   }, 60_000);
 
+  it('preserves earlier piece follows when a pending reader requests another notification', async () => {
+    const { newsletterStore } = await import('./newsletterStore.js');
+    let firstToken = '';
+    let replacementToken = '';
+    await newsletterStore.requestSubscription({
+      email: 'reader@example.com',
+      followedWorkIds: ['piece-one'],
+      consentSource: 'reader_preferences',
+      consentVersion: 'v1'
+    }, { onConfirmationRequired: delivery => { firstToken = delivery.confirmationToken; } });
+
+    await newsletterStore.requestSubscription({
+      email: 'reader@example.com',
+      followedWorkIds: ['piece-two'],
+      consentSource: 'reader_preferences',
+      consentVersion: 'v1'
+    }, { onConfirmationRequired: delivery => { replacementToken = delivery.confirmationToken; } });
+
+    expect(firstToken).toMatch(/^nwc_/);
+    expect(replacementToken).toMatch(/^nwc_/);
+    expect(replacementToken).not.toBe(firstToken);
+    expect(await newsletterStore.findSubscriberByEmail('reader@example.com')).toMatchObject({
+      status: 'pending',
+      followedWorkIds: ['piece-one', 'piece-two']
+    });
+    await newsletterStore.confirmSubscription(firstToken);
+    expect((await newsletterStore.findSubscriberByEmail('reader@example.com'))?.status).toBe('pending');
+    await newsletterStore.confirmSubscription(replacementToken);
+    expect((await newsletterStore.findSubscriberByEmail('reader@example.com'))?.status).toBe('active');
+  }, 60_000);
+
   it('creates only one immutable release campaign for a piece', async () => {
     const { newsletterStore } = await import('./newsletterStore.js');
     const first = await newsletterStore.ensureReleaseCampaign({

@@ -29,7 +29,14 @@ import {
   NewsletterCampaign,
   NewsletterCampaignContent,
   NewsletterSubscriber,
-  NewsletterSubscriberStatus
+  NewsletterSubscriberStatus,
+  ReaderHomeResponse,
+  ReaderArticleProgress,
+  PieceSocialProof,
+  ReaderReactionType,
+  ContentCollection,
+  ContentBundle,
+  PieceReview
 } from '../types.js';
 import { getActiveReferral } from './affiliateReferral.js';
 
@@ -871,6 +878,162 @@ export const api = {
     }
     invalidatePublicBootstrap();
     return data;
+  },
+
+  async getReaderHome(): Promise<ReaderHomeResponse> {
+    return safeFetchJson<ReaderHomeResponse>(
+      '/api/reader/home',
+      { cache: 'no-store' },
+      'Your personalized reader home could not be loaded.'
+    );
+  },
+
+  async getReaderProgress(articleId: string): Promise<{ progress: ReaderArticleProgress | null }> {
+    return safeFetchJson(
+      `/api/reader/progress/${encodeURIComponent(articleId)}`,
+      { cache: 'no-store' },
+      'Reading progress could not be loaded.'
+    );
+  },
+
+  async saveReaderProgress(articleId: string, progress: {
+    percent?: number;
+    blockId?: string;
+    activeChapterId?: string;
+    activeChapterTitle?: string;
+    chapterPercent?: number;
+  }): Promise<{ success: true; progress: ReaderArticleProgress }> {
+    return safeFetchJson(
+      `/api/reader/progress/${encodeURIComponent(articleId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(progress)
+      },
+      'Reading progress could not be saved.'
+    );
+  },
+
+  async toggleReaderBookmark(articleId: string, blockId: string, label?: string): Promise<{
+    success: true;
+    bookmarked: boolean;
+    progress: ReaderArticleProgress;
+  }> {
+    return safeFetchJson(
+      `/api/reader/progress/${encodeURIComponent(articleId)}/bookmark`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blockId, label })
+      },
+      'Bookmark could not be updated.'
+    );
+  },
+
+  async getPieceSocialProof(articleId: string): Promise<PieceSocialProof> {
+    return safeFetchJson(
+      `/api/pieces/${encodeURIComponent(articleId)}/social-proof`,
+      { cache: 'no-store' },
+      'Reader responses could not be loaded.'
+    );
+  },
+
+  async setPieceReaction(articleId: string, reaction: ReaderReactionType): Promise<{
+    success: true;
+    reactionCounts: PieceSocialProof['reactionCounts'];
+    currentReaction?: ReaderReactionType;
+  }> {
+    return safeFetchJson(
+      `/api/pieces/${encodeURIComponent(articleId)}/reaction`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reaction })
+      },
+      'Reaction could not be saved.'
+    );
+  },
+
+  async savePieceReview(articleId: string, rating: number, review: string): Promise<{
+    success: true;
+    review: PieceReview;
+    message: string;
+  }> {
+    return safeFetchJson(
+      `/api/pieces/${encodeURIComponent(articleId)}/reviews`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating, review })
+      },
+      'Review could not be saved.'
+    );
+  },
+
+  async followNewsletterWork(workId: string): Promise<{ success: true; confirmed: boolean; message: string }> {
+    return safeFetchJson(
+      '/api/newsletter/follow',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workId })
+      },
+      'Notification preference could not be saved.'
+    );
+  },
+
+  async getDiscoveryCollections(): Promise<{
+    collections: Array<ContentCollection & { pieces: Article[] }>;
+    bundles: Array<ContentBundle & { pieces: Article[]; checkoutArticle: Article }>;
+  }> {
+    return safeFetchJson('/api/discovery/collections', { cache: 'no-store' });
+  },
+
+  async getAdminReaderExperience(): Promise<{
+    collections: ContentCollection[];
+    bundles: ContentBundle[];
+    reviews: PieceReview[];
+  }> {
+    return safeFetchJson('/api/admin/reader-experience', { cache: 'no-store' });
+  },
+
+  async saveContentCollection(input: Partial<ContentCollection>): Promise<{ success: true; collection: ContentCollection }> {
+    const url = input.id
+      ? `/api/admin/collections/${encodeURIComponent(input.id)}`
+      : '/api/admin/collections';
+    return safeFetchJson(url, {
+      method: input.id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    });
+  },
+
+  async deleteContentCollection(id: string): Promise<{ success: true }> {
+    return safeFetchJson(`/api/admin/collections/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+
+  async saveContentBundle(input: Partial<ContentBundle>): Promise<{ success: true; bundle: ContentBundle }> {
+    const url = input.id ? `/api/admin/bundles/${encodeURIComponent(input.id)}` : '/api/admin/bundles';
+    return safeFetchJson(url, {
+      method: input.id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    });
+  },
+
+  async deleteContentBundle(id: string): Promise<{ success: true }> {
+    return safeFetchJson(`/api/admin/bundles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+
+  async moderatePieceReview(id: string, input: { status?: PieceReview['status']; featured?: boolean }): Promise<{
+    success: true;
+    review: PieceReview;
+  }> {
+    return safeFetchJson(`/api/admin/reviews/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    });
   },
 
   async authRequestPasswordReset(email: string): Promise<{ success: boolean; message: string }> {

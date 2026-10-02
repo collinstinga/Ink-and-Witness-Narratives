@@ -153,6 +153,12 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
   // Manual Related Pieces
   const [manualRelatedPieceIds, setManualRelatedPieceIds] = useState<string[]>(initialArticle?.manualRelatedPieceIds || []);
+  const [behindEnabled, setBehindEnabled] = useState(initialArticle?.behindThePiece?.enabled === true);
+  const [behindNote, setBehindNote] = useState(initialArticle?.behindThePiece?.note || '');
+  const [behindInspiration, setBehindInspiration] = useState(initialArticle?.behindThePiece?.inspiration || '');
+  const [behindSongTitle, setBehindSongTitle] = useState(initialArticle?.behindThePiece?.songTitle || '');
+  const [behindSongArtist, setBehindSongArtist] = useState(initialArticle?.behindThePiece?.songArtist || '');
+  const [behindSongUrl, setBehindSongUrl] = useState(initialArticle?.behindThePiece?.songUrl || '');
 
   const [activeTab, setActiveTab] = useState<'write' | 'preview'>('write');
   const [isDirty, setIsDirty] = useState(false);
@@ -259,7 +265,13 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     featured,
     seoTitle,
     metaDescription,
-    manualRelatedPieceIds
+    manualRelatedPieceIds,
+    behindEnabled,
+    behindNote,
+    behindInspiration,
+    behindSongTitle,
+    behindSongArtist,
+    behindSongUrl
   ]);
 
   // Load revisions when opening revisions panel
@@ -353,7 +365,15 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
             featured,
             seoTitle: seoTitle || undefined,
             metaDescription: metaDescription || undefined,
-            manualRelatedPieceIds
+            manualRelatedPieceIds,
+            behindThePiece: {
+              enabled: behindEnabled,
+              note: behindNote.trim() || undefined,
+              inspiration: behindInspiration.trim() || undefined,
+              songTitle: behindSongTitle.trim() || undefined,
+              songArtist: behindSongArtist.trim() || undefined,
+              songUrl: behindSongUrl.trim() || undefined
+            }
           };
           await api.autosaveArticle(currentArticleId, payload);
           if (editVersionRef.current === editVersion && !manualSaveInProgressRef.current) {
@@ -397,6 +417,12 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     seoTitle, 
     metaDescription, 
     manualRelatedPieceIds, 
+    behindEnabled,
+    behindNote,
+    behindInspiration,
+    behindSongTitle,
+    behindSongArtist,
+    behindSongUrl,
     saving, 
     autosaving
   ]);
@@ -714,7 +740,15 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         featured,
         seoTitle: seoTitle.trim() || undefined,
         metaDescription: metaDescription.trim() || undefined,
-        manualRelatedPieceIds: manualRelatedPieceIds.length > 0 ? manualRelatedPieceIds : undefined
+        manualRelatedPieceIds: manualRelatedPieceIds.length > 0 ? manualRelatedPieceIds : undefined,
+        behindThePiece: {
+          enabled: behindEnabled,
+          note: behindNote.trim() || undefined,
+          inspiration: behindInspiration.trim() || undefined,
+          songTitle: behindSongTitle.trim() || undefined,
+          songArtist: behindSongArtist.trim() || undefined,
+          songUrl: behindSongUrl.trim() || undefined
+        }
       };
 
       // Let an older background request finish before this explicit save.
@@ -820,7 +854,15 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       isUnlocked: true,
       seoTitle,
       metaDescription,
-      manualRelatedPieceIds
+      manualRelatedPieceIds,
+      behindThePiece: {
+        enabled: behindEnabled,
+        note: behindNote.trim() || undefined,
+        inspiration: behindInspiration.trim() || undefined,
+        songTitle: behindSongTitle.trim() || undefined,
+        songArtist: behindSongArtist.trim() || undefined,
+        songUrl: behindSongUrl.trim() || undefined
+      }
     };
     onPreview(previewObj);
   };
@@ -1062,6 +1104,36 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               className="w-full px-4 py-2.5 rounded-xl bg-[#0b1120] border border-slate-700 text-xs font-sans text-slate-300 placeholder-slate-600 focus:outline-none focus:border-amber-500 transition-colors resize-none"
             />
           </div>
+
+          <section className="rounded-2xl border border-amber-800/50 bg-amber-950/10 p-4 sm:p-5">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h3 className="font-display text-base font-bold text-white">Behind the Piece</h3>
+                <p className="mt-1 text-xs text-slate-400">Optional inspiration, personal context, writer&apos;s note, or an associated song shown after the unlocked piece.</p>
+              </div>
+              <label className="flex shrink-0 items-center gap-2 text-xs font-mono text-amber-300">
+                <input type="checkbox" checked={behindEnabled} onChange={event => setBehindEnabled(event.target.checked)} className="h-4 w-4 accent-amber-500" />
+                Visible
+              </label>
+            </div>
+            {behindEnabled && (
+              <div className="mt-4 grid gap-3">
+                <label className="space-y-1 text-xs text-slate-400">
+                  Inspiration / context
+                  <textarea rows={2} maxLength={2000} value={behindInspiration} onChange={event => setBehindInspiration(event.target.value)} className="w-full resize-y rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-500" placeholder="What sparked this piece?" />
+                </label>
+                <label className="space-y-1 text-xs text-slate-400">
+                  Personal note (Markdown supported)
+                  <textarea rows={5} maxLength={8000} value={behindNote} onChange={event => setBehindNote(event.target.value)} className="w-full resize-y rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-500" placeholder="A note to readers after they finish…" />
+                </label>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="space-y-1 text-xs text-slate-400">Song title<input maxLength={200} value={behindSongTitle} onChange={event => setBehindSongTitle(event.target.value)} className="w-full rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-white outline-none focus:border-amber-500" /></label>
+                  <label className="space-y-1 text-xs text-slate-400">Artist<input maxLength={200} value={behindSongArtist} onChange={event => setBehindSongArtist(event.target.value)} className="w-full rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-white outline-none focus:border-amber-500" /></label>
+                </div>
+                <label className="space-y-1 text-xs text-slate-400">Song link (HTTPS)<input type="url" maxLength={2048} value={behindSongUrl} onChange={event => setBehindSongUrl(event.target.value)} className="w-full rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-white outline-none focus:border-amber-500" placeholder="https://open.spotify.com/…" /></label>
+              </div>
+            )}
+          </section>
 
           {/* Formatting Toolbar */}
           <div className="bg-[#0b1120] border border-slate-700/80 rounded-xl p-2 flex flex-wrap items-center justify-between gap-2">

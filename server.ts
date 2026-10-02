@@ -11,6 +11,8 @@ import { GoogleGenAI } from "@google/genai";
 import { HomepageSaveConflictError, store } from "./src/server/store.js";
 import {
   Article,
+  ContentBundle,
+  ContentCollection,
   HomepageConfig,
   NewsletterAudience,
   NewsletterCampaignContent,
@@ -20,6 +22,7 @@ import {
   User,
   UserRecord
 } from "./src/types.js";
+import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import {
   AffiliateSettingsValidationError,
@@ -436,6 +439,67 @@ function toPublicArticleSummary(article: Article, defaultPriceKes: number, isUnl
     previewParagraphs: article.previewParagraphs || [],
     tags: article.tags || [],
     isUnlocked: !isPaid || isUnlocked
+  };
+}
+
+function articleInterestKeys(article: Article): string[] {
+  return [...new Set([
+    article.category,
+    ...(article.categories || []),
+    ...(article.topics || []),
+    ...(article.tags || [])
+  ].map(value => String(value || '').trim().toLocaleLowerCase('en')).filter(Boolean))];
+}
+
+function sanitizeBehindThePiece(value: unknown): Article['behindThePiece'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const text = (field: string, maxLength: number) => typeof input[field] === 'string'
+    ? String(input[field]).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim().slice(0, maxLength)
+    : undefined;
+  const rawSongUrl = text('songUrl', 2_048);
+  let songUrl: string | undefined;
+  if (rawSongUrl) {
+    try {
+      const parsed = new URL(rawSongUrl);
+      if (parsed.protocol === 'https:') songUrl = parsed.toString();
+    } catch {
+      songUrl = undefined;
+    }
+  }
+  return {
+    enabled: input.enabled === true,
+    note: text('note', 8_000),
+    inspiration: text('inspiration', 2_000),
+    songTitle: text('songTitle', 200),
+    songArtist: text('songArtist', 200),
+    songUrl
+  };
+}
+
+function publicBundleCheckoutArticle(bundle: ContentBundle, pieces: Article[]): Article {
+  return {
+    id: `bundle:${bundle.id}`,
+    title: bundle.name,
+    subtitle: `${pieces.length} pieces • permanent account access`,
+    slug: `bundle-${bundle.slug}`,
+    excerpt: bundle.description,
+    content: '',
+    category: 'Bundle',
+    categories: ['Bundle'],
+    topics: [],
+    status: 'published',
+    isPaid: true,
+    priceKes: bundle.priceKes,
+    readTimeMinutes: pieces.reduce((sum, piece) => sum + (piece.readTimeMinutes || 0), 0),
+    showReadTime: false,
+    publishedAt: bundle.updatedAt.split('T')[0],
+    createdAt: bundle.createdAt,
+    updatedAt: bundle.updatedAt,
+    coverImage: bundle.coverImage || pieces[0]?.coverImage,
+    downloadsCount: 0,
+    previewParagraphs: [],
+    tags: ['Bundle']
   };
 }
 
@@ -1346,6 +1410,52 @@ export async function createApp() {
     }
   );
 
+  app.post('/api/newsletter/follow', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    const user = (req as any).user as { id: string; email: string; name?: string; role: string };
+    const workId = typeof req.body?.workId === 'string' ? req.body.workId.trim() : '';
+    if (user.role !== 'client') return res.status(403).json({ error: 'Reader account required.' });
+    if (!isSafePublicIdentifier(workId)) return res.status(400).json({ error: 'Choose a valid piece.' });
+    const article = await store.getFreshArticleById(workId, false, false);
+    if (!article) return res.status(404).json({ error: 'Piece not found.' });
+    if (!newsletterFeatureEnabled()) {
+      return res.status(503).json({ error: 'Email notifications are temporarily unavailable.' });
+    }
+    try {
+      const existing = await newsletterStore.followWork(user.email, article.id);
+      if (existing.status === 'active') {
+        return res.json({ success: true, confirmed: true, message: `You will receive selected updates about “${article.title}”.` });
+      }
+      if (existing.status === 'suppressed') {
+        return res.status(409).json({ error: 'This email address cannot currently receive announcements.' });
+      }
+
+      const baseUrl = resolvePublicBaseUrl(req);
+      await newsletterStore.requestSubscription({
+        email: user.email,
+        name: user.name,
+        interests: articleInterestKeys(article),
+        followedWorkIds: [article.id],
+        contentMode: 'standard',
+        consentSource: 'reader_preferences',
+        consentVersion: NEWSLETTER_CONSENT_VERSION
+      }, {
+        onConfirmationRequired: async confirmation => {
+          const confirmationUrl = `${baseUrl}/newsletter/confirm?token=${encodeURIComponent(confirmation.confirmationToken)}`;
+          await sendNewsletterEmail({
+            to: confirmation.email,
+            ...buildNewsletterConfirmationEmail({ name: confirmation.name, confirmationUrl }),
+            idempotencyKey: `newsletter-follow-${crypto.createHash('sha256').update(confirmation.confirmationToken).digest('hex')}`
+          });
+        }
+      });
+      return res.status(202).json({ success: true, confirmed: false, message: 'Check your inbox to confirm email notifications.' });
+    } catch (error) {
+      console.error('[Newsletter] Work-follow request could not be completed.', error);
+      return res.status(503).json({ error: 'Notification preference could not be saved. Please retry.' });
+    }
+  });
+
   app.get(['/newsletter/confirm', '/api/newsletter/confirm'], newsletterCapabilityLimiter, (req: Request, res: Response) => {
     const token = typeof req.query.token === 'string' ? req.query.token : '';
     res.setHeader('Cache-Control', 'no-store');
@@ -1568,12 +1678,19 @@ export async function createApp() {
       }
     }
 
-    const { coverImageOriginal: _privateOriginal, ...publicArticle } = article;
+    const {
+      coverImageOriginal: _privateOriginal,
+      behindThePiece: privateBehindThePiece,
+      ...publicArticle
+    } = article;
     res.setHeader('Cache-Control', 'private, no-store');
     return res.json({
       ...publicArticle,
       coverImage: publicCoverUrl(article),
       content: isUnlocked ? article.content : "",
+      ...(isUnlocked && privateBehindThePiece?.enabled
+        ? { behindThePiece: privateBehindThePiece }
+        : {}),
       isUnlocked,
       isPaid,
       priceKes,
@@ -1904,22 +2021,44 @@ export async function createApp() {
       let chargeAmount = Number(amount);
       const type = isTip ? "TIP" : "PURCHASE";
       let canonicalArticleId = articleId;
+      let purchaseKind: 'piece' | 'bundle' = 'piece';
+      let bundleId: string | undefined;
+      let bundlePieceIds: string[] | undefined;
 
       if (!isTip) {
         if (!isSafePublicIdentifier(articleId)) {
           return res.status(400).json({ error: "A valid published piece is required for purchase." });
         }
-        const article = await store.getFreshArticleById(articleId, false, true);
-        if (!article) {
-          return res.status(404).json({ error: "Piece not found or unavailable for purchase." });
+        if (articleId.startsWith('bundle:')) {
+          const user = (req as any).user as { id: string; email: string; role: string } | null;
+          if (!user || user.role !== 'client') {
+            return res.status(401).json({ error: 'Sign in before purchasing a bundle so every piece can be added permanently to your library.' });
+          }
+          bundleId = articleId.slice('bundle:'.length);
+          const bundle = await readerExperienceStore.getBundle(bundleId, false);
+          if (!bundle) return res.status(404).json({ error: 'Bundle not found or unavailable for purchase.' });
+          const publishedIds = new Set(store.getArticles(false).map(piece => piece.id));
+          bundlePieceIds = [...new Set(bundle.pieceIds)].filter(id => publishedIds.has(id));
+          if (bundlePieceIds.length < 2 || bundlePieceIds.length !== bundle.pieceIds.length) {
+            return res.status(409).json({ error: 'This bundle is being updated. Reload before purchasing.' });
+          }
+          purchaseKind = 'bundle';
+          canonicalArticleId = `bundle:${bundle.id}`;
+          articleTitle = bundle.name;
+          chargeAmount = bundle.priceKes;
+        } else {
+          const article = await store.getFreshArticleById(articleId, false, true);
+          if (!article) {
+            return res.status(404).json({ error: "Piece not found or unavailable for purchase." });
+          }
+          if (article.isPaid === false) {
+            return res.status(409).json({ error: 'This piece is now free. Reload it to read without payment.' });
+          }
+          canonicalArticleId = article.id;
+          articleTitle = article.title;
+          // Server enforces price for pay-to-read.
+          chargeAmount = resolveArticlePriceKes(article, mpesaSettings.defaultPriceKes || 1050);
         }
-        if (article.isPaid === false) {
-          return res.status(409).json({ error: 'This piece is now free. Reload it to read without payment.' });
-        }
-        canonicalArticleId = article.id;
-        articleTitle = article.title;
-        // Server enforces price for pay-to-read.
-        chargeAmount = resolveArticlePriceKes(article, mpesaSettings.defaultPriceKes || 1050);
       } else if (articleId && articleId !== "general_tip") {
         const article = await store.getFreshArticleById(articleId, false, true);
         if (article) {
@@ -1954,6 +2093,9 @@ export async function createApp() {
         accountReference: articleTitle,
         articleId: canonicalArticleId || "general_tip",
         articleTitle,
+        purchaseKind,
+        bundleId,
+        bundlePieceIds,
         type,
         currency: currency || "KES",
         originalAmount: originalAmount ? Number(originalAmount) : chargeAmount,
@@ -2670,6 +2812,251 @@ export async function createApp() {
     });
   });
 
+  const requireReaderArticleAccess = async (req: Request, articleId: string) => {
+    const user = (req as any).user as { id: string; email: string; role: string; name: string } | null;
+    if (!user || user.role !== 'client') return { status: 401, error: 'Sign in with a reader account to use this feature.' };
+    const article = await store.getFreshArticleById(articleId, false, false);
+    if (!article) return { status: 404, error: 'Piece not found.' };
+    if (article.isPaid !== false && !(await store.isArticlePurchasedByUser(article.id, user))) {
+      return { status: 403, error: 'This feature becomes available after the piece is added to your library.' };
+    }
+    return { user, article };
+  };
+
+  // Personalized Reader Home. Each request uses one bounded profile read plus
+  // the existing account-license lookup; no customer directory or license scan.
+  app.get('/api/reader/home', requireAuth, async (req: Request, res: Response) => {
+    const user = (req as any).user as { id: string; email: string; role: string };
+    if (user.role !== 'client') return res.status(403).json({ error: 'Reader account required.' });
+    try {
+      const [profile, purchases, collections, bundles] = await Promise.all([
+        readerExperienceStore.getProfile(user.id),
+        store.getUserPurchases(user.id),
+        readerExperienceStore.listCollections(false),
+        readerExperienceStore.listBundles(false)
+      ]);
+      const articles = store.getArticles(false);
+      const byId = new Map(articles.map(article => [article.id, article]));
+      const purchaseById = new Map(purchases.map(purchase => [purchase.articleId, purchase]));
+      const defaultPrice = store.getMpesaSettings().defaultPriceKes || 1050;
+      const summarize = (article: Article, unlocked = false) => toPublicArticleSummary(
+        article,
+        defaultPrice,
+        unlocked || article.isPaid === false || purchaseById.has(article.id)
+      );
+      const toItem = (article: Article, extras: Record<string, unknown> = {}) => ({
+        article: summarize(article),
+        ...(profile.progress[article.id] ? { progress: profile.progress[article.id] } : {}),
+        ...extras
+      });
+
+      const purchased = purchases
+        .map(purchase => {
+          const article = byId.get(purchase.articleId);
+          return article ? toItem(article, { accessSource: purchase.accessSource }) : null;
+        })
+        .filter(Boolean);
+      const continueReading = Object.values(profile.progress)
+        .filter(progress => progress.percent > 0 && !progress.completedAt)
+        .sort((left, right) => Date.parse(right.lastReadAt) - Date.parse(left.lastReadAt))
+        .map(progress => byId.get(progress.articleId))
+        .filter((article): article is Article => Boolean(article))
+        .filter(article => article.isPaid === false || purchaseById.has(article.id))
+        .slice(0, 8)
+        .map(article => toItem(article));
+      const recentlyViewed = profile.recent
+        .map(view => {
+          const article = byId.get(view.articleId);
+          return article ? toItem(article, { viewedAt: view.viewedAt }) : null;
+        })
+        .filter(Boolean)
+        .slice(0, 12);
+
+      const interestScores = { ...profile.interestScores };
+      for (const purchase of purchases) {
+        const article = byId.get(purchase.articleId);
+        if (!article) continue;
+        for (const key of articleInterestKeys(article)) {
+          interestScores[key] = (Number(interestScores[key]) || 0) + 3;
+        }
+      }
+      const viewedIds = new Set(profile.recent.map(view => view.articleId));
+      const recommendations = articles
+        .filter(article => !purchaseById.has(article.id))
+        .map(article => ({
+          article,
+          score: articleInterestKeys(article).reduce((sum, key) => sum + (Number(interestScores[key]) || 0), 0)
+            + (article.featured ? 2 : 0)
+            + (viewedIds.has(article.id) ? -2 : 0)
+        }))
+        .sort((left, right) => right.score - left.score || Date.parse(right.article.publishedAt) - Date.parse(left.article.publishedAt))
+        .slice(0, 8)
+        .map(item => toItem(item.article));
+
+      const hydrateGroup = <T extends ContentCollection | ContentBundle>(group: T) => ({
+        ...group,
+        pieces: group.pieceIds
+          .map(id => byId.get(id))
+          .filter((article): article is Article => Boolean(article))
+          .map(article => summarize(article))
+      });
+
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({
+        success: true,
+        continueReading,
+        purchased,
+        recentlyViewed,
+        recommendations,
+        collections: collections.map(hydrateGroup).filter(group => group.pieces.length > 0),
+        bundles: bundles
+          .map(hydrateGroup)
+          .filter(group => group.pieces.length >= 2 && group.pieces.length === group.pieceIds.length)
+      });
+    } catch (error) {
+      console.error('[Reader Experience] Personalized home unavailable.', error);
+      return res.status(503).json({ error: 'Your personalized reader home is temporarily unavailable.' });
+    }
+  });
+
+  app.get('/api/reader/progress/:articleId', requireAuth, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const profile = await readerExperienceStore.getProfile(access.user.id);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ progress: profile.progress[access.article.id] || null });
+    } catch {
+      return res.status(503).json({ error: 'Reading progress is temporarily unavailable.' });
+    }
+  });
+
+  app.put('/api/reader/progress/:articleId', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const progress = await readerExperienceStore.saveProgress({
+        userId: access.user.id,
+        articleId: access.article.id,
+        percent: body.percent,
+        blockId: body.blockId,
+        activeChapterId: body.activeChapterId,
+        activeChapterTitle: body.activeChapterTitle,
+        chapterPercent: body.chapterPercent,
+        interests: articleInterestKeys(access.article)
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ success: true, progress });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Reading progress could not be saved.' });
+    }
+  });
+
+  app.post('/api/reader/progress/:articleId/bookmark', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const result = await readerExperienceStore.toggleBookmark({
+        userId: access.user.id,
+        articleId: access.article.id,
+        blockId: req.body?.blockId,
+        label: req.body?.label
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ success: true, ...result });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Bookmark could not be updated.' });
+    }
+  });
+
+  app.get('/api/pieces/:articleId/social-proof', async (req: Request, res: Response) => {
+    try {
+      const article = await store.getFreshArticleById(req.params.articleId, false, false);
+      if (!article) return res.status(404).json({ error: 'Piece not found.' });
+      const social = await readerExperienceStore.getSocial(article.id, (req as any).user?.id);
+      res.setHeader('Cache-Control', (req as any).user ? 'private, no-store' : 'public, max-age=30, s-maxage=60');
+      return res.json({
+        articleId: article.id,
+        ...social,
+        purchaseCount: Math.max(0, article.downloadsCount || 0),
+        viewCount: Math.max(0, article.viewsCount || 0)
+      });
+    } catch {
+      return res.status(503).json({ error: 'Reader responses are temporarily unavailable.' });
+    }
+  });
+
+  app.post('/api/pieces/:articleId/reaction', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      if (!READER_REACTIONS.includes(req.body?.reaction)) {
+        return res.status(400).json({ error: 'Choose one of the available reactions.' });
+      }
+      const result = await readerExperienceStore.setReaction(access.user.id, access.article.id, req.body.reaction);
+      return res.json({ success: true, ...result });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Reaction could not be saved.' });
+    }
+  });
+
+  app.post('/api/pieces/:articleId/reviews', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const review = await readerExperienceStore.saveReview({
+        userId: access.user.id,
+        readerName: access.user.name,
+        articleId: access.article.id,
+        rating: req.body?.rating,
+        review: req.body?.review
+      });
+      return res.status(201).json({
+        success: true,
+        review,
+        message: 'Your verified review was saved for the writer to curate.'
+      });
+    } catch (error: any) {
+      const status = Number.isInteger(error?.statusCode) ? error.statusCode : 400;
+      return res.status(status).json({ error: error?.message || 'Review could not be saved.' });
+    }
+  });
+
+  app.get('/api/discovery/collections', async (_req: Request, res: Response) => {
+    try {
+      const [collections, bundles] = await Promise.all([
+        readerExperienceStore.listCollections(false),
+        readerExperienceStore.listBundles(false)
+      ]);
+      const articles = store.getArticles(false);
+      const byId = new Map(articles.map(article => [article.id, article]));
+      const defaultPrice = store.getMpesaSettings().defaultPriceKes || 1050;
+      const piecesFor = (ids: string[]) => ids
+        .map(id => byId.get(id))
+        .filter((article): article is Article => Boolean(article))
+        .map(article => toPublicArticleSummary(article, defaultPrice));
+      res.setHeader('Cache-Control', 'no-store');
+      const availableBundles = bundles.flatMap(bundle => {
+        const pieces = bundle.pieceIds
+          .map(id => byId.get(id))
+          .filter((article): article is Article => Boolean(article));
+        if (pieces.length < 2 || pieces.length !== bundle.pieceIds.length) return [];
+        return [{
+          ...bundle,
+          pieces: pieces.map(article => toPublicArticleSummary(article, defaultPrice)),
+          checkoutArticle: publicBundleCheckoutArticle(bundle, pieces)
+        }];
+      });
+      return res.json({
+        collections: collections.map(collection => ({ ...collection, pieces: piecesFor(collection.pieceIds) })),
+        bundles: availableBundles
+      });
+    } catch {
+      return res.status(503).json({ error: 'Collections are temporarily unavailable.' });
+    }
+  });
+
   // Reader Account: Link a purchased token or receipt to active user account
   app.post("/api/user/link-purchase", purchaseRecoveryLimiter, publicWriteValidators.linkPurchase, async (req: Request, res: Response) => {
     const user = (req as any).user;
@@ -3002,6 +3389,7 @@ export async function createApp() {
         seoTitle,
         metaDescription,
         manualRelatedPieceIds,
+        behindThePiece,
         notifyNewsletterSubscribers
       } = req.body;
 
@@ -3053,7 +3441,8 @@ export async function createApp() {
         content: content.trim(),
         seoTitle: seoTitle || undefined,
         metaDescription: metaDescription || undefined,
-        manualRelatedPieceIds: Array.isArray(manualRelatedPieceIds) ? manualRelatedPieceIds : undefined
+        manualRelatedPieceIds: Array.isArray(manualRelatedPieceIds) ? manualRelatedPieceIds : undefined,
+        behindThePiece: sanitizeBehindThePiece(behindThePiece)
       };
 
       const saved = await store.saveArticle(newArticle, true, "Initial creation");
@@ -3100,6 +3489,9 @@ export async function createApp() {
         ...existing,
         ...articlePatch,
         id: existing.id, // preserve id
+        behindThePiece: articlePatch.behindThePiece === undefined
+          ? existing.behindThePiece
+          : sanitizeBehindThePiece(articlePatch.behindThePiece),
         updatedAt: new Date().toISOString()
       };
 
@@ -3175,6 +3567,9 @@ export async function createApp() {
         ...existing,
         ...req.body,
         id: existing.id,
+        behindThePiece: req.body?.behindThePiece === undefined
+          ? existing.behindThePiece
+          : sanitizeBehindThePiece(req.body.behindThePiece),
         updatedAt: new Date().toISOString()
       };
 
@@ -3457,6 +3852,155 @@ export async function createApp() {
       res.json({ count: comments.length, comments });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to load comments." });
+    }
+  });
+
+  // Writer: reader-experience curation (collections, bundles, testimonials).
+  app.get('/api/admin/reader-experience', requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const [collections, bundles, reviews] = await Promise.all([
+        readerExperienceStore.listCollections(true),
+        readerExperienceStore.listBundles(true),
+        readerExperienceStore.listReviews()
+      ]);
+      return res.json({
+        collections,
+        bundles,
+        reviews: reviews.map(({ userId: _privateUserId, readerName: _privateReaderName, ...review }) => review)
+      });
+    } catch (error) {
+      console.error('[Reader Experience] Writer overview unavailable.', error);
+      return res.status(503).json({ error: 'Reader-experience settings are temporarily unavailable.' });
+    }
+  });
+
+  const validateExperiencePieceIds = (value: unknown, minimum: number) => {
+    if (!Array.isArray(value)) return { error: 'Choose the pieces to include.' };
+    const pieceIds = [...new Set(value
+      .filter(item => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(item => isSafePublicIdentifier(item)))].slice(0, 100);
+    if (pieceIds.length < minimum) {
+      return { error: minimum > 1 ? 'Choose at least two published pieces.' : 'Choose at least one published piece.' };
+    }
+    const publishedIds = new Set(store.getArticles(false).map(article => article.id));
+    if (pieceIds.some(id => !publishedIds.has(id))) return { error: 'One or more selected pieces are not published.' };
+    return { pieceIds };
+  };
+
+  app.post('/api/admin/collections', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const validation = validateExperiencePieceIds(req.body?.pieceIds, 1);
+      if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const name = String(req.body?.name || '').trim();
+      if (!name || name.length > 120) return res.status(400).json({ error: 'Collection name is required.' });
+      const collection = await readerExperienceStore.saveCollection({
+        name,
+        slug: String(req.body?.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')).slice(0, 140),
+        description: String(req.body?.description || '').slice(0, 1_500),
+        pieceIds: validation.pieceIds,
+        coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        order: Number(req.body?.order) || 0,
+        isPublished: req.body?.isPublished === true
+      });
+      return res.status(201).json({ success: true, collection });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Collection could not be saved.' });
+    }
+  });
+
+  app.put('/api/admin/collections/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const validation = validateExperiencePieceIds(req.body?.pieceIds, 1);
+      if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const collection = await readerExperienceStore.saveCollection({
+        id: req.params.id,
+        name: String(req.body?.name || '').trim(),
+        slug: String(req.body?.slug || '').trim(),
+        description: String(req.body?.description || '').slice(0, 1_500),
+        pieceIds: validation.pieceIds,
+        coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        order: Number(req.body?.order) || 0,
+        isPublished: req.body?.isPublished === true
+      });
+      return res.json({ success: true, collection });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Collection could not be updated.' });
+    }
+  });
+
+  app.delete('/api/admin/collections/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      await readerExperienceStore.deleteCollection(req.params.id);
+      return res.json({ success: true });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Collection could not be deleted.' });
+    }
+  });
+
+  app.post('/api/admin/bundles', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const validation = validateExperiencePieceIds(req.body?.pieceIds, 2);
+      if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const name = String(req.body?.name || '').trim();
+      const priceKes = Math.round(Number(req.body?.priceKes));
+      if (!name || name.length > 120) return res.status(400).json({ error: 'Bundle name is required.' });
+      if (!Number.isFinite(priceKes) || priceKes < 1) return res.status(400).json({ error: 'Enter a valid bundle price.' });
+      const bundle = await readerExperienceStore.saveBundle({
+        name,
+        slug: String(req.body?.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')).slice(0, 140),
+        description: String(req.body?.description || '').slice(0, 1_500),
+        pieceIds: validation.pieceIds,
+        priceKes,
+        coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        isPublished: req.body?.isPublished === true
+      });
+      return res.status(201).json({ success: true, bundle });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Bundle could not be saved.' });
+    }
+  });
+
+  app.put('/api/admin/bundles/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const validation = validateExperiencePieceIds(req.body?.pieceIds, 2);
+      if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const bundle = await readerExperienceStore.saveBundle({
+        id: req.params.id,
+        name: String(req.body?.name || '').trim(),
+        slug: String(req.body?.slug || '').trim(),
+        description: String(req.body?.description || '').slice(0, 1_500),
+        pieceIds: validation.pieceIds,
+        priceKes: Math.round(Number(req.body?.priceKes)),
+        coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        isPublished: req.body?.isPublished === true
+      });
+      return res.json({ success: true, bundle });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Bundle could not be updated.' });
+    }
+  });
+
+  app.delete('/api/admin/bundles/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      await readerExperienceStore.deleteBundle(req.params.id);
+      return res.json({ success: true });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Bundle could not be deleted.' });
+    }
+  });
+
+  app.put('/api/admin/reviews/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const review = await readerExperienceStore.moderateReview(req.params.id, {
+        status: req.body?.status,
+        featured: req.body?.featured
+      });
+      const { userId: _privateUserId, readerName: _privateReaderName, ...safeReview } = review;
+      return res.json({ success: true, review: safeReview });
+    } catch (error: any) {
+      const status = error?.message === 'Review not found.' ? 404 : 400;
+      return res.status(status).json({ error: error?.message || 'Review could not be updated.' });
     }
   });
 

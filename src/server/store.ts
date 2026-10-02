@@ -162,6 +162,9 @@ export type MpesaCallbackIntent = {
   requestLockId: string;
   articleId: string;
   articleTitle: string;
+  purchaseKind?: 'piece' | 'bundle';
+  bundleId?: string;
+  bundlePieceIds?: string[];
   phoneNumber: string;
   amount: number;
   currency: string;
@@ -737,6 +740,9 @@ function mpesaIntentsMatch(left: MpesaCallbackIntent, right: MpesaCallbackIntent
     left.requestLockId === right.requestLockId &&
     left.articleId === right.articleId &&
     left.articleTitle === right.articleTitle &&
+    left.purchaseKind === right.purchaseKind &&
+    left.bundleId === right.bundleId &&
+    JSON.stringify(left.bundlePieceIds || []) === JSON.stringify(right.bundlePieceIds || []) &&
     left.phoneNumber === right.phoneNumber &&
     left.amount === right.amount &&
     left.currency === right.currency &&
@@ -767,6 +773,9 @@ function transactionFromMpesaIntent(
     merchantRequestId,
     articleId: intent.articleId,
     articleTitle: intent.articleTitle,
+    purchaseKind: intent.purchaseKind,
+    bundleId: intent.bundleId,
+    bundlePieceIds: intent.bundlePieceIds,
     phoneNumber: intent.phoneNumber,
     amount: intent.amount,
     currency: intent.currency,
@@ -787,6 +796,15 @@ function transactionFromMpesaIntent(
     userId: intent.userId,
     userEmail: intent.userEmail
   });
+}
+
+function paymentEntitlementArticleIds(transaction: PaymentTransaction): string[] {
+  if (transaction.purchaseKind === 'bundle') {
+    return [...new Set((transaction.bundlePieceIds || []).filter(id =>
+      typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)
+    ))].slice(0, 30);
+  }
+  return transaction.articleId ? [transaction.articleId] : [];
 }
 
 function isSafeLegacyReaderLicenseToken(token: string): boolean {
@@ -1421,6 +1439,8 @@ type MpesaSettlementResult = {
   outcome: 'committed' | 'duplicate' | 'rejected';
   transaction?: PaymentTransaction;
   downloadToken?: string;
+  licenses?: Array<{ token: string; license: CachedReaderLicense }>;
+  licensedArticleIds?: string[];
   error?: string;
 };
 
@@ -3009,9 +3029,34 @@ export const store = {
       }
 
       const now = new Date().toISOString();
-      const downloadToken = current.type === 'PURCHASE'
-        ? (current.downloadToken || `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`)
-        : undefined;
+      const entitlementArticleIds = current.type === 'PURCHASE'
+        ? paymentEntitlementArticleIds(current)
+        : [];
+      if (current.purchaseKind === 'bundle' && entitlementArticleIds.length < 2) {
+        return { outcome: 'rejected' as const, error: 'The bundle entitlement snapshot failed validation.' };
+      }
+      const expiresAt = current.purchaseKind === 'bundle'
+        ? 253402300799999
+        : Date.now() + 60 * 24 * 60 * 60 * 1000;
+      const licenses = entitlementArticleIds.map((articleId, index) => {
+        const token = index === 0 && current.downloadToken
+          ? current.downloadToken
+          : `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`;
+        return {
+          token,
+          license: {
+            articleId,
+            phone: current.phoneNumber || '',
+            expiresAt,
+            receipt: cleanReceipt,
+            createdAt: now,
+            userId: current.buyer?.userId || current.userId,
+            email: current.buyer?.email || current.userEmail,
+            accessSource: 'MPESA_PURCHASE' as const
+          }
+        };
+      });
+      const downloadToken = licenses[0]?.token;
       const settled: PaymentTransaction = enrichSalesTransaction({
         ...current,
         status: 'CONFIRMED',
@@ -3053,19 +3098,13 @@ export const store = {
         );
       }
 
-      if (downloadToken) {
-        firestoreTransaction.set(getDb().collection('reader_licenses').doc(downloadToken), sanitizeForFirestore({
-          token: downloadToken,
-          articleId: current.articleId,
-          phone: current.phoneNumber,
-          expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
-          receipt: cleanReceipt,
-          createdAt: now,
-          userId: current.buyer?.userId || current.userId,
-          email: current.buyer?.email || current.userEmail,
-          accessSource: 'MPESA_PURCHASE'
-        }), { merge: true });
-        firestoreTransaction.set(getDb().collection('articles').doc(current.articleId), {
+      for (const entry of licenses) {
+        firestoreTransaction.set(
+          getDb().collection('reader_licenses').doc(entry.token),
+          sanitizeForFirestore({ token: entry.token, ...entry.license }),
+          { merge: true }
+        );
+        firestoreTransaction.set(getDb().collection('articles').doc(entry.license.articleId), {
           downloadsCount: FieldValue.increment(1)
         }, { merge: true });
       }
@@ -3082,7 +3121,13 @@ export const store = {
         );
       }
 
-      return { outcome: 'committed' as const, transaction: settled, downloadToken };
+      return {
+        outcome: 'committed' as const,
+        transaction: settled,
+        downloadToken,
+        licenses,
+        licensedArticleIds: entitlementArticleIds
+      };
     });
 
     if (result.transaction) {
@@ -3091,25 +3136,20 @@ export const store = {
     }
 
     if (result.outcome === 'committed' && result.transaction) {
-      if (result.downloadToken) {
-        cachedTokens.set(result.downloadToken, {
-          articleId: result.transaction.articleId,
-          phone: result.transaction.phoneNumber || '',
-          expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
-          receipt: cleanReceipt,
-          createdAt: result.transaction.confirmedAt,
-          userId: result.transaction.userId,
-          email: result.transaction.userEmail,
-          accessSource: 'MPESA_PURCHASE'
-        });
-        cachedReaderLicenseVerifiedAt.set(result.downloadToken, Date.now());
-        missingReaderLicenses.delete(result.downloadToken);
+      if (result.licenses?.length) {
+        for (const entry of result.licenses) {
+          cachedTokens.set(entry.token, entry.license);
+          cachedReaderLicenseVerifiedAt.set(entry.token, Date.now());
+          missingReaderLicenses.delete(entry.token);
+        }
         const localTokenRecords = Object.fromEntries(cachedTokens.entries());
         writeJsonFileSync(TOKENS_FILE, localTokenRecords);
 
-        const article = cachedArticles.find(item => item.id === result.transaction?.articleId);
-        if (article) {
-          article.downloadsCount = (article.downloadsCount || 0) + 1;
+        for (const articleId of result.licensedArticleIds || []) {
+          const article = cachedArticles.find(item => item.id === articleId);
+          if (article) article.downloadsCount = (article.downloadsCount || 0) + 1;
+        }
+        if (result.licensedArticleIds?.length) {
           writeJsonFileSync(ARTICLES_FILE, cachedArticles);
         }
       }
@@ -3280,13 +3320,45 @@ export const store = {
       if (claimedCheckoutId && claimedCheckoutId !== checkoutRequestId) {
         return { error: 'The receipt is already linked to another transaction.' };
       }
+      if (alreadyConfirmed) {
+        return {
+          transaction: current,
+          downloadToken: current.downloadToken,
+          licenses: [] as Array<{ token: string; license: CachedReaderLicense }>,
+          entitlementArticleIds: [] as string[],
+          licenseCreated: false
+        };
+      }
 
       const grantsAccess = current.type === 'PURCHASE' || current.type === 'MANUAL';
+      const entitlementArticleIds = grantsAccess ? paymentEntitlementArticleIds(current) : [];
+      if (current.purchaseKind === 'bundle' && entitlementArticleIds.length < 2) {
+        return { error: 'The bundle entitlement snapshot failed validation.' };
+      }
       const licenseCreated = grantsAccess && !current.downloadToken;
-      const downloadToken = grantsAccess
-        ? (current.downloadToken || `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`)
-        : undefined;
       const now = new Date().toISOString();
+      const expiresAt = current.purchaseKind === 'bundle'
+        ? 253402300799999
+        : Date.now() + 60 * 24 * 60 * 60 * 1000;
+      const licenses = entitlementArticleIds.map((articleId, index) => {
+        const token = index === 0 && current.downloadToken
+          ? current.downloadToken
+          : `ink_${Date.now()}_${crypto.randomBytes(32).toString('hex')}`;
+        return {
+          token,
+          license: {
+            articleId,
+            phone: current.buyer?.phoneNumber || current.phoneNumber || '',
+            expiresAt,
+            receipt: canonicalReceipt || current.receiptNumber || 'CONFIRMED',
+            createdAt: now,
+            userId: current.buyer?.userId || current.userId,
+            email: current.buyer?.email || current.userEmail,
+            accessSource: 'MPESA_PURCHASE' as const
+          }
+        };
+      });
+      const downloadToken = licenses[0]?.token;
       const settled = enrichSalesTransaction({
         ...current,
         status: 'CONFIRMED',
@@ -3321,30 +3393,19 @@ export const store = {
         );
       }
 
-      let license: CachedReaderLicense | undefined;
-      if (downloadToken) {
-        license = {
-          articleId: current.articleId,
-          phone: current.buyer?.phoneNumber || current.phoneNumber || '',
-          expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000,
-          receipt: canonicalReceipt || current.receiptNumber || 'CONFIRMED',
-          createdAt: now,
-          userId: current.buyer?.userId || current.userId,
-          email: current.buyer?.email || current.userEmail,
-          accessSource: 'MPESA_PURCHASE'
-        };
+      for (const entry of licenses) {
         firestoreTransaction.set(
-          getDb().collection('reader_licenses').doc(downloadToken),
-          sanitizeForFirestore({ token: downloadToken, ...license }),
+          getDb().collection('reader_licenses').doc(entry.token),
+          sanitizeForFirestore({ token: entry.token, ...entry.license }),
           { merge: true }
         );
         if (licenseCreated) {
-          firestoreTransaction.set(getDb().collection('articles').doc(current.articleId), {
+          firestoreTransaction.set(getDb().collection('articles').doc(entry.license.articleId), {
             downloadsCount: FieldValue.increment(1)
           }, { merge: true });
         }
       }
-      return { transaction: settled, downloadToken, license, licenseCreated };
+      return { transaction: settled, downloadToken, licenses, entitlementArticleIds, licenseCreated };
     });
 
     if (!result.transaction) {
@@ -3352,18 +3413,20 @@ export const store = {
     }
     cacheTransaction(result.transaction);
     writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
-    if (result.downloadToken && result.license) {
-      cachedTokens.set(result.downloadToken, result.license);
-      cachedReaderLicenseVerifiedAt.set(result.downloadToken, Date.now());
-      missingReaderLicenses.delete(result.downloadToken);
+    if (result.licenses?.length) {
+      for (const entry of result.licenses) {
+        cachedTokens.set(entry.token, entry.license);
+        cachedReaderLicenseVerifiedAt.set(entry.token, Date.now());
+        missingReaderLicenses.delete(entry.token);
+      }
       writeJsonFileSync(TOKENS_FILE, Object.fromEntries(cachedTokens.entries()));
     }
     if (result.licenseCreated) {
-      const article = cachedArticles.find(item => item.id === result.transaction?.articleId);
-      if (article) {
-        article.downloadsCount = (article.downloadsCount || 0) + 1;
-        writeJsonFileSync(ARTICLES_FILE, cachedArticles);
+      for (const articleId of result.entitlementArticleIds || []) {
+        const article = cachedArticles.find(item => item.id === articleId);
+        if (article) article.downloadsCount = (article.downloadsCount || 0) + 1;
       }
+      writeJsonFileSync(ARTICLES_FILE, cachedArticles);
     }
     if (result.transaction.affiliateCode) {
       try {

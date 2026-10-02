@@ -297,6 +297,9 @@ export interface InitiateStkPushParams {
   accountReference?: string;
   articleId?: string;
   articleTitle?: string;
+  purchaseKind?: 'piece' | 'bundle';
+  bundleId?: string;
+  bundlePieceIds?: string[];
   isTip?: boolean;
   type?: 'PURCHASE' | 'TIP';
   currency?: string;
@@ -336,6 +339,9 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     amount,
     articleId,
     articleTitle = 'Ink & Witness Monograph Unlock',
+    purchaseKind = 'piece',
+    bundleId,
+    bundlePieceIds,
     isTip = false,
     type: requestedType,
     currency = 'KES',
@@ -444,6 +450,9 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     ),
     articleId: articleId || (paymentType === 'TIP' ? 'general_tip' : 'custom'),
     articleTitle,
+    purchaseKind,
+    bundleId: purchaseKind === 'bundle' ? bundleId : undefined,
+    bundlePieceIds: purchaseKind === 'bundle' ? bundlePieceIds : undefined,
     phoneNumber: formattedPhone,
     amount: cleanAmount,
     currency: normalizedCurrency,

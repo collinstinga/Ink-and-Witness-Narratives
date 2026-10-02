@@ -11,6 +11,7 @@ import {
   Users
 } from 'lucide-react';
 import type {
+  Article,
   NewsletterAdminSummary,
   NewsletterAudience,
   NewsletterCampaign,
@@ -29,7 +30,7 @@ const emptyContent: NewsletterCampaignContent = {
   ctaUrl: ''
 };
 
-export const WriterNewsletter: React.FC = () => {
+export const WriterNewsletter: React.FC<{ articles: Article[] }> = ({ articles }) => {
   const [summary, setSummary] = useState<(NewsletterAdminSummary & { providerConfigured: boolean; enabled: boolean }) | null>(null);
   const [subscribers, setSubscribers] = useState<NewsletterSubscriber[]>([]);
   const [campaigns, setCampaigns] = useState<NewsletterCampaign[]>([]);
@@ -40,6 +41,7 @@ export const WriterNewsletter: React.FC = () => {
   const [content, setContent] = useState<NewsletterCampaignContent>(emptyContent);
   const [audienceType, setAudienceType] = useState<NewsletterAudience['type']>('all');
   const [interestText, setInterestText] = useState('');
+  const [followedWorkId, setFollowedWorkId] = useState('');
   const [testEmail, setTestEmail] = useState('');
   const [draftCampaign, setDraftCampaign] = useState<NewsletterCampaign | null>(null);
   const [saving, setSaving] = useState(false);
@@ -81,8 +83,9 @@ export const WriterNewsletter: React.FC = () => {
   const audience = useMemo<NewsletterAudience>(() => {
     if (audienceType === 'selected') return { type: 'selected', subscriberIds: selectedSubscriberIds };
     if (audienceType === 'interests') return { type: 'interests', interests };
+    if (audienceType === 'work_followers') return { type: 'work_followers', workId: followedWorkId };
     return { type: 'all' };
-  }, [audienceType, interests, selectedSubscriberIds]);
+  }, [audienceType, followedWorkId, interests, selectedSubscriberIds]);
 
   const deliveryInProgress = draftCampaign?.status === 'queued'
     || draftCampaign?.status === 'sending';
@@ -96,6 +99,9 @@ export const WriterNewsletter: React.FC = () => {
     }
     if (audience.type === 'interests' && interests.length === 0) {
       throw new Error('Enter at least one interest for this segment.');
+    }
+    if (audience.type === 'work_followers' && !followedWorkId) {
+      throw new Error('Choose the piece whose followers should receive this announcement.');
     }
     const result = draftCampaign
       ? await api.updateNewsletterCampaign(draftCampaign.id, { content, audience })
@@ -259,13 +265,22 @@ export const WriterNewsletter: React.FC = () => {
           <fieldset className="space-y-3 rounded-xl border border-slate-800 p-4">
             <legend className="px-2 text-xs font-mono uppercase tracking-wider text-slate-300">Audience</legend>
             <div className="flex flex-wrap gap-2">
-              {(['all', 'interests', 'selected'] as const).map(value => (
+              {(['all', 'interests', 'work_followers', 'selected'] as const).map(value => (
                 <button key={value} type="button" disabled={deliveryInProgress} onClick={() => setAudienceType(value)} className={`rounded-full border px-3 py-1.5 text-xs disabled:opacity-60 ${audienceType === value ? 'border-sky-500 bg-sky-950 text-sky-200' : 'border-slate-700 text-slate-400'}`}>
-                  {value === 'all' ? 'All active subscribers' : value === 'interests' ? 'Interest segment' : 'Selected subscribers'}
+                  {value === 'all' ? 'All active subscribers' : value === 'interests' ? 'Interest segment' : value === 'work_followers' ? 'Piece followers' : 'Selected subscribers'}
                 </button>
               ))}
             </div>
             {audienceType === 'interests' && <input disabled={deliveryInProgress} value={interestText} onChange={event => setInterestText(event.target.value)} className="w-full rounded-lg border border-slate-700 bg-[#080d17] px-3 py-2 text-xs text-white outline-none focus:border-sky-500 disabled:opacity-60" placeholder="Faith, Poetry, Grief & Healing" />}
+            {audienceType === 'work_followers' && (
+              <label className="block space-y-1 text-xs text-slate-400">
+                Notify followers of
+                <select disabled={deliveryInProgress} value={followedWorkId} onChange={event => setFollowedWorkId(event.target.value)} className="w-full rounded-lg border border-slate-700 bg-[#080d17] px-3 py-2 text-xs text-white outline-none focus:border-sky-500 disabled:opacity-60">
+                  <option value="">Choose a published piece</option>
+                  {articles.filter(article => article.status === 'published').map(article => <option key={article.id} value={article.id}>{article.title}</option>)}
+                </select>
+              </label>
+            )}
             {audienceType === 'selected' && <p className="text-xs text-slate-400">{selectedSubscriberIds.length} subscriber(s) selected in the directory below.</p>}
           </fieldset>
 

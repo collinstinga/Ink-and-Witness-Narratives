@@ -4,11 +4,15 @@ import {
   BookmarkCheck, 
   BookOpen, 
   FileText, 
-  CheckCircle2, 
-  Trash2
+  CheckCircle2,
+  Trash2,
+  Clock3,
+  Sparkles,
+  Layers3,
+  PackageOpen
 } from 'lucide-react';
-import { Article, LibraryArticle } from '../types.js';
-import { clearStoredTokens } from '../utils/api.js';
+import { Article, ContentBundle, LibraryArticle, ReaderHomeItem, ReaderHomeResponse } from '../types.js';
+import { api, clearStoredTokens } from '../utils/api.js';
 
 function getAccessLabel(source: LibraryArticle['libraryAccessSource']): string {
   if (source === 'MANUAL_GRANT') return 'Writer-granted & Active';
@@ -22,6 +26,7 @@ interface MyLibraryModalProps {
   articles: LibraryArticle[];
   onReadArticle: (article: Article) => void;
   onExploreCatalog: () => void;
+  onPurchaseBundle?: (bundle: ContentBundle, checkoutArticle: Article) => void;
   isLoading?: boolean;
   error?: string;
 }
@@ -32,11 +37,25 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
   articles,
   onReadArticle,
   onExploreCatalog,
+  onPurchaseBundle,
   isLoading = false,
   error = ''
 }) => {
   const [clearedNotice, setClearedNotice] = useState(false);
+  const [readerHome, setReaderHome] = useState<ReaderHomeResponse | null>(null);
+  const [homeLoading, setHomeLoading] = useState(false);
   const reloadTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    setHomeLoading(true);
+    api.getReaderHome()
+      .then(result => { if (active) setReaderHome(result); })
+      .catch(() => { if (active) setReaderHome(null); })
+      .finally(() => { if (active) setHomeLoading(false); });
+    return () => { active = false; };
+  }, [isOpen, articles.length]);
 
   useEffect(() => () => {
     if (reloadTimerRef.current !== null) {
@@ -58,6 +77,34 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
       window.location.reload();
     }, 1200);
   };
+
+  const openHomeItem = (item: ReaderHomeItem) => {
+    onClose();
+    onReadArticle(item.article);
+  };
+
+  const compactPieceRow = (item: ReaderHomeItem, label?: string) => (
+    <button
+      key={item.article.id}
+      type="button"
+      onClick={() => openHomeItem(item)}
+      className="group min-w-[15rem] max-w-[18rem] flex-1 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-left transition-colors hover:border-sky-700"
+    >
+      <span className="text-[10px] font-mono uppercase tracking-wider text-sky-400">{label || item.article.category}</span>
+      <span className="mt-1 block line-clamp-2 font-display text-sm font-bold text-slate-100">{item.article.title}</span>
+      {item.progress && (
+        <span className="mt-3 block">
+          <span className="mb-1 flex justify-between text-[10px] font-mono text-slate-400">
+            <span>{item.progress.activeChapterTitle || 'Reading progress'}</span>
+            <span>{Math.round(item.progress.percent)}%</span>
+          </span>
+          <span className="block h-1.5 overflow-hidden rounded-full bg-slate-800">
+            <span className="block h-full rounded-full bg-sky-500" style={{ width: `${Math.max(2, item.progress.percent)}%` }} />
+          </span>
+        </span>
+      )}
+    </button>
+  );
 
   return (
     <div 
@@ -117,6 +164,113 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
 
         {/* Library Content */}
         <div className="p-6 sm:p-7 space-y-4 max-h-[75vh] overflow-y-auto">
+          {homeLoading && !readerHome && (
+            <p className="text-center text-xs text-sky-300" role="status">Preparing your personalized reader home…</p>
+          )}
+
+          {readerHome && readerHome.continueReading.length > 0 && (
+            <section className="space-y-3" aria-labelledby="continue-reading-title">
+              <div className="flex items-center gap-2">
+                <Clock3 className="h-4 w-4 text-sky-400" />
+                <h4 id="continue-reading-title" className="font-display text-base font-bold text-white">Continue Reading</h4>
+              </div>
+              <div className="flex gap-3 overflow-x-auto pb-2">
+                {readerHome.continueReading.map(item => compactPieceRow(item, 'Continue where you left off'))}
+              </div>
+            </section>
+          )}
+
+          {readerHome && readerHome.recentlyViewed.length > 0 && (
+            <section className="space-y-3 border-t border-slate-800 pt-4" aria-labelledby="recently-viewed-title">
+              <div className="flex items-center gap-2">
+                <BookOpen className="h-4 w-4 text-indigo-400" />
+                <h4 id="recently-viewed-title" className="font-display text-base font-bold text-white">Recently Viewed</h4>
+              </div>
+              <div className="flex gap-3 overflow-x-auto pb-2">
+                {readerHome.recentlyViewed.slice(0, 6).map(item => compactPieceRow(item))}
+              </div>
+            </section>
+          )}
+
+          {readerHome && readerHome.recommendations.length > 0 && (
+            <section className="space-y-3 border-t border-slate-800 pt-4" aria-labelledby="recommendations-title">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-amber-400" />
+                <div>
+                  <h4 id="recommendations-title" className="font-display text-base font-bold text-white">Recommended for You</h4>
+                  <p className="text-[11px] text-slate-400">Based on the themes and collections you read.</p>
+                </div>
+              </div>
+              <div className="flex gap-3 overflow-x-auto pb-2">
+                {readerHome.recommendations.slice(0, 6).map(item => compactPieceRow(item))}
+              </div>
+            </section>
+          )}
+
+          {readerHome && readerHome.collections.length > 0 && (
+            <section className="space-y-3 border-t border-slate-800 pt-4" aria-labelledby="collections-title">
+              <div className="flex items-center gap-2">
+                <Layers3 className="h-4 w-4 text-teal-400" />
+                <h4 id="collections-title" className="font-display text-base font-bold text-white">Writer Collections</h4>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {readerHome.collections.map(collection => (
+                  <div key={collection.id} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                    <p className="font-display text-sm font-bold text-white">{collection.name}</p>
+                    <p className="mt-1 line-clamp-2 text-xs text-slate-400">{collection.description}</p>
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {collection.pieces.slice(0, 4).map(piece => (
+                        <button key={piece.id} type="button" onClick={() => { onClose(); onReadArticle(piece); }} className="rounded-full border border-slate-700 px-2 py-1 text-[10px] text-sky-300 hover:border-sky-600">
+                          {piece.title}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {readerHome && readerHome.bundles.length > 0 && (
+            <section className="space-y-3 border-t border-slate-800 pt-4" aria-labelledby="bundles-title">
+              <div className="flex items-center gap-2">
+                <PackageOpen className="h-4 w-4 text-emerald-400" />
+                <h4 id="bundles-title" className="font-display text-base font-bold text-white">Reading Bundles</h4>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {readerHome.bundles.map(bundle => {
+                  const checkoutArticle: Article = {
+                    id: `bundle:${bundle.id}`,
+                    title: bundle.name,
+                    subtitle: `${bundle.pieces.length} pieces • permanent account access`,
+                    slug: `bundle-${bundle.slug}`,
+                    excerpt: bundle.description,
+                    content: '', category: 'Bundle', categories: ['Bundle'], topics: [], status: 'published',
+                    isPaid: true, priceKes: bundle.priceKes, readTimeMinutes: 0, showReadTime: false,
+                    publishedAt: bundle.updatedAt.slice(0, 10), createdAt: bundle.createdAt, updatedAt: bundle.updatedAt,
+                    coverImage: bundle.coverImage || bundle.pieces[0]?.coverImage,
+                    downloadsCount: 0, previewParagraphs: [], tags: ['Bundle']
+                  };
+                  return (
+                    <div key={bundle.id} className="rounded-2xl border border-emerald-800/50 bg-emerald-950/20 p-4">
+                      <p className="font-display text-sm font-bold text-white">{bundle.name}</p>
+                      <p className="mt-1 text-xs text-slate-400">{bundle.pieces.length} pieces • KSh {bundle.priceKes.toLocaleString()}</p>
+                      <button type="button" onClick={() => onPurchaseBundle?.(bundle, checkoutArticle)} className="mt-3 w-full rounded-xl bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-500">
+                        Unlock Complete Bundle
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {articles.length > 0 && (
+            <div className="flex items-center gap-2 border-t border-slate-800 pt-4">
+              <BookmarkCheck className="h-4 w-4 text-emerald-400" />
+              <h4 className="font-display text-base font-bold text-white">Your Complete Library</h4>
+            </div>
+          )}
           {isLoading && articles.length > 0 && (
             <p className="text-center text-xs text-sky-300" role="status" aria-live="polite">
               Verifying account-synced access… locally stored purchases are shown below.
