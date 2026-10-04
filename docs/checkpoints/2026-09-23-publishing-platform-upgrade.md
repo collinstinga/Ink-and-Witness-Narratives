@@ -148,7 +148,7 @@ UP-02 is deployed and active. Resume UP-04 from its isolated chapter-schema chec
 
 ## Homepage library and purchasable bundles checkpoint — 2026-10-04
 
-Status: implementation and local verification complete; production release verification pending.
+Status: complete, deployed, and verified on the production custom domain.
 
 - The public homepage now follows a quiet library hierarchy: hero, compact expandable newsletter banner, paid bundles, category shelves, editorial collections, then deduplicated individual pieces.
 - Categories are navigation shelves rather than repeated piece grids. Their saved name, description, enabled state, and order remain controlled through Writer Studio.
@@ -168,3 +168,14 @@ Local release gate:
 - Diff integrity: `git diff --check` passed (line-ending warnings only).
 - Secret scan: no credential-shaped additions detected.
 - Production data migration: none required and none performed.
+
+Production release gate:
+
+- Feature code commit: `7d74de3` (`fix: add resilient homepage cover fallbacks`), including homepage-library commit `546ed83` and the additive collection-cover checkpoint `08c2d8a`.
+- Active Vercel deployment: `dpl_AQRVwdLJb2P83WCH932bvik3Pkaz`, promoted to `https://www.inkandwitness-narratives.co.ke` after the protected candidate passed its checks. Candidate `dpl_E4ip534NWavLiMBAeqwUDkipxmBB` was superseded by the resilient-cover build.
+- Production smoke check: homepage returned HTTP 200 in 1,276 ms; the uncached private bootstrap returned HTTP 200 in 731 ms with `no-store, must-revalidate, max-age=0, private`.
+- Production content check: 13 published article summaries, 11 categories, one valid paid bundle, one collection, and five deduplicated standalone homepage pieces. No standalone item overlapped a bundle or collection member, and no homepage summary contained non-empty paid article text.
+- Authorization check: unauthenticated `PUT /api/admin/homepage` and `POST /api/admin/upload-image` both returned HTTP 401.
+- Visual check: the custom domain rendered the compact newsletter first, the paid bundle immediately below it, category shelves, editorial collections, and the standalone section. A legacy missing bundle cover now renders a neutral layered-book fallback rather than a broken-image glyph.
+- Runtime-log check: production requests completed with expected 200/401 statuses and no application 5xx. Vercel still labels the existing Node `url.parse()` deprecation warning as an error; it is unchanged from earlier checkpoints and remains a separate maintenance item.
+- Rollback safety: this release made no database migration or destructive data write. The earlier promoted candidate remains available, and normal Vercel deployment promotion can restore a prior artifact without transforming Firestore data.
