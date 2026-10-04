@@ -304,6 +304,9 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
                   className="group overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/55 text-left shadow-lg shadow-black/10 transition hover:-translate-y-0.5 hover:border-sky-800/80 hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b101b]"
                 >
                   <span className="relative block aspect-[16/10] overflow-hidden bg-gradient-to-br from-sky-950 via-slate-900 to-slate-950">
+                    <span className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
+                      <Layers3 className="h-10 w-10 text-sky-400/45" />
+                    </span>
                     {coverImage ? (
                       <img
                         src={coverImage}
@@ -311,13 +314,10 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
                         loading="lazy"
                         decoding="async"
                         referrerPolicy="no-referrer"
+                        onError={(event) => { event.currentTarget.style.display = 'none'; }}
                         className="h-full w-full object-cover opacity-75 transition duration-500 group-hover:scale-[1.025] group-hover:opacity-90"
                       />
-                    ) : (
-                      <span className="flex h-full items-center justify-center" aria-hidden="true">
-                        <Layers3 className="h-10 w-10 text-sky-400/45" />
-                      </span>
-                    )}
+                    ) : null}
                     <span className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent" />
                     <span className="absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-950/85 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-slate-300 backdrop-blur">
                       <Layers3 className="h-3 w-3 text-sky-400" aria-hidden="true" />

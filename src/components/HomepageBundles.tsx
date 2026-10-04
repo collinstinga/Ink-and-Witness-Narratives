@@ -52,6 +52,9 @@ export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
             >
               <div className="grid min-h-full grid-cols-1 sm:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
                 <div className="relative min-h-52 overflow-hidden bg-emerald-950/30 sm:min-h-full">
+                  <span className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
+                    <Layers3 className="h-14 w-14 text-emerald-400/40" />
+                  </span>
                   {coverImage ? (
                     <img
                       src={coverImage}
@@ -59,13 +62,10 @@ export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
                       loading="lazy"
                       decoding="async"
                       referrerPolicy="no-referrer"
+                      onError={(event) => { event.currentTarget.style.display = 'none'; }}
                       className="absolute inset-0 h-full w-full object-cover opacity-75"
                     />
-                  ) : (
-                    <span className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
-                      <Layers3 className="h-14 w-14 text-emerald-400/40" />
-                    </span>
-                  )}
+                  ) : null}
                   <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/10 to-transparent sm:bg-gradient-to-r sm:from-transparent sm:to-slate-950/80" />
                   <span className="absolute bottom-4 left-4 inline-flex items-center gap-1.5 rounded-full border border-emerald-700/50 bg-slate-950/90 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-emerald-300 backdrop-blur">
                     <LibraryBig className="h-3.5 w-3.5" aria-hidden="true" />
