@@ -1,6 +1,11 @@
 export const IMAGE_UPLOAD_ACCEPT = 'image/jpeg,image/png,image/webp';
-export const COLLECTION_COVER_UPLOAD_ACCEPT = 'image/jpeg,.jpg,.jpeg';
+export const CONTENT_COVER_UPLOAD_ACCEPT = 'image/jpeg,.jpg,.jpeg';
+// Retain the collection-specific name for existing callers while both content
+// types share the same strict JPEG policy.
+export const COLLECTION_COVER_UPLOAD_ACCEPT = CONTENT_COVER_UPLOAD_ACCEPT;
 export const MAX_IMAGE_UPLOAD_BYTES = 700 * 1024;
+
+export type ContentCoverKind = 'collection' | 'bundle';
 
 const APPROVED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const APPROVED_IMAGE_EXTENSION = /\.(?:jpe?g|png|webp)$/i;
@@ -23,17 +28,26 @@ export function getImageUploadValidationError(
   return null;
 }
 
-export function getCollectionCoverValidationError(
-  file: Pick<File, 'name' | 'size' | 'type'>
+export function getContentCoverValidationError(
+  file: Pick<File, 'name' | 'size' | 'type'>,
+  kind: ContentCoverKind
 ): string | null {
+  const label = kind === 'bundle' ? 'Bundle' : 'Collection';
+
   if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
-    return 'Collection cover exceeds the 700 KB storage limit. Please compress the JPEG and try again.';
+    return `${label} cover exceeds the 700 KB storage limit. Please compress the JPEG and try again.`;
   }
 
   const mimeType = file.type.trim().toLowerCase();
   if ((mimeType && mimeType !== 'image/jpeg') || (!mimeType && !JPEG_IMAGE_EXTENSION.test(file.name))) {
-    return 'Collection covers must be JPEG files (.jpg or .jpeg).';
+    return `${label} covers must be JPEG files (.jpg or .jpeg).`;
   }
 
   return null;
+}
+
+export function getCollectionCoverValidationError(
+  file: Pick<File, 'name' | 'size' | 'type'>
+): string | null {
+  return getContentCoverValidationError(file, 'collection');
 }

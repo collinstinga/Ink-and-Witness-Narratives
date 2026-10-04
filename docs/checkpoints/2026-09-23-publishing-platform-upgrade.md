@@ -145,3 +145,26 @@ Status: newsletter production release complete; sales backfill and later upgrade
 ## Resume instructions
 
 UP-02 is deployed and active. Resume UP-04 from its isolated chapter-schema checkpoint only after rebasing it onto production commit `226f0bb9d9e1011b85fac987096539ef3e49f77a`; do not merge the old checkpoint branch wholesale. Before editing, confirm `git status --short`, the current commit, and that no unrelated user changes are present. Preserve the release-notification opt-in and standalone-piece compatibility while implementing chapter routes, editor workflow, reader table of contents, and access tests. After each stage, run focused tests, the full suite, TypeScript, production builds, and `git diff --check`; then update this ledger before committing. Do not run the sales backfill until the remaining UP-06 production snapshot and release gate.
+
+## Homepage library and purchasable bundles checkpoint — 2026-10-04
+
+Status: implementation and local verification complete; production release verification pending.
+
+- The public homepage now follows a quiet library hierarchy: hero, compact expandable newsletter banner, paid bundles, category shelves, editorial collections, then deduplicated individual pieces.
+- Categories are navigation shelves rather than repeated piece grids. Their saved name, description, enabled state, and order remain controlled through Writer Studio.
+- Collections remain editorial browsing groups and do not change piece ownership or price. Bundles remain paid products with a writer-defined KES price; confirmed bundle settlement still grants every snapshotted piece permanently to the authenticated reader account.
+- The writer can select and order up to six homepage bundles, select and order up to six collections, select up to eight remaining standalone pieces, and edit all public section headings/descriptions.
+- Bundle and collection cover uploads share a JPEG-only, 700 KB browser policy and a server-side decoded-image/MIME enforcement path. Both persist through the existing authenticated cloud asset endpoint.
+- Homepage responses expose only public article summaries. They omit full bodies and inline original images, reject stale/unpublished bundle members, and avoid rendering bundle/collection members again as standalone cards.
+- An unauthenticated bundle buyer is asked to sign in; after reader authentication, the intended bundle checkout resumes automatically. Payment confirmation remains the only automatic paid-access grant.
+
+Local release gate:
+
+- Focused homepage/newsletter/image/bundle-settlement suite: 41/41 passed across 8 files.
+- Full automated suite: 492/492 passed across 58 files.
+- TypeScript: passed (`tsc --noEmit`).
+- Production client build: passed (Vite; existing large-chunk advisory only).
+- Production server bundle: passed (esbuild).
+- Diff integrity: `git diff --check` passed (line-ending warnings only).
+- Secret scan: no credential-shaped additions detected.
+- Production data migration: none required and none performed.

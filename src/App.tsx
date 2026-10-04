@@ -147,6 +147,7 @@ export default function App() {
   // Active Modals & Readers
   const [activeReaderArticle, setActiveReaderArticle] = useState<Article | null>(null);
   const [activeCheckoutArticle, setActiveCheckoutArticle] = useState<Article | null>(null);
+  const [pendingBundleCheckoutArticle, setPendingBundleCheckoutArticle] = useState<Article | null>(null);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [isTipOpen, setIsTipOpen] = useState(false);
   const [tipTargetArticle, setTipTargetArticle] = useState<Article | null>(null);
@@ -787,6 +788,12 @@ export default function App() {
     setIsSignInOpen(false);
     if (user.role === 'admin') {
       navigate({ isWriterStudioOpen: true, isSignInOpen: false }, 'push');
+    } else if (pendingBundleCheckoutArticle) {
+      const checkoutArticle = pendingBundleCheckoutArticle;
+      setPendingBundleCheckoutArticle(null);
+      navigate({ isLibraryOpen: false, isSignInOpen: false }, 'push');
+      bundleCheckoutActiveRef.current = true;
+      setActiveCheckoutArticle(checkoutArticle);
     } else {
       navigate({ isLibraryOpen: true, isSignInOpen: false }, 'push');
     }
@@ -796,6 +803,7 @@ export default function App() {
     authSessionRequestIdRef.current += 1;
     accountLibraryRequestIdRef.current += 1;
     setAccountLibraryLoading(false);
+    setPendingBundleCheckoutArticle(null);
     try {
       await api.authLogout();
     } catch {}
@@ -920,6 +928,12 @@ export default function App() {
   };
 
   const handlePurchaseBundle = (_bundle: ContentBundle, checkoutArticle: Article) => {
+    if (!currentUser || currentUser.role !== 'client') {
+      setPendingBundleCheckoutArticle(checkoutArticle);
+      setIsLibraryOpen(false);
+      setIsSignInOpen(true);
+      return;
+    }
     bundleCheckoutActiveRef.current = true;
     setIsLibraryOpen(false);
     setActiveCheckoutArticle(checkoutArticle);
@@ -995,9 +1009,12 @@ export default function App() {
           <HomeView
             author={author}
             articles={articles}
+            categories={categories}
             unlockedTokens={effectiveUnlockedTokens}
             onReadArticle={handleOpenReader}
             onUnlockArticle={handleUnlockRequest}
+            onPurchaseBundle={handlePurchaseBundle}
+            onSelectCategory={handleSelectCategory}
             onNavigate={handleNavigateView}
             onOpenTip={handleOpenTip}
           />
@@ -1284,6 +1301,7 @@ export default function App() {
       <SignInModal
         isOpen={isSignInOpen}
         onClose={() => {
+          setPendingBundleCheckoutArticle(null);
           setIsSignInOpen(false);
           if (window.location.hash.includes('sign-in') || window.location.hash.includes('signin') || window.location.hash.includes('login')) {
             navigate({ isSignInOpen: false }, 'replace');

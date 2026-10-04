@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   COLLECTION_COVER_UPLOAD_ACCEPT,
+  CONTENT_COVER_UPLOAD_ACCEPT,
   IMAGE_UPLOAD_ACCEPT,
   MAX_IMAGE_UPLOAD_BYTES,
   getCollectionCoverValidationError,
+  getContentCoverValidationError,
   getImageUploadValidationError
 } from './imageUploadPolicy.js';
 
@@ -26,11 +28,19 @@ describe('browser image upload policy', () => {
   });
 
   it('limits collection covers to JPEG files', () => {
+    expect(CONTENT_COVER_UPLOAD_ACCEPT).toBe('image/jpeg,.jpg,.jpeg');
     expect(COLLECTION_COVER_UPLOAD_ACCEPT).toBe('image/jpeg,.jpg,.jpeg');
     expect(getCollectionCoverValidationError({ name: 'collection.jpg', type: 'image/jpeg', size: 50_000 })).toBeNull();
     expect(getCollectionCoverValidationError({ name: 'collection.jpeg', type: '', size: 50_000 })).toBeNull();
     expect(getCollectionCoverValidationError({ name: 'collection.png', type: 'image/png', size: 50_000 })).toContain('JPEG');
     expect(getCollectionCoverValidationError({ name: 'mislabelled.jpg', type: 'image/png', size: 50_000 })).toContain('JPEG');
+  });
+
+  it('applies the same JPEG-only policy to bundle covers', () => {
+    expect(getContentCoverValidationError({ name: 'bundle.jpg', type: 'image/jpeg', size: 50_000 }, 'bundle')).toBeNull();
+    expect(getContentCoverValidationError({ name: 'bundle.jpeg', type: '', size: 50_000 }, 'bundle')).toBeNull();
+    expect(getContentCoverValidationError({ name: 'bundle.webp', type: 'image/webp', size: 50_000 }, 'bundle')).toContain('Bundle');
+    expect(getContentCoverValidationError({ name: 'mislabelled.jpg', type: 'image/png', size: 50_000 }, 'bundle')).toContain('JPEG');
   });
 
   it('applies the existing storage limit to collection JPEGs', () => {
@@ -39,5 +49,13 @@ describe('browser image upload policy', () => {
       type: 'image/jpeg',
       size: MAX_IMAGE_UPLOAD_BYTES + 1
     })).toContain('700 KB');
+  });
+
+  it('applies the existing storage limit to bundle JPEGs', () => {
+    expect(getContentCoverValidationError({
+      name: 'bundle.jpg',
+      type: 'image/jpeg',
+      size: MAX_IMAGE_UPLOAD_BYTES + 1
+    }, 'bundle')).toContain('700 KB');
   });
 });

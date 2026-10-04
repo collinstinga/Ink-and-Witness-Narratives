@@ -21,7 +21,7 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { Article, ContentCollection, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
+import { Article, ContentBundle, ContentCollection, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
@@ -66,7 +66,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       overlayStrength: 25,
     },
     homepageCollectionIds: [],
+    homepageBundleIds: [],
     homepagePieceIds: [],
+    homepageLibraryHeading: 'Find Your Shelf',
+    homepageLibrarySubtitle: 'Browse by feeling, subject, or the kind of story you want today.',
+    homepageBundlesHeading: 'Reading Bundles',
+    homepageBundlesSubtitle: 'One payment permanently adds every included piece to the reader library.',
     homepageCollectionsHeading: 'Curated Collections',
     homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
     homepagePiecesHeading: 'Individual Pieces',
@@ -99,6 +104,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
 
   const [publishedPieces, setPublishedPieces] = useState<Article[]>([]);
   const [availableCollections, setAvailableCollections] = useState<ContentCollection[]>([]);
+  const [availableBundles, setAvailableBundles] = useState<ContentBundle[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasLoadedConfig, setHasLoadedConfig] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -163,6 +169,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
 
       if (data.config) {
         const loadedCollections = Array.isArray(data.collections) ? data.collections : [];
+        const loadedBundles = Array.isArray(data.bundles) ? data.bundles : [];
         const loadedPieces = Array.isArray(data.allPublishedPieces)
           ? data.allPublishedPieces
           : articles.filter(article => article.status === 'published');
@@ -172,13 +179,27 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           .slice(0, 4)
           .map(collection => collection.id);
         const availableCollectionIds = new Set(loadedCollections.map(collection => collection.id));
+        const defaultBundleIds = loadedBundles
+          .filter(bundle => bundle.isPublished)
+          .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || left.name.localeCompare(right.name))
+          .slice(0, 4)
+          .map(bundle => bundle.id);
+        const availableBundleIds = new Set(loadedBundles.map(bundle => bundle.id));
         const homepageCollectionIds = Array.isArray(data.config.homepageCollectionIds)
           ? data.config.homepageCollectionIds.filter(id => availableCollectionIds.has(id)).slice(0, 6)
           : defaultCollectionIds;
+        const homepageBundleIds = Array.isArray(data.config.homepageBundleIds)
+          ? data.config.homepageBundleIds.filter(id => availableBundleIds.has(id)).slice(0, 6)
+          : defaultBundleIds;
         const representedPieceIds = new Set(
-          loadedCollections
-            .filter(collection => homepageCollectionIds.includes(collection.id))
-            .flatMap(collection => collection.pieceIds)
+          [
+            ...loadedCollections
+              .filter(collection => homepageCollectionIds.includes(collection.id))
+              .flatMap(collection => collection.pieceIds),
+            ...loadedBundles
+              .filter(bundle => homepageBundleIds.includes(bundle.id))
+              .flatMap(bundle => bundle.pieceIds),
+          ]
         );
         const availablePieceIds = new Set(loadedPieces.map(piece => piece.id));
         const defaultPieceIds = [...loadedPieces]
@@ -200,11 +221,16 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
             overlayStrength: typeof data.config.welcomeBackground?.overlayStrength === 'number' ? data.config.welcomeBackground.overlayStrength : 25,
           },
           homepageCollectionIds,
+          homepageBundleIds,
           homepagePieceIds: Array.isArray(data.config.homepagePieceIds)
             ? data.config.homepagePieceIds
               .filter(id => availablePieceIds.has(id) && !representedPieceIds.has(id))
               .slice(0, 8)
             : defaultPieceIds,
+          homepageLibraryHeading: data.config.homepageLibraryHeading ?? 'Find Your Shelf',
+          homepageLibrarySubtitle: data.config.homepageLibrarySubtitle ?? 'Browse by feeling, subject, or the kind of story you want today.',
+          homepageBundlesHeading: data.config.homepageBundlesHeading ?? 'Reading Bundles',
+          homepageBundlesSubtitle: data.config.homepageBundlesSubtitle ?? 'One payment permanently adds every included piece to the reader library.',
           homepageCollectionsHeading: data.config.homepageCollectionsHeading ?? 'Curated Collections',
           homepageCollectionsSubtitle: data.config.homepageCollectionsSubtitle ?? 'Read by mood, theme, or the thread that calls to you.',
           homepagePiecesHeading: data.config.homepagePiecesHeading ?? 'Individual Pieces',
@@ -265,6 +291,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           setLastSavedAt(data.config.lastSavedAt || data.config.updatedAt || null);
         }
         setAvailableCollections(loadedCollections);
+        setAvailableBundles(loadedBundles);
       }
       if (data.allPublishedPieces) {
         setPublishedPieces(data.allPublishedPieces);
@@ -510,6 +537,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
   );
 
   const selectedCollectionIds = config.homepageCollectionIds || [];
+  const selectedBundleIds = config.homepageBundleIds || [];
   const selectedPieceIds = config.homepagePieceIds || [];
   const selectedCollections = useMemo(() => {
     const byId = new Map(availableCollections.map(collection => [collection.id, collection]));
@@ -517,9 +545,18 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       .map(id => byId.get(id))
       .filter((collection): collection is ContentCollection => Boolean(collection));
   }, [availableCollections, selectedCollectionIds]);
-  const piecesRepresentedByCollections = useMemo(
-    () => new Set(selectedCollections.flatMap(collection => collection.pieceIds)),
-    [selectedCollections]
+  const selectedBundles = useMemo(() => {
+    const byId = new Map(availableBundles.map(bundle => [bundle.id, bundle]));
+    return selectedBundleIds
+      .map(id => byId.get(id))
+      .filter((bundle): bundle is ContentBundle => Boolean(bundle));
+  }, [availableBundles, selectedBundleIds]);
+  const piecesRepresentedByGroups = useMemo(
+    () => new Set([
+      ...selectedCollections.flatMap(collection => collection.pieceIds),
+      ...selectedBundles.flatMap(bundle => bundle.pieceIds),
+    ]),
+    [selectedBundles, selectedCollections]
   );
 
   const toggleHomepageCollection = (collection: ContentCollection) => {
@@ -545,10 +582,30 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
     });
   };
 
+  const toggleHomepageBundle = (bundle: ContentBundle) => {
+    setError(null);
+    const isSelected = selectedBundleIds.includes(bundle.id);
+    if (!isSelected && selectedBundleIds.length >= 6) {
+      setError('The homepage can show up to six bundles. Remove one before adding another.');
+      return;
+    }
+    setConfig(previous => {
+      const current = previous.homepageBundleIds || [];
+      if (current.includes(bundle.id)) {
+        return { ...previous, homepageBundleIds: current.filter(id => id !== bundle.id) };
+      }
+      return {
+        ...previous,
+        homepageBundleIds: [...current, bundle.id],
+        homepagePieceIds: (previous.homepagePieceIds || []).filter(id => !bundle.pieceIds.includes(id)),
+      };
+    });
+  };
+
   const toggleHomepagePiece = (pieceId: string) => {
     setError(null);
-    if (piecesRepresentedByCollections.has(pieceId)) {
-      setError('That piece is already represented by a selected collection and cannot be repeated.');
+    if (piecesRepresentedByGroups.has(pieceId)) {
+      setError('That piece is already represented by a selected collection or bundle and cannot be repeated.');
       return;
     }
     const isSelected = selectedPieceIds.includes(pieceId);
@@ -566,7 +623,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
   };
 
   const moveHomepageItem = (
-    field: 'homepageCollectionIds' | 'homepagePieceIds',
+    field: 'homepageCollectionIds' | 'homepageBundleIds' | 'homepagePieceIds',
     id: string,
     direction: -1 | 1
   ) => {
@@ -1311,7 +1368,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       )}
 
       {/* ============================================================ */}
-      {/* 3. PUBLIC COLLECTIONS & INDIVIDUAL PIECES */}
+      {/* 3. PUBLIC LIBRARY, BUNDLES, COLLECTIONS & INDIVIDUAL PIECES */}
       {/* ============================================================ */}
       {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
       <section id="section-homepage-curation" className="space-y-8 rounded-3xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8">
@@ -1321,17 +1378,57 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
               <Layers className="h-4 w-4" />
               <span>Reader discovery</span>
             </div>
-            <h3 className="font-display text-xl font-bold text-white">Collections and individual pieces</h3>
+            <h3 className="font-display text-xl font-bold text-white">Library, bundles, collections and pieces</h3>
             <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-400">
-              Keep the homepage calm and intentional. A piece selected inside a homepage collection is automatically excluded from the individual shelf.
+              Categories act as library shelves. Bundles are paid sets; collections are free browsing groups. Pieces already represented by either are excluded from the individual shelf.
             </p>
           </div>
           <div className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1.5 font-mono text-[10px] text-slate-400">
-            {selectedCollectionIds.length}/6 collections &middot; {selectedPieceIds.length}/8 pieces
+            {selectedBundleIds.length}/6 bundles &middot; {selectedCollectionIds.length}/6 collections &middot; {selectedPieceIds.length}/8 pieces
           </div>
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Library guide heading</span>
+            <input
+              type="text"
+              maxLength={120}
+              value={config.homepageLibraryHeading || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageLibraryHeading: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Library guide description</span>
+            <input
+              type="text"
+              maxLength={300}
+              value={config.homepageLibrarySubtitle || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageLibrarySubtitle: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Bundles heading</span>
+            <input
+              type="text"
+              maxLength={120}
+              value={config.homepageBundlesHeading || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageBundlesHeading: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Bundles description</span>
+            <input
+              type="text"
+              maxLength={300}
+              value={config.homepageBundlesSubtitle || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageBundlesSubtitle: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500"
+            />
+          </label>
           <label className="space-y-1.5 text-xs text-slate-300">
             <span className="font-mono">Collections heading</span>
             <input
@@ -1372,6 +1469,74 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
               className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
             />
           </label>
+        </div>
+
+        <div className="rounded-2xl border border-sky-900/60 bg-sky-950/20 p-4 text-xs leading-relaxed text-slate-300">
+          <span className="font-semibold text-sky-200">Library shelf control:</span>{' '}
+          the homepage guide uses your enabled Categories in their saved order. Rename, describe, reorder, enable, or disable those shelves through <span className="font-semibold text-white">Categories</span> in Writer Studio; pieces inherit the shelves assigned in the editor.
+        </div>
+
+        <div className="space-y-4 rounded-2xl border border-emerald-950/80 bg-emerald-950/10 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h4 className="text-sm font-semibold text-white">Homepage bundles</h4>
+              <p className="mt-1 text-[11px] text-slate-500">Select published paid sets and arrange their order directly below the newsletter banner. Bundle prices and JPEG covers are managed in Reader Experience.</p>
+            </div>
+            <span className="font-mono text-[10px] text-emerald-400">{selectedBundleIds.length}/6</span>
+          </div>
+
+          {selectedBundles.length > 0 && (
+            <div className="space-y-2">
+              {selectedBundles.map((bundle, index) => (
+                <div key={bundle.id} className="flex items-center gap-3 rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-2.5">
+                  <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
+                    {bundle.coverImage ? (
+                      <img src={bundle.coverImage} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <Layers className="m-3 h-6 w-6 text-slate-600" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-white">{bundle.name}</p>
+                    <p className="text-[10px] text-slate-500">{bundle.pieceIds.length} pieces &middot; KSh {bundle.priceKes.toLocaleString('en-KE')}</p>
+                  </div>
+                  <button type="button" aria-label={`Move ${bundle.name} up`} disabled={index === 0} onClick={() => moveHomepageItem('homepageBundleIds', bundle.id, -1)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-25">
+                    <ChevronUp className="h-4 w-4" />
+                  </button>
+                  <button type="button" aria-label={`Move ${bundle.name} down`} disabled={index === selectedBundles.length - 1} onClick={() => moveHomepageItem('homepageBundleIds', bundle.id, 1)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-25">
+                    <ChevronDown className="h-4 w-4" />
+                  </button>
+                  <button type="button" onClick={() => toggleHomepageBundle(bundle)} className="rounded-lg px-2.5 py-2 text-[10px] font-semibold text-rose-300 hover:bg-rose-950/60">Remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid max-h-64 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+            {availableBundles.filter(bundle => bundle.isPublished).map(bundle => {
+              const selected = selectedBundleIds.includes(bundle.id);
+              return (
+                <button
+                  key={bundle.id}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => toggleHomepageBundle(bundle)}
+                  className={`flex items-center justify-between gap-3 rounded-xl border p-3 text-left transition-colors ${selected ? 'border-emerald-500 bg-emerald-950/50 text-white' : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'}`}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-semibold">{bundle.name}</span>
+                    <span className="mt-0.5 block text-[10px] text-slate-500">{bundle.pieceIds.length} pieces &middot; KSh {bundle.priceKes.toLocaleString('en-KE')}</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-emerald-400">{selected ? 'Selected' : 'Add'}</span>
+                </button>
+              );
+            })}
+            {availableBundles.filter(bundle => bundle.isPublished).length === 0 && (
+              <p className="col-span-full rounded-xl border border-dashed border-slate-800 p-4 text-center text-xs text-slate-500">
+                Create and publish a priced bundle in Reader Experience first; it will then be available here.
+              </p>
+            )}
+          </div>
         </div>
 
         <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 sm:p-5">
@@ -1441,7 +1606,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           <div className="flex items-center justify-between gap-4">
             <div>
               <h4 className="text-sm font-semibold text-white">Individual pieces</h4>
-              <p className="mt-1 text-[11px] text-slate-500">Pieces already represented by a selected collection are unavailable, preventing duplicate homepage appearances.</p>
+              <p className="mt-1 text-[11px] text-slate-500">Pieces already represented by a selected collection or bundle are unavailable, preventing duplicate homepage appearances.</p>
             </div>
             <span className="font-mono text-[10px] text-sky-400">{selectedPieceIds.length}/8</span>
           </div>
@@ -1473,7 +1638,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           <div className="grid max-h-80 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
             {publishedPieces.map(piece => {
               const selected = selectedPieceIds.includes(piece.id);
-              const represented = piecesRepresentedByCollections.has(piece.id);
+              const represented = piecesRepresentedByGroups.has(piece.id);
               return (
                 <button
                   key={piece.id}
@@ -1487,7 +1652,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
                     <span className="block truncate text-xs font-semibold">{piece.title}</span>
                     <span className="mt-0.5 block text-[10px] text-slate-500">{piece.category}</span>
                   </span>
-                  <span className="shrink-0 font-mono text-[10px] text-sky-400">{represented ? 'In collection' : selected ? 'Selected' : 'Add'}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-sky-400">{represented ? 'Already grouped' : selected ? 'Selected' : 'Add'}</span>
                 </button>
               );
             })}

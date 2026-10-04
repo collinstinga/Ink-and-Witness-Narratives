@@ -10,9 +10,12 @@ import {
   X,
 } from 'lucide-react';
 
-import type { Article, ContentCollection, HomepageConfig } from '../types.js';
+import type { Article, Category, ContentBundle, ContentCollection, HomepageConfig } from '../types.js';
+import { HomepageBundles, type HomepageBundle } from './HomepageBundles.js';
+import { HomepageLibraryGuide } from './HomepageLibraryGuide.js';
 
 const MAX_HOMEPAGE_COLLECTIONS = 6;
+const MAX_HOMEPAGE_BUNDLES = 6;
 const MAX_HOMEPAGE_PIECES = 8;
 const FALLBACK_COVER =
   'https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=900&q=80';
@@ -22,12 +25,16 @@ type PublicView = 'home' | 'all-pieces' | 'about' | 'how-to-pay' | 'support';
 
 export interface HomepageDiscoveryProps {
   config?: HomepageConfig | null;
+  bundles: HomepageBundle[];
   collections: ContentCollection[];
+  categories: Category[];
   allArticles: Article[];
   pieces: Article[];
   unlockedTokens: Record<string, unknown>;
   onReadArticle: (article: Article) => void;
   onUnlockArticle: (article: Article) => void;
+  onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: PublicView) => void;
 }
 
@@ -37,6 +44,7 @@ export interface HomepageCollectionView {
 }
 
 export interface HomepageDiscoveryModel {
+  bundles: HomepageBundle[];
   collections: HomepageCollectionView[];
   pieces: Article[];
 }
@@ -51,6 +59,7 @@ export const buildHomepageDiscoveryModel = (
   collections: ContentCollection[],
   allArticles: Article[],
   pieces: Article[],
+  bundles: HomepageBundle[] = [],
 ): HomepageDiscoveryModel => {
   const articleById = new Map<string, Article>();
   allArticles.forEach((article) => {
@@ -60,8 +69,35 @@ export const buildHomepageDiscoveryModel = (
   });
 
   const seenCollectionIds = new Set<string>();
+  const seenBundleIds = new Set<string>();
   const representedPieceIds = new Set<string>();
+  const resolvedBundles: HomepageBundle[] = [];
   const resolvedCollections: HomepageCollectionView[] = [];
+
+  bundles.forEach((bundle) => {
+    if (
+      resolvedBundles.length >= MAX_HOMEPAGE_BUNDLES ||
+      !bundle?.id ||
+      !bundle.isPublished ||
+      bundle.priceKes <= 0 ||
+      !bundle.checkoutArticle ||
+      seenBundleIds.has(bundle.id)
+    ) {
+      return;
+    }
+
+    seenBundleIds.add(bundle.id);
+    const seenPieceIds = new Set<string>();
+    const bundlePieces = (bundle.pieces || []).flatMap((candidate) => {
+      const article = candidate?.id ? articleById.get(candidate.id) : null;
+      if (!article || seenPieceIds.has(article.id)) return [];
+      seenPieceIds.add(article.id);
+      return [article];
+    });
+    if (bundlePieces.length < 2) return;
+    bundlePieces.forEach((article) => representedPieceIds.add(article.id));
+    resolvedBundles.push({ ...bundle, pieces: bundlePieces });
+  });
 
   collections.forEach((collection) => {
     if (
@@ -106,7 +142,7 @@ export const buildHomepageDiscoveryModel = (
     resolvedPieces.push(article);
   });
 
-  return { collections: resolvedCollections, pieces: resolvedPieces };
+  return { bundles: resolvedBundles, collections: resolvedCollections, pieces: resolvedPieces };
 };
 
 const isArticleAccessible = (
@@ -141,17 +177,21 @@ const ShelfHeading: React.FC<{
 
 export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   config,
+  bundles,
   collections,
+  categories,
   allArticles,
   pieces,
   unlockedTokens,
   onReadArticle,
   onUnlockArticle,
+  onPurchaseBundle,
+  onSelectCategory,
   onNavigate,
 }) => {
   const model = useMemo(
-    () => buildHomepageDiscoveryModel(collections, allArticles, pieces),
-    [collections, allArticles, pieces],
+    () => buildHomepageDiscoveryModel(collections, allArticles, pieces, bundles),
+    [collections, allArticles, pieces, bundles],
   );
   const [activeCollection, setActiveCollection] = useState<HomepageCollectionView | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -226,6 +266,19 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
 
   return (
     <div id="home-discovery" className="mx-auto w-full max-w-6xl space-y-16 px-4 py-14 sm:px-6 sm:py-20">
+      <HomepageBundles
+        bundles={model.bundles}
+        config={config}
+        onPurchaseBundle={onPurchaseBundle}
+      />
+
+      <HomepageLibraryGuide
+        articles={allArticles}
+        categories={categories}
+        config={config}
+        onSelectCategory={onSelectCategory}
+      />
+
       {model.collections.length > 0 && (
         <section id="home-curated-collections" aria-labelledby="home-collections-heading" className="space-y-7">
           <div>

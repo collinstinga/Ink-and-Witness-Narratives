@@ -1,16 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowRight, Feather, Sparkles } from 'lucide-react';
-import { Article, AuthorProfile, ContentCollection, HomepageConfig } from '../../types.js';
+import { Article, AuthorProfile, Category, ContentBundle, ContentCollection, HomepageConfig } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { HomepageDiscovery } from '../HomepageDiscovery.js';
+import type { HomepageBundle } from '../HomepageBundles.js';
 import { NewsletterSignup } from '../NewsletterSignup.js';
 
 interface HomeViewProps {
   author: AuthorProfile | null;
   articles: Article[];
+  categories: Category[];
   unlockedTokens: Record<string, any>;
   onReadArticle: (article: Article) => void;
   onUnlockArticle: (article: Article) => void;
+  onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: 'home' | 'all-pieces' | 'about' | 'how-to-pay' | 'support') => void;
   onOpenTip: () => void;
 }
@@ -18,12 +22,16 @@ interface HomeViewProps {
 export const HomeView: React.FC<HomeViewProps> = ({
   author,
   articles,
+  categories,
   unlockedTokens,
   onReadArticle,
   onUnlockArticle,
+  onPurchaseBundle,
+  onSelectCategory,
   onNavigate,
 }) => {
   const [homepageConfig, setHomepageConfig] = useState<HomepageConfig | null>(null);
+  const [homepageBundles, setHomepageBundles] = useState<HomepageBundle[]>([]);
   const [homepageCollections, setHomepageCollections] = useState<ContentCollection[] | null>(null);
   const [homepagePieces, setHomepagePieces] = useState<Article[] | null>(null);
 
@@ -37,6 +45,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
         const data = await api.getHomepageData();
         if (!disposed && requestId === requestSequence && data) {
           setHomepageConfig(data.config);
+          setHomepageBundles(data.bundles || []);
           setHomepageCollections(data.collections || []);
           setHomepagePieces(data.pieces || []);
         }
@@ -44,6 +53,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
         if (!disposed && requestId === requestSequence) {
           console.warn('Could not fetch homepage curation; using the published archive fallback.', error);
           setHomepageCollections([]);
+          setHomepageBundles([]);
           setHomepagePieces(null);
         }
       }
@@ -84,8 +94,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const heroBadge = homepageConfig?.heroBadge || 'Ink & Witness Narratives';
 
   const scrollToDiscovery = () => {
-    const target = document.getElementById('home-curated-collections')
-      || document.getElementById('home-curated-pieces');
+    const target = document.getElementById('home-reading-bundles')
+      || document.getElementById('home-library-guide')
+      || document.getElementById('home-curated-collections')
+      || document.getElementById('home-individual-pieces');
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -165,20 +177,24 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </div>
       </section>
 
+      <div className="border-y border-slate-800/70 bg-slate-950/30">
+        <NewsletterSignup variant="compact" />
+      </div>
+
       <HomepageDiscovery
         config={homepageConfig}
+        bundles={homepageBundles}
         collections={homepageCollections || []}
+        categories={categories}
         allArticles={publishedArticles}
         pieces={visiblePieces}
         unlockedTokens={unlockedTokens}
         onReadArticle={onReadArticle}
         onUnlockArticle={onUnlockArticle}
+        onPurchaseBundle={onPurchaseBundle}
+        onSelectCategory={onSelectCategory}
         onNavigate={onNavigate}
       />
-
-      <div className="border-t border-slate-800/70">
-        <NewsletterSignup />
-      </div>
     </div>
   );
 };

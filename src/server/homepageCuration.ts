@@ -1,6 +1,7 @@
-import { Article, ContentCollection, HomepageConfig } from '../types.js';
+import { Article, ContentBundle, ContentCollection, HomepageConfig } from '../types.js';
 
 const MAX_HOMEPAGE_COLLECTIONS = 6;
+const MAX_HOMEPAGE_BUNDLES = 6;
 const MAX_HOMEPAGE_PIECES = 8;
 
 function uniqueIds(value: unknown, limit: number): string[] {
@@ -27,10 +28,11 @@ function articleTimestamp(article: Article): number {
 }
 
 export function resolveHomepageCuration(
-  config: Pick<HomepageConfig, 'homepageCollectionIds' | 'homepagePieceIds'>,
+  config: Pick<HomepageConfig, 'homepageCollectionIds' | 'homepageBundleIds' | 'homepagePieceIds'>,
   collections: ContentCollection[],
+  bundles: ContentBundle[],
   articles: Article[]
-): { collections: ContentCollection[]; pieces: Article[] } {
+): { collections: ContentCollection[]; bundles: ContentBundle[]; pieces: Article[] } {
   const publishedArticles = articles.filter(article => article.status === 'published' || !article.status);
   const articleById = new Map(publishedArticles.map(article => [article.id, article]));
   const publishedCollections = collections
@@ -45,7 +47,36 @@ export function resolveHomepageCuration(
     .map(id => collectionById.get(id))
     .filter((collection): collection is ContentCollection => Boolean(collection));
 
+  // A homepage bundle must be immediately purchasable. This mirrors the
+  // checkout guard: every referenced piece must still be published and a
+  // bundle must contain at least two distinct pieces.
+  const publishedBundles = bundles
+    .filter(bundle => bundle.isPublished)
+    .filter(bundle => {
+      const pieceIds = uniqueIds(bundle.pieceIds, 30);
+      return pieceIds.length >= 2
+        && pieceIds.length === bundle.pieceIds.length
+        && pieceIds.every(id => articleById.has(id));
+    })
+    .sort((left, right) => {
+      const updatedDifference = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+      return (Number.isFinite(updatedDifference) ? updatedDifference : 0)
+        || left.name.localeCompare(right.name);
+    });
+  const bundleById = new Map(publishedBundles.map(bundle => [bundle.id, bundle]));
+  const configuredBundleIds = config.homepageBundleIds === undefined
+    ? publishedBundles.slice(0, 4).map(bundle => bundle.id)
+    : uniqueIds(config.homepageBundleIds, MAX_HOMEPAGE_BUNDLES);
+  const selectedBundles = configuredBundleIds
+    .map(id => bundleById.get(id))
+    .filter((bundle): bundle is ContentBundle => Boolean(bundle));
+
   const representedPieceIds = new Set<string>();
+  for (const bundle of selectedBundles) {
+    for (const pieceId of bundle.pieceIds) {
+      representedPieceIds.add(pieceId);
+    }
+  }
   for (const collection of selectedCollections) {
     for (const pieceId of collection.pieceIds) {
       if (articleById.has(pieceId)) representedPieceIds.add(pieceId);
@@ -67,5 +98,5 @@ export function resolveHomepageCuration(
     if (pieces.length >= MAX_HOMEPAGE_PIECES) break;
   }
 
-  return { collections: selectedCollections, pieces };
+  return { collections: selectedCollections, bundles: selectedBundles, pieces };
 }

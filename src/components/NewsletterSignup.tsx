@@ -2,8 +2,17 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Loader2, Mail, ShieldCheck, Sparkles } from 'lucide-react';
 import type { Category } from '../types.js';
 import { api } from '../utils/api.js';
+import { NewsletterSignupDisclosure } from './NewsletterSignupDisclosure.js';
 
-export const NewsletterSignup: React.FC = () => {
+export interface NewsletterSignupProps {
+  variant?: 'full' | 'compact';
+  defaultExpanded?: boolean;
+}
+
+export const NewsletterSignup: React.FC<NewsletterSignupProps> = ({
+  variant = 'full',
+  defaultExpanded = false,
+}) => {
   const [enabled, setEnabled] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -71,9 +80,8 @@ export const NewsletterSignup: React.FC = () => {
 
   if (loadingConfig || !enabled) return null;
 
-  return (
-    <section id="newsletter-signup" className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-14">
-      <div className="relative overflow-hidden rounded-3xl border border-sky-900/70 bg-gradient-to-br from-[#0f172a] via-[#0b1424] to-[#07101d] p-6 sm:p-10 shadow-2xl">
+  const signupCard = (
+    <div className="relative overflow-hidden rounded-3xl border border-sky-900/70 bg-gradient-to-br from-[#0f172a] via-[#0b1424] to-[#07101d] p-6 shadow-2xl sm:p-10">
         <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-sky-500/10 blur-3xl" />
         <div className="relative grid gap-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
           <div className="space-y-5">
@@ -153,7 +161,22 @@ export const NewsletterSignup: React.FC = () => {
             </form>
           )}
         </div>
-      </div>
+    </div>
+  );
+
+  if (variant === 'compact') {
+    return (
+      <section id="newsletter-signup" className="mx-auto max-w-5xl px-4 py-5 sm:px-6 lg:px-8">
+        <NewsletterSignupDisclosure defaultOpen={defaultExpanded}>
+          {signupCard}
+        </NewsletterSignupDisclosure>
+      </section>
+    );
+  }
+
+  return (
+    <section id="newsletter-signup" className="mx-auto max-w-5xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
+      {signupCard}
     </section>
   );
 };

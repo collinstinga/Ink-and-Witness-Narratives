@@ -504,6 +504,23 @@ function publicBundleCheckoutArticle(bundle: ContentBundle, pieces: Article[]): 
   };
 }
 
+function publicHomepageBundle(
+  bundle: ContentBundle,
+  articleById: Map<string, Article>,
+  defaultPriceKes: number
+): (ContentBundle & { pieces: Article[]; checkoutArticle: Article }) | null {
+  const pieces = bundle.pieceIds
+    .map(pieceId => articleById.get(pieceId))
+    .filter((article): article is Article => Boolean(article));
+  if (pieces.length < 2 || pieces.length !== bundle.pieceIds.length) return null;
+
+  return {
+    ...bundle,
+    pieces: pieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
+    checkoutArticle: publicBundleCheckoutArticle(bundle, pieces)
+  };
+}
+
 function toHomepageAdminArticleSummary(article: Article): Article {
   // The homepage picker needs metadata, never article bodies or inline image
   // bytes. Keeping this response compact also prevents an acknowledged save
@@ -1166,7 +1183,7 @@ export async function createApp() {
       // Always check the shared article version marker. This costs one targeted
       // read on warm instances and scans the catalogue only after an actual
       // writer mutation, preventing an older instance from moving the UI back.
-      const [articles, collections] = await Promise.all([
+      const [articles, collections, bundles] = await Promise.all([
         store.getFreshArticles(false, true).catch(error => {
           console.warn('[Public Bootstrap] Article freshness check failed; serving last known good catalogue:', error);
           return store.getArticles(false);
@@ -1174,6 +1191,10 @@ export async function createApp() {
         readerExperienceStore.listCollections(false).catch(error => {
           console.warn('[Public Bootstrap] Collection loading failed; serving the remaining homepage:', error);
           return [] as ContentCollection[];
+        }),
+        readerExperienceStore.listBundles(false).catch(error => {
+          console.warn('[Public Bootstrap] Bundle loading failed; serving the remaining homepage:', error);
+          return [] as ContentBundle[];
         }),
         store.refreshPublicMetadata()
       ]);
@@ -1185,7 +1206,12 @@ export async function createApp() {
       const publicArticles = articles.map(article =>
         toPublicArticleSummary(article, defaultPriceKes)
       );
-      const homepageCuration = resolveHomepageCuration(homepage.config, collections, articles);
+      const homepageCuration = resolveHomepageCuration(homepage.config, collections, bundles, articles);
+      const articleById = new Map(articles.map(article => [article.id, article]));
+      const homepageBundles = homepageCuration.bundles.flatMap(bundle => {
+        const publicBundle = publicHomepageBundle(bundle, articleById, defaultPriceKes);
+        return publicBundle ? [publicBundle] : [];
+      });
 
       const sessionUser = (req as any).user;
       res.json({
@@ -1205,6 +1231,7 @@ export async function createApp() {
         topics: store.getTopics(false, true),
         homepage: {
           config: homepage.config,
+          bundles: homepageBundles,
           collections: homepageCuration.collections,
           pieces: homepageCuration.pieces.map(article =>
             toPublicArticleSummary(article, defaultPriceKes)
@@ -1260,18 +1287,27 @@ export async function createApp() {
   app.get("/api/homepage", async (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, max-age=0');
     try {
-      const [homepage, collections, articles] = await Promise.all([
+      const [homepage, collections, bundles, articles] = await Promise.all([
         store.getFreshHomepageConfig(),
         readerExperienceStore.listCollections(false).catch(error => {
           console.warn('[Homepage] Collection loading failed; serving standalone curation only:', error);
           return [] as ContentCollection[];
         }),
+        readerExperienceStore.listBundles(false).catch(error => {
+          console.warn('[Homepage] Bundle loading failed; serving the remaining curation only:', error);
+          return [] as ContentBundle[];
+        }),
         store.getFreshArticles(false, true)
       ]);
       const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
-      const homepageCuration = resolveHomepageCuration(homepage.config, collections, articles);
+      const homepageCuration = resolveHomepageCuration(homepage.config, collections, bundles, articles);
+      const articleById = new Map(articles.map(article => [article.id, article]));
       res.json({
         config: homepage.config,
+        bundles: homepageCuration.bundles.flatMap(bundle => {
+          const publicBundle = publicHomepageBundle(bundle, articleById, defaultPriceKes);
+          return publicBundle ? [publicBundle] : [];
+        }),
         collections: homepageCuration.collections,
         pieces: homepageCuration.pieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
         mostSellingPieces: homepage.mostSellingPieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
@@ -4419,7 +4455,7 @@ export async function createApp() {
       }
 
       const filePrefix = prefix || (target ? target.replace(/[^a-zA-Z0-9_-]/g, '_') : 'img');
-      const saved = target === 'collection_cover'
+      const saved = target === 'collection_cover' || target === 'bundle_cover'
         ? await store.saveUploadedImage(dataUrl, filePrefix, ['image/jpeg'])
         : await store.saveUploadedImage(dataUrl, filePrefix);
 
@@ -4646,16 +4682,21 @@ export async function createApp() {
   app.get("/api/admin/homepage", requireAdminAuth, async (_req: Request, res: Response) => {
     try {
       res.setHeader('Cache-Control', 'no-store');
-      const [homepage, collections] = await Promise.all([
+      const [homepage, collections, bundles] = await Promise.all([
         store.getFreshHomepageConfig(),
         readerExperienceStore.listCollections(true).catch(error => {
           console.warn('[Admin Homepage] Collection loading failed; returning the homepage settings without collections:', error);
           return [] as ContentCollection[];
+        }),
+        readerExperienceStore.listBundles(true).catch(error => {
+          console.warn('[Admin Homepage] Bundle loading failed; returning the homepage settings without bundles:', error);
+          return [] as ContentBundle[];
         })
       ]);
       res.json({
         ...toHomepageAdminResponse(homepage),
-        collections
+        collections,
+        bundles
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch homepage data." });
@@ -4670,8 +4711,11 @@ export async function createApp() {
       const expectedUpdatedAt = payload?.expectedUpdatedAt;
       const allowedFields = new Set<keyof HomepageConfig>([
         'welcomeBackground', 'startHerePieceIds', 'startHereHeading', 'startHereSubtitle',
-        'homepageCollectionIds', 'homepagePieceIds', 'homepageCollectionsHeading',
-        'homepageCollectionsSubtitle', 'homepagePiecesHeading', 'homepagePiecesSubtitle',
+        'homepageCollectionIds', 'homepageBundleIds', 'homepagePieceIds',
+        'homepageLibraryHeading', 'homepageLibrarySubtitle',
+        'homepageBundlesHeading', 'homepageBundlesSubtitle',
+        'homepageCollectionsHeading', 'homepageCollectionsSubtitle',
+        'homepagePiecesHeading', 'homepagePiecesSubtitle',
         'theWritingHeading', 'theWritingSubtitle', 'aboutTheWritingHeading',
         'aboutTheWritingStatement', 'aboutTheWritingPurpose', 'aboutTheWritingButtonText',
         'mostSellingPieceIds', 'pieceOfTheWeekId', 'mostSellingMode', 'banners',
@@ -4695,6 +4739,7 @@ export async function createApp() {
       const normalizedConfig = { ...(config as Record<string, unknown>) };
       const idListRules = [
         ['homepageCollectionIds', 6, 'homepage collections'],
+        ['homepageBundleIds', 6, 'homepage bundles'],
         ['homepagePieceIds', 8, 'homepage pieces']
       ] as const;
       for (const [field, maximum, label] of idListRules) {
@@ -4714,6 +4759,10 @@ export async function createApp() {
       }
 
       const textRules = [
+        ['homepageLibraryHeading', 120],
+        ['homepageLibrarySubtitle', 300],
+        ['homepageBundlesHeading', 120],
+        ['homepageBundlesSubtitle', 300],
         ['homepageCollectionsHeading', 120],
         ['homepageCollectionsSubtitle', 300],
         ['homepagePiecesHeading', 120],
@@ -4734,6 +4783,15 @@ export async function createApp() {
         );
         if ((normalizedConfig.homepageCollectionIds as string[]).some(id => !availableCollectionIds.has(id))) {
           return res.status(400).json({ error: 'One or more selected homepage collections no longer exist.' });
+        }
+      }
+
+      if (Object.hasOwn(normalizedConfig, 'homepageBundleIds')) {
+        const availableBundleIds = new Set(
+          (await readerExperienceStore.listBundles(true)).map(bundle => bundle.id)
+        );
+        if ((normalizedConfig.homepageBundleIds as string[]).some(id => !availableBundleIds.has(id))) {
+          return res.status(400).json({ error: 'One or more selected homepage bundles no longer exist.' });
         }
       }
 

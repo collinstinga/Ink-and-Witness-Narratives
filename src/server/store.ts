@@ -224,6 +224,10 @@ let cachedHomepageConfig: HomepageConfig = {
     zoom: 100,
     overlayStrength: 25,
   },
+  homepageLibraryHeading: 'Browse the Library',
+  homepageLibrarySubtitle: 'Choose a section that matches what you want to feel, question, or discover.',
+  homepageBundlesHeading: 'Reader Bundles',
+  homepageBundlesSubtitle: 'Purchase a thoughtfully grouped set of pieces at one clear price.',
   homepageCollectionsHeading: 'Curated Collections',
   homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
   homepagePiecesHeading: 'Individual Pieces',
@@ -4661,7 +4665,7 @@ export const store = {
 
     const image = await sanitizeImageDataUrl(base64DataUrl);
     if (allowedMimeTypes && !allowedMimeTypes.includes(image.mimeType)) {
-      throw new ImageValidationError('Collection cover photos must be genuine JPEG files.');
+      throw new ImageValidationError('This cover photo must be a genuine JPEG file.');
     }
     const safePrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'img';
 
@@ -5137,7 +5141,12 @@ export const store = {
         heroBadge: partial.heroBadge !== undefined ? partial.heroBadge : baseHomepage.heroBadge,
         heroCtaText: partial.heroCtaText !== undefined ? partial.heroCtaText : baseHomepage.heroCtaText,
         homepageCollectionIds: partial.homepageCollectionIds !== undefined ? partial.homepageCollectionIds : baseHomepage.homepageCollectionIds,
+        homepageBundleIds: partial.homepageBundleIds !== undefined ? partial.homepageBundleIds : baseHomepage.homepageBundleIds,
         homepagePieceIds: partial.homepagePieceIds !== undefined ? partial.homepagePieceIds : baseHomepage.homepagePieceIds,
+        homepageLibraryHeading: partial.homepageLibraryHeading !== undefined ? partial.homepageLibraryHeading : baseHomepage.homepageLibraryHeading,
+        homepageLibrarySubtitle: partial.homepageLibrarySubtitle !== undefined ? partial.homepageLibrarySubtitle : baseHomepage.homepageLibrarySubtitle,
+        homepageBundlesHeading: partial.homepageBundlesHeading !== undefined ? partial.homepageBundlesHeading : baseHomepage.homepageBundlesHeading,
+        homepageBundlesSubtitle: partial.homepageBundlesSubtitle !== undefined ? partial.homepageBundlesSubtitle : baseHomepage.homepageBundlesSubtitle,
         homepageCollectionsHeading: partial.homepageCollectionsHeading !== undefined ? partial.homepageCollectionsHeading : baseHomepage.homepageCollectionsHeading,
         homepageCollectionsSubtitle: partial.homepageCollectionsSubtitle !== undefined ? partial.homepageCollectionsSubtitle : baseHomepage.homepageCollectionsSubtitle,
         homepagePiecesHeading: partial.homepagePiecesHeading !== undefined ? partial.homepagePiecesHeading : baseHomepage.homepagePiecesHeading,
@@ -5146,7 +5155,7 @@ export const store = {
         sections: partial.sections !== undefined ? partial.sections : (baseHomepage.sections || []),
         updatedAt: savedAt,
         lastSavedAt: savedAt,
-        version: '1.3.0'
+        version: '1.4.0'
       };
       const remoteAuthor = authorSnapshot.exists
         ? authorSnapshot.data() as Partial<AuthorProfile>

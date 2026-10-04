@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookMarked, Check, Eye, EyeOff, ImagePlus, Layers3, Loader2, PackageOpen, RefreshCw, Save, Star, Trash2, X } from 'lucide-react';
 import { Article, ContentBundle, ContentCollection, PieceReview } from '../../types.js';
 import { api } from '../../utils/api.js';
-import { COLLECTION_COVER_UPLOAD_ACCEPT, getCollectionCoverValidationError } from '../../utils/imageUploadPolicy.js';
+import { CONTENT_COVER_UPLOAD_ACCEPT, getContentCoverValidationError } from '../../utils/imageUploadPolicy.js';
 
 type EditorKind = 'collection' | 'bundle';
 
@@ -50,7 +50,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   const [uploadingCover, setUploadingCover] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const collectionCoverInputRef = useRef<HTMLInputElement>(null);
+  const coverInputRef = useRef<HTMLInputElement>(null);
   const coverUploadSequenceRef = useRef(0);
 
   const load = useCallback(async () => {
@@ -111,13 +111,15 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
     }));
   };
 
-  const uploadCollectionCover = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const uploadCover = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
 
-    const validationError = getCollectionCoverValidationError(file);
+    const uploadKind = editorKind;
+    const editorId = editor.id;
+    const validationError = getContentCoverValidationError(file, uploadKind);
     if (validationError) {
       setNotice('');
       setError(validationError);
@@ -130,18 +132,19 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
     setError('');
     try {
       const dataUrl = await readFileAsDataUrl(file);
+      const target = uploadKind === 'collection' ? 'collection_cover' : 'bundle_cover';
       const result = await api.uploadImage(
         dataUrl,
-        'collection_cover',
+        target,
         undefined,
-        editor.id ? `collection_${editor.id}` : 'collection_cover'
+        editorId ? `${uploadKind}_${editorId}` : target
       );
       if (uploadSequence !== coverUploadSequenceRef.current) return;
       setEditor(current => ({ ...current, coverImage: result.url }));
-      setNotice('JPEG uploaded. Save the collection to attach this cover photo.');
+      setNotice(`JPEG uploaded. Save the ${uploadKind} to attach this cover photo.`);
     } catch (requestError) {
       if (uploadSequence !== coverUploadSequenceRef.current) return;
-      setError(requestError instanceof Error ? requestError.message : 'The collection cover could not be uploaded.');
+      setError(requestError instanceof Error ? requestError.message : `The ${uploadKind} cover could not be uploaded.`);
     } finally {
       if (uploadSequence === coverUploadSequenceRef.current) setUploadingCover(false);
     }
@@ -223,6 +226,19 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
 
       <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
         <section className="space-y-4 rounded-2xl border border-slate-800 bg-[#0b1120] p-5">
+          <div>
+            <p className="text-xs font-semibold text-slate-200">Choose what you are creating</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <div className="rounded-xl border border-sky-900/70 bg-sky-950/20 p-3">
+                <p className="flex items-center gap-2 text-xs font-bold text-sky-200"><Layers3 className="h-4 w-4" aria-hidden="true" />Collection</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-400">A library section that helps readers browse related pieces. It does not create a purchase or change the pieces&rsquo; individual prices.</p>
+              </div>
+              <div className="rounded-xl border border-emerald-900/70 bg-emerald-950/20 p-3">
+                <p className="flex items-center gap-2 text-xs font-bold text-emerald-200"><PackageOpen className="h-4 w-4" aria-hidden="true" />Bundle</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-400">A purchasable pack of two or more pieces. You choose one bundle price, and a successful payment unlocks every included piece.</p>
+              </div>
+            </div>
+          </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => selectCollection()} className={`rounded-full border px-3 py-1.5 text-xs ${editorKind === 'collection' ? 'border-sky-500 bg-sky-950 text-sky-200' : 'border-slate-700 text-slate-400'}`}><Layers3 className="mr-1 inline h-3.5 w-3.5" />New Collection</button>
             <button type="button" onClick={() => selectBundle()} className={`rounded-full border px-3 py-1.5 text-xs ${editorKind === 'bundle' ? 'border-emerald-500 bg-emerald-950 text-emerald-200' : 'border-slate-700 text-slate-400'}`}><PackageOpen className="mr-1 inline h-3.5 w-3.5" />New Bundle</button>
@@ -230,59 +246,55 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Name *<input value={editor.name} maxLength={120} onChange={event => setEditor({ ...editor, name: event.target.value })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
             <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Description<textarea value={editor.description} maxLength={1500} rows={3} onChange={event => setEditor({ ...editor, description: event.target.value })} className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
-            {editorKind === 'collection' ? (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 sm:col-span-2">
-                <div>
-                  <p className="text-xs font-semibold text-slate-300">Collection cover photo</p>
-                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Upload a JPEG up to 700 KB. The photo is attached permanently when you save the collection.</p>
-                </div>
-                <input
-                  ref={collectionCoverInputRef}
-                  type="file"
-                  accept={COLLECTION_COVER_UPLOAD_ACCEPT}
-                  onChange={event => void uploadCollectionCover(event)}
-                  className="sr-only"
-                  aria-label="Choose collection cover JPEG"
-                />
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                  {editor.coverImage ? (
-                    <img
-                      src={editor.coverImage}
-                      alt="Collection cover preview"
-                      className="h-32 w-full rounded-xl border border-slate-700 object-cover sm:h-24 sm:w-36"
-                    />
-                  ) : (
-                    <div className="flex h-24 w-full items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900 text-slate-500 sm:w-36">
-                      <ImagePlus className="h-6 w-6" aria-hidden="true" />
-                      <span className="sr-only">No collection cover uploaded</span>
-                    </div>
-                  )}
-                  <div className="flex flex-1 flex-wrap gap-2">
+            <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 sm:col-span-2">
+              <div>
+                <p className="text-xs font-semibold text-slate-300">{editorKind === 'collection' ? 'Collection' : 'Bundle'} cover photo</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Upload a JPEG up to 700 KB. The photo is attached permanently when you save the {editorKind}.</p>
+              </div>
+              <input
+                ref={coverInputRef}
+                type="file"
+                accept={CONTENT_COVER_UPLOAD_ACCEPT}
+                onChange={event => void uploadCover(event)}
+                className="sr-only"
+                aria-label={`Choose ${editorKind} cover JPEG`}
+              />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                {editor.coverImage ? (
+                  <img
+                    src={editor.coverImage}
+                    alt={`${editorKind === 'collection' ? 'Collection' : 'Bundle'} cover preview`}
+                    className="h-32 w-full rounded-xl border border-slate-700 object-cover sm:h-24 sm:w-36"
+                  />
+                ) : (
+                  <div className="flex h-24 w-full items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900 text-slate-500 sm:w-36">
+                    <ImagePlus className="h-6 w-6" aria-hidden="true" />
+                    <span className="sr-only">No {editorKind} cover uploaded</span>
+                  </div>
+                )}
+                <div className="flex flex-1 flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => coverInputRef.current?.click()}
+                    disabled={uploadingCover}
+                    className="inline-flex items-center gap-2 rounded-lg border border-sky-800 bg-sky-950/40 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/60 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {uploadingCover ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ImagePlus className="h-4 w-4" aria-hidden="true" />}
+                    {uploadingCover ? 'Uploading…' : editor.coverImage ? 'Replace JPEG' : 'Upload JPEG'}
+                  </button>
+                  {editor.coverImage && (
                     <button
                       type="button"
-                      onClick={() => collectionCoverInputRef.current?.click()}
+                      onClick={() => setEditor(current => ({ ...current, coverImage: '' }))}
                       disabled={uploadingCover}
-                      className="inline-flex items-center gap-2 rounded-lg border border-sky-800 bg-sky-950/40 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/60 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-rose-800 hover:bg-rose-950/40 hover:text-rose-200 disabled:opacity-50"
                     >
-                      {uploadingCover ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ImagePlus className="h-4 w-4" aria-hidden="true" />}
-                      {uploadingCover ? 'Uploading…' : editor.coverImage ? 'Replace JPEG' : 'Upload JPEG'}
+                      <X className="h-4 w-4" aria-hidden="true" />Remove
                     </button>
-                    {editor.coverImage && (
-                      <button
-                        type="button"
-                        onClick={() => setEditor(current => ({ ...current, coverImage: '' }))}
-                        disabled={uploadingCover}
-                        className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-rose-800 hover:bg-rose-950/40 hover:text-rose-200 disabled:opacity-50"
-                      >
-                        <X className="h-4 w-4" aria-hidden="true" />Remove
-                      </button>
-                    )}
-                  </div>
+                  )}
                 </div>
               </div>
-            ) : (
-              <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Optional cover URL<input type="url" value={editor.coverImage} onChange={event => setEditor({ ...editor, coverImage: event.target.value })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
-            )}
+            </div>
             {editorKind === 'collection' ? (
               <label className="space-y-1 text-xs text-slate-400">Display order<input type="number" min={0} value={editor.order} onChange={event => setEditor({ ...editor, order: Number(event.target.value) })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white" /></label>
             ) : (
