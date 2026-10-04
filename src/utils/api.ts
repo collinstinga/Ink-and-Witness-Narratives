@@ -237,6 +237,8 @@ interface PublicBootstrapResponse {
   topics: Topic[];
   homepage: {
     config: HomepageConfig;
+    collections: ContentCollection[];
+    pieces: Article[];
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
   };
@@ -1323,7 +1325,7 @@ export const api = {
 
   async uploadImage(
     dataUrl: string, 
-    target?: 'author_avatar' | 'author_cover' | 'welcome_background' | 'favicon' | 'logo' | 'piece_cover', 
+    target?: 'author_avatar' | 'author_cover' | 'welcome_background' | 'favicon' | 'logo' | 'piece_cover' | 'collection_cover',
     articleId?: string,
     prefix?: string
   ): Promise<{ success: boolean; url: string; record?: any; message?: string }> {
@@ -1518,7 +1520,9 @@ export const api = {
 
   // Homepage Management APIs
   async getHomepageData(): Promise<{
-    config: any;
+    config: HomepageConfig;
+    collections: ContentCollection[];
+    pieces: Article[];
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
   }> {
@@ -1530,6 +1534,7 @@ export const api = {
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
     allPublishedPieces: Article[];
+    collections: ContentCollection[];
   }> {
     const activeToken = getWriterToken();
     const res = await fetch('/api/admin/homepage', {

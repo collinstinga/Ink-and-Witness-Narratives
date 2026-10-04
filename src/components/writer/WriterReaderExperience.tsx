@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { BookMarked, Check, Eye, EyeOff, Layers3, PackageOpen, RefreshCw, Save, Star, Trash2 } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { BookMarked, Check, Eye, EyeOff, ImagePlus, Layers3, Loader2, PackageOpen, RefreshCw, Save, Star, Trash2, X } from 'lucide-react';
 import { Article, ContentBundle, ContentCollection, PieceReview } from '../../types.js';
 import { api } from '../../utils/api.js';
+import { COLLECTION_COVER_UPLOAD_ACCEPT, getCollectionCoverValidationError } from '../../utils/imageUploadPolicy.js';
 
 type EditorKind = 'collection' | 'bundle';
 
@@ -26,6 +27,18 @@ const emptyEditor = (): EditorState => ({
   coverImage: ''
 });
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') resolve(reader.result);
+      else reject(new Error('The selected JPEG could not be read.'));
+    };
+    reader.onerror = () => reject(new Error('The selected JPEG could not be read.'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   const [collections, setCollections] = useState<ContentCollection[]>([]);
   const [bundles, setBundles] = useState<ContentBundle[]>([]);
@@ -34,8 +47,11 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   const [editor, setEditor] = useState<EditorState>(emptyEditor);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const collectionCoverInputRef = useRef<HTMLInputElement>(null);
+  const coverUploadSequenceRef = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,6 +71,8 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   useEffect(() => { void load(); }, [load]);
 
   const selectCollection = (collection?: ContentCollection) => {
+    coverUploadSequenceRef.current += 1;
+    setUploadingCover(false);
     setEditorKind('collection');
     setEditor(collection ? {
       id: collection.id,
@@ -69,6 +87,8 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   };
 
   const selectBundle = (bundle?: ContentBundle) => {
+    coverUploadSequenceRef.current += 1;
+    setUploadingCover(false);
     setEditorKind('bundle');
     setEditor(bundle ? {
       id: bundle.id,
@@ -89,6 +109,42 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
         ? current.pieceIds.filter(id => id !== pieceId)
         : [...current.pieceIds, pieceId]
     }));
+  };
+
+  const uploadCollectionCover = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+
+    const validationError = getCollectionCoverValidationError(file);
+    if (validationError) {
+      setNotice('');
+      setError(validationError);
+      return;
+    }
+
+    setUploadingCover(true);
+    const uploadSequence = ++coverUploadSequenceRef.current;
+    setNotice('');
+    setError('');
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const result = await api.uploadImage(
+        dataUrl,
+        'collection_cover',
+        undefined,
+        editor.id ? `collection_${editor.id}` : 'collection_cover'
+      );
+      if (uploadSequence !== coverUploadSequenceRef.current) return;
+      setEditor(current => ({ ...current, coverImage: result.url }));
+      setNotice('JPEG uploaded. Save the collection to attach this cover photo.');
+    } catch (requestError) {
+      if (uploadSequence !== coverUploadSequenceRef.current) return;
+      setError(requestError instanceof Error ? requestError.message : 'The collection cover could not be uploaded.');
+    } finally {
+      if (uploadSequence === coverUploadSequenceRef.current) setUploadingCover(false);
+    }
   };
 
   const save = async () => {
@@ -174,7 +230,59 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Name *<input value={editor.name} maxLength={120} onChange={event => setEditor({ ...editor, name: event.target.value })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
             <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Description<textarea value={editor.description} maxLength={1500} rows={3} onChange={event => setEditor({ ...editor, description: event.target.value })} className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
-            <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Optional cover URL<input type="url" value={editor.coverImage} onChange={event => setEditor({ ...editor, coverImage: event.target.value })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
+            {editorKind === 'collection' ? (
+              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 sm:col-span-2">
+                <div>
+                  <p className="text-xs font-semibold text-slate-300">Collection cover photo</p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Upload a JPEG up to 700 KB. The photo is attached permanently when you save the collection.</p>
+                </div>
+                <input
+                  ref={collectionCoverInputRef}
+                  type="file"
+                  accept={COLLECTION_COVER_UPLOAD_ACCEPT}
+                  onChange={event => void uploadCollectionCover(event)}
+                  className="sr-only"
+                  aria-label="Choose collection cover JPEG"
+                />
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  {editor.coverImage ? (
+                    <img
+                      src={editor.coverImage}
+                      alt="Collection cover preview"
+                      className="h-32 w-full rounded-xl border border-slate-700 object-cover sm:h-24 sm:w-36"
+                    />
+                  ) : (
+                    <div className="flex h-24 w-full items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900 text-slate-500 sm:w-36">
+                      <ImagePlus className="h-6 w-6" aria-hidden="true" />
+                      <span className="sr-only">No collection cover uploaded</span>
+                    </div>
+                  )}
+                  <div className="flex flex-1 flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => collectionCoverInputRef.current?.click()}
+                      disabled={uploadingCover}
+                      className="inline-flex items-center gap-2 rounded-lg border border-sky-800 bg-sky-950/40 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-900/60 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {uploadingCover ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ImagePlus className="h-4 w-4" aria-hidden="true" />}
+                      {uploadingCover ? 'Uploading…' : editor.coverImage ? 'Replace JPEG' : 'Upload JPEG'}
+                    </button>
+                    {editor.coverImage && (
+                      <button
+                        type="button"
+                        onClick={() => setEditor(current => ({ ...current, coverImage: '' }))}
+                        disabled={uploadingCover}
+                        className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-rose-800 hover:bg-rose-950/40 hover:text-rose-200 disabled:opacity-50"
+                      >
+                        <X className="h-4 w-4" aria-hidden="true" />Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Optional cover URL<input type="url" value={editor.coverImage} onChange={event => setEditor({ ...editor, coverImage: event.target.value })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
+            )}
             {editorKind === 'collection' ? (
               <label className="space-y-1 text-xs text-slate-400">Display order<input type="number" min={0} value={editor.order} onChange={event => setEditor({ ...editor, order: Number(event.target.value) })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white" /></label>
             ) : (
@@ -193,7 +301,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
               ))}
             </div>
           </div>
-          <button type="button" onClick={() => void save()} disabled={saving || !editor.name.trim() || editor.pieceIds.length < (editorKind === 'bundle' ? 2 : 1) || (editorKind === 'bundle' && (!Number.isFinite(editor.priceKes) || editor.priceKes < 1))} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-3 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50"><Save className="h-4 w-4" />{saving ? 'Saving…' : `Save ${editorKind}`}</button>
+          <button type="button" onClick={() => void save()} disabled={saving || uploadingCover || !editor.name.trim() || editor.pieceIds.length < (editorKind === 'bundle' ? 2 : 1) || (editorKind === 'bundle' && (!Number.isFinite(editor.priceKes) || editor.priceKes < 1))} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-3 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50"><Save className="h-4 w-4" />{saving ? 'Saving…' : uploadingCover ? 'Uploading cover…' : `Save ${editorKind}`}</button>
         </section>
 
         <div className="space-y-5">

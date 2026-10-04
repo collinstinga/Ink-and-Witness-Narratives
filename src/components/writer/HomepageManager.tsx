@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   Image as ImageIcon, 
   Upload, 
@@ -18,9 +18,10 @@ import {
   X,
   Smartphone,
   Layers,
-  ChevronDown
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
-import { Article, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
+import { Article, ContentCollection, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
@@ -64,6 +65,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       zoom: 100,
       overlayStrength: 25,
     },
+    homepageCollectionIds: [],
+    homepagePieceIds: [],
+    homepageCollectionsHeading: 'Curated Collections',
+    homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
+    homepagePiecesHeading: 'Individual Pieces',
+    homepagePiecesSubtitle: 'Selected standalone writing from the archive.',
     mostSellingPieceIds: ['art-01', 'art-1786653937804', 'art-02'],
     pieceOfTheWeekId: 'art-01',
     mostSellingMode: 'auto',
@@ -91,6 +98,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
   });
 
   const [publishedPieces, setPublishedPieces] = useState<Article[]>([]);
+  const [availableCollections, setAvailableCollections] = useState<ContentCollection[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasLoadedConfig, setHasLoadedConfig] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -154,6 +162,30 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       }
 
       if (data.config) {
+        const loadedCollections = Array.isArray(data.collections) ? data.collections : [];
+        const loadedPieces = Array.isArray(data.allPublishedPieces)
+          ? data.allPublishedPieces
+          : articles.filter(article => article.status === 'published');
+        const defaultCollectionIds = loadedCollections
+          .filter(collection => collection.isPublished)
+          .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+          .slice(0, 4)
+          .map(collection => collection.id);
+        const availableCollectionIds = new Set(loadedCollections.map(collection => collection.id));
+        const homepageCollectionIds = Array.isArray(data.config.homepageCollectionIds)
+          ? data.config.homepageCollectionIds.filter(id => availableCollectionIds.has(id)).slice(0, 6)
+          : defaultCollectionIds;
+        const representedPieceIds = new Set(
+          loadedCollections
+            .filter(collection => homepageCollectionIds.includes(collection.id))
+            .flatMap(collection => collection.pieceIds)
+        );
+        const availablePieceIds = new Set(loadedPieces.map(piece => piece.id));
+        const defaultPieceIds = [...loadedPieces]
+          .filter(piece => !representedPieceIds.has(piece.id))
+          .sort((left, right) => Date.parse(right.publishedAt || right.createdAt || '') - Date.parse(left.publishedAt || left.createdAt || ''))
+          .slice(0, 8)
+          .map(piece => piece.id);
         const loadedConfig: HomepageConfig = {
           // Keep every persisted field, including headings, ordering, and
           // metadata that this editor does not render or directly change.
@@ -167,6 +199,16 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
             zoom: typeof data.config.welcomeBackground?.zoom === 'number' ? data.config.welcomeBackground.zoom : 100,
             overlayStrength: typeof data.config.welcomeBackground?.overlayStrength === 'number' ? data.config.welcomeBackground.overlayStrength : 25,
           },
+          homepageCollectionIds,
+          homepagePieceIds: Array.isArray(data.config.homepagePieceIds)
+            ? data.config.homepagePieceIds
+              .filter(id => availablePieceIds.has(id) && !representedPieceIds.has(id))
+              .slice(0, 8)
+            : defaultPieceIds,
+          homepageCollectionsHeading: data.config.homepageCollectionsHeading ?? 'Curated Collections',
+          homepageCollectionsSubtitle: data.config.homepageCollectionsSubtitle ?? 'Read by mood, theme, or the thread that calls to you.',
+          homepagePiecesHeading: data.config.homepagePiecesHeading ?? 'Individual Pieces',
+          homepagePiecesSubtitle: data.config.homepagePiecesSubtitle ?? 'Selected standalone writing from the archive.',
           mostSellingPieceIds: Array.isArray(data.config.mostSellingPieceIds) ? data.config.mostSellingPieceIds : [],
           pieceOfTheWeekId: data.config.pieceOfTheWeekId ?? '',
           mostSellingMode: data.config.mostSellingMode ?? 'auto',
@@ -222,6 +264,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
         if (!hasUnsavedChanges || persistedConfigSnapshot === null) {
           setLastSavedAt(data.config.lastSavedAt || data.config.updatedAt || null);
         }
+        setAvailableCollections(loadedCollections);
       }
       if (data.allPublishedPieces) {
         setPublishedPieces(data.allPublishedPieces);
@@ -465,6 +508,77 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
     (a.subtitle && a.subtitle.toLowerCase().includes(pickerSearch.toLowerCase())) ||
     a.category.toLowerCase().includes(pickerSearch.toLowerCase())
   );
+
+  const selectedCollectionIds = config.homepageCollectionIds || [];
+  const selectedPieceIds = config.homepagePieceIds || [];
+  const selectedCollections = useMemo(() => {
+    const byId = new Map(availableCollections.map(collection => [collection.id, collection]));
+    return selectedCollectionIds
+      .map(id => byId.get(id))
+      .filter((collection): collection is ContentCollection => Boolean(collection));
+  }, [availableCollections, selectedCollectionIds]);
+  const piecesRepresentedByCollections = useMemo(
+    () => new Set(selectedCollections.flatMap(collection => collection.pieceIds)),
+    [selectedCollections]
+  );
+
+  const toggleHomepageCollection = (collection: ContentCollection) => {
+    setError(null);
+    const isSelected = selectedCollectionIds.includes(collection.id);
+    if (!isSelected && selectedCollectionIds.length >= 6) {
+      setError('The homepage can show up to six collections. Remove one before adding another.');
+      return;
+    }
+    setConfig(previous => {
+      const current = previous.homepageCollectionIds || [];
+      if (current.includes(collection.id)) {
+        return {
+          ...previous,
+          homepageCollectionIds: current.filter(id => id !== collection.id),
+        };
+      }
+      return {
+        ...previous,
+        homepageCollectionIds: [...current, collection.id],
+        homepagePieceIds: (previous.homepagePieceIds || []).filter(id => !collection.pieceIds.includes(id)),
+      };
+    });
+  };
+
+  const toggleHomepagePiece = (pieceId: string) => {
+    setError(null);
+    if (piecesRepresentedByCollections.has(pieceId)) {
+      setError('That piece is already represented by a selected collection and cannot be repeated.');
+      return;
+    }
+    const isSelected = selectedPieceIds.includes(pieceId);
+    if (!isSelected && selectedPieceIds.length >= 8) {
+      setError('The homepage can show up to eight individual pieces. Remove one before adding another.');
+      return;
+    }
+    setConfig(previous => {
+      const current = previous.homepagePieceIds || [];
+      if (current.includes(pieceId)) {
+        return { ...previous, homepagePieceIds: current.filter(id => id !== pieceId) };
+      }
+      return { ...previous, homepagePieceIds: [...current, pieceId] };
+    });
+  };
+
+  const moveHomepageItem = (
+    field: 'homepageCollectionIds' | 'homepagePieceIds',
+    id: string,
+    direction: -1 | 1
+  ) => {
+    setConfig(previous => {
+      const current = [...(previous[field] || [])];
+      const index = current.indexOf(id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) return previous;
+      [current[index], current[nextIndex]] = [current[nextIndex], current[index]];
+      return { ...previous, [field]: current };
+    });
+  };
 
   return (
     <div id="homepage-manager" className="space-y-10 pb-16">
@@ -1197,9 +1311,193 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       )}
 
       {/* ============================================================ */}
-      {/* 3. SECTION VISIBILITY & ORDERING */}
+      {/* 3. PUBLIC COLLECTIONS & INDIVIDUAL PIECES */}
       {/* ============================================================ */}
       {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
+      <section id="section-homepage-curation" className="space-y-8 rounded-3xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="mb-1 flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-sky-400">
+              <Layers className="h-4 w-4" />
+              <span>Reader discovery</span>
+            </div>
+            <h3 className="font-display text-xl font-bold text-white">Collections and individual pieces</h3>
+            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-400">
+              Keep the homepage calm and intentional. A piece selected inside a homepage collection is automatically excluded from the individual shelf.
+            </p>
+          </div>
+          <div className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1.5 font-mono text-[10px] text-slate-400">
+            {selectedCollectionIds.length}/6 collections &middot; {selectedPieceIds.length}/8 pieces
+          </div>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Collections heading</span>
+            <input
+              type="text"
+              maxLength={120}
+              value={config.homepageCollectionsHeading || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageCollectionsHeading: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Collections description</span>
+            <input
+              type="text"
+              maxLength={300}
+              value={config.homepageCollectionsSubtitle || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageCollectionsSubtitle: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Individual pieces heading</span>
+            <input
+              type="text"
+              maxLength={120}
+              value={config.homepagePiecesHeading || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepagePiecesHeading: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Individual pieces description</span>
+            <input
+              type="text"
+              maxLength={300}
+              value={config.homepagePiecesSubtitle || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepagePiecesSubtitle: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+        </div>
+
+        <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h4 className="text-sm font-semibold text-white">Homepage collections</h4>
+              <p className="mt-1 text-[11px] text-slate-500">Select published collections, then use the arrows to set their public order.</p>
+            </div>
+            <span className="font-mono text-[10px] text-sky-400">{selectedCollectionIds.length}/6</span>
+          </div>
+
+          {selectedCollections.length > 0 && (
+            <div className="space-y-2">
+              {selectedCollections.map((collection, index) => (
+                <div key={collection.id} className="flex items-center gap-3 rounded-xl border border-sky-900/60 bg-sky-950/20 p-2.5">
+                  <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
+                    {collection.coverImage ? (
+                      <img src={collection.coverImage} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <Layers className="m-3 h-6 w-6 text-slate-600" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-white">{collection.name}</p>
+                    <p className="text-[10px] text-slate-500">{collection.pieceIds.length} pieces</p>
+                  </div>
+                  <button type="button" aria-label={`Move ${collection.name} up`} disabled={index === 0} onClick={() => moveHomepageItem('homepageCollectionIds', collection.id, -1)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-25">
+                    <ChevronUp className="h-4 w-4" />
+                  </button>
+                  <button type="button" aria-label={`Move ${collection.name} down`} disabled={index === selectedCollections.length - 1} onClick={() => moveHomepageItem('homepageCollectionIds', collection.id, 1)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-25">
+                    <ChevronDown className="h-4 w-4" />
+                  </button>
+                  <button type="button" onClick={() => toggleHomepageCollection(collection)} className="rounded-lg px-2.5 py-2 text-[10px] font-semibold text-rose-300 hover:bg-rose-950/60">Remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid max-h-64 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+            {availableCollections.filter(collection => collection.isPublished).map(collection => {
+              const selected = selectedCollectionIds.includes(collection.id);
+              return (
+                <button
+                  key={collection.id}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => toggleHomepageCollection(collection)}
+                  className={`flex items-center justify-between gap-3 rounded-xl border p-3 text-left transition-colors ${selected ? 'border-sky-500 bg-sky-950/50 text-white' : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'}`}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-semibold">{collection.name}</span>
+                    <span className="mt-0.5 block text-[10px] text-slate-500">{collection.pieceIds.length} pieces</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-sky-400">{selected ? 'Selected' : 'Add'}</span>
+                </button>
+              );
+            })}
+            {availableCollections.filter(collection => collection.isPublished).length === 0 && (
+              <p className="col-span-full rounded-xl border border-dashed border-slate-800 p-4 text-center text-xs text-slate-500">
+                Publish a collection in Reader Experience first; it will then be available here.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h4 className="text-sm font-semibold text-white">Individual pieces</h4>
+              <p className="mt-1 text-[11px] text-slate-500">Pieces already represented by a selected collection are unavailable, preventing duplicate homepage appearances.</p>
+            </div>
+            <span className="font-mono text-[10px] text-sky-400">{selectedPieceIds.length}/8</span>
+          </div>
+
+          {selectedPieceIds.length > 0 && (
+            <div className="space-y-2">
+              {selectedPieceIds.map((pieceId, index) => {
+                const piece = getArticleById(pieceId);
+                if (!piece) return null;
+                return (
+                  <div key={pieceId} className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/70 p-2.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-semibold text-white">{piece.title}</p>
+                      <p className="text-[10px] text-slate-500">{piece.category}</p>
+                    </div>
+                    <button type="button" aria-label={`Move ${piece.title} up`} disabled={index === 0} onClick={() => moveHomepageItem('homepagePieceIds', pieceId, -1)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-25">
+                      <ChevronUp className="h-4 w-4" />
+                    </button>
+                    <button type="button" aria-label={`Move ${piece.title} down`} disabled={index === selectedPieceIds.length - 1} onClick={() => moveHomepageItem('homepagePieceIds', pieceId, 1)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-25">
+                      <ChevronDown className="h-4 w-4" />
+                    </button>
+                    <button type="button" onClick={() => toggleHomepagePiece(pieceId)} className="rounded-lg px-2.5 py-2 text-[10px] font-semibold text-rose-300 hover:bg-rose-950/60">Remove</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="grid max-h-80 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+            {publishedPieces.map(piece => {
+              const selected = selectedPieceIds.includes(piece.id);
+              const represented = piecesRepresentedByCollections.has(piece.id);
+              return (
+                <button
+                  key={piece.id}
+                  type="button"
+                  aria-pressed={selected}
+                  disabled={represented}
+                  onClick={() => toggleHomepagePiece(piece.id)}
+                  className={`flex items-center justify-between gap-3 rounded-xl border p-3 text-left transition-colors ${selected ? 'border-sky-500 bg-sky-950/50 text-white' : represented ? 'cursor-not-allowed border-slate-900 bg-slate-950 text-slate-600 opacity-60' : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'}`}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-semibold">{piece.title}</span>
+                    <span className="mt-0.5 block text-[10px] text-slate-500">{piece.category}</span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-sky-400">{represented ? 'In collection' : selected ? 'Selected' : 'Add'}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+      )}
+
+      {/* Legacy shelves are retained in stored data for backward compatibility, but are no longer rendered publicly. */}
+      {false && (activeSubTab === 'overview' || activeSubTab === 'sections') && (
       <section id="section-layout-ordering" className="p-6 sm:p-8 rounded-3xl bg-slate-900/60 border border-slate-800 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -1253,7 +1551,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       {/* ============================================================ */}
       {/* 4. MOST SELLING PIECES (3 CURATED PIECES) */}
       {/* ============================================================ */}
-      {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
+      {false && (activeSubTab === 'overview' || activeSubTab === 'sections') && (
       <section id="section-most-selling-manager" className="p-6 sm:p-8 rounded-3xl bg-slate-900/60 border border-slate-800 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -1345,7 +1643,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       {/* ============================================================ */}
       {/* 5. PIECE OF THE WEEK (1 CURATED PIECE) */}
       {/* ============================================================ */}
-      {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
+      {false && (activeSubTab === 'overview' || activeSubTab === 'sections') && (
       <section id="section-piece-of-week-manager" className="p-6 sm:p-8 rounded-3xl bg-slate-900/60 border border-slate-800 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>

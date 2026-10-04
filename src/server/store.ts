@@ -6,7 +6,7 @@ import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
-import { sanitizeImageDataUrl } from './imageSecurity.js';
+import { ImageValidationError, sanitizeImageDataUrl, type SafeImageMimeType } from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
 import { enrichSalesTransaction } from './salesLedger.js';
 import {
@@ -224,6 +224,10 @@ let cachedHomepageConfig: HomepageConfig = {
     zoom: 100,
     overlayStrength: 25,
   },
+  homepageCollectionsHeading: 'Curated Collections',
+  homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
+  homepagePiecesHeading: 'Individual Pieces',
+  homepagePiecesSubtitle: 'Selected standalone writing from the archive.',
   startHerePieceIds: ['art-01', 'art-02', 'art-03'],
   startHereHeading: 'START HERE',
   startHereSubtitle: 'Three pieces to begin with.',
@@ -4648,10 +4652,17 @@ export const store = {
     return getFirestoreDoc<any>('uploaded_assets', assetId);
   },
 
-  async saveUploadedImage(base64DataUrl: string, prefix: string = 'img'): Promise<{ success: boolean; url: string; filename: string }> {
+  async saveUploadedImage(
+    base64DataUrl: string,
+    prefix: string = 'img',
+    allowedMimeTypes?: SafeImageMimeType[]
+  ): Promise<{ success: boolean; url: string; filename: string }> {
     ensureDataDir();
 
     const image = await sanitizeImageDataUrl(base64DataUrl);
+    if (allowedMimeTypes && !allowedMimeTypes.includes(image.mimeType)) {
+      throw new ImageValidationError('Collection cover photos must be genuine JPEG files.');
+    }
     const safePrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'img';
 
     const randomStr = crypto.randomBytes(6).toString('hex');
@@ -4943,6 +4954,7 @@ export const store = {
     // a warm instance cannot show a newly unpublished piece or omit a new one.
     const selectedIds = new Set([
       ...(stored.mostSellingMode === 'manual' ? stored.mostSellingPieceIds || [] : []),
+      ...(stored.homepagePieceIds || []),
       ...(stored.pieceOfTheWeekId ? [stored.pieceOfTheWeekId] : [])
     ]);
     const currentSelected = await Promise.all(Array.from(selectedIds).map(async id => ({
@@ -5124,11 +5136,17 @@ export const store = {
         heroQuote: partial.heroQuote !== undefined ? partial.heroQuote : baseHomepage.heroQuote,
         heroBadge: partial.heroBadge !== undefined ? partial.heroBadge : baseHomepage.heroBadge,
         heroCtaText: partial.heroCtaText !== undefined ? partial.heroCtaText : baseHomepage.heroCtaText,
+        homepageCollectionIds: partial.homepageCollectionIds !== undefined ? partial.homepageCollectionIds : baseHomepage.homepageCollectionIds,
+        homepagePieceIds: partial.homepagePieceIds !== undefined ? partial.homepagePieceIds : baseHomepage.homepagePieceIds,
+        homepageCollectionsHeading: partial.homepageCollectionsHeading !== undefined ? partial.homepageCollectionsHeading : baseHomepage.homepageCollectionsHeading,
+        homepageCollectionsSubtitle: partial.homepageCollectionsSubtitle !== undefined ? partial.homepageCollectionsSubtitle : baseHomepage.homepageCollectionsSubtitle,
+        homepagePiecesHeading: partial.homepagePiecesHeading !== undefined ? partial.homepagePiecesHeading : baseHomepage.homepagePiecesHeading,
+        homepagePiecesSubtitle: partial.homepagePiecesSubtitle !== undefined ? partial.homepagePiecesSubtitle : baseHomepage.homepagePiecesSubtitle,
         banners: partial.banners !== undefined ? partial.banners : (baseHomepage.banners || []),
         sections: partial.sections !== undefined ? partial.sections : (baseHomepage.sections || []),
         updatedAt: savedAt,
         lastSavedAt: savedAt,
-        version: '1.2.0'
+        version: '1.3.0'
       };
       const remoteAuthor = authorSnapshot.exists
         ? authorSnapshot.data() as Partial<AuthorProfile>

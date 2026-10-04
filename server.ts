@@ -23,6 +23,7 @@ import {
   UserRecord
 } from "./src/types.js";
 import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
+import { resolveHomepageCuration } from "./src/server/homepageCuration.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import {
   AffiliateSettingsValidationError,
@@ -1165,10 +1166,14 @@ export async function createApp() {
       // Always check the shared article version marker. This costs one targeted
       // read on warm instances and scans the catalogue only after an actual
       // writer mutation, preventing an older instance from moving the UI back.
-      const [articles] = await Promise.all([
+      const [articles, collections] = await Promise.all([
         store.getFreshArticles(false, true).catch(error => {
           console.warn('[Public Bootstrap] Article freshness check failed; serving last known good catalogue:', error);
           return store.getArticles(false);
+        }),
+        readerExperienceStore.listCollections(false).catch(error => {
+          console.warn('[Public Bootstrap] Collection loading failed; serving the remaining homepage:', error);
+          return [] as ContentCollection[];
         }),
         store.refreshPublicMetadata()
       ]);
@@ -1180,6 +1185,7 @@ export async function createApp() {
       const publicArticles = articles.map(article =>
         toPublicArticleSummary(article, defaultPriceKes)
       );
+      const homepageCuration = resolveHomepageCuration(homepage.config, collections, articles);
 
       const sessionUser = (req as any).user;
       res.json({
@@ -1199,6 +1205,10 @@ export async function createApp() {
         topics: store.getTopics(false, true),
         homepage: {
           config: homepage.config,
+          collections: homepageCuration.collections,
+          pieces: homepageCuration.pieces.map(article =>
+            toPublicArticleSummary(article, defaultPriceKes)
+          ),
           mostSellingPieces: homepage.mostSellingPieces.map(article =>
             toPublicArticleSummary(article, defaultPriceKes)
           ),
@@ -1250,10 +1260,20 @@ export async function createApp() {
   app.get("/api/homepage", async (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, max-age=0');
     try {
-      const homepage = await store.getFreshHomepageConfig();
+      const [homepage, collections, articles] = await Promise.all([
+        store.getFreshHomepageConfig(),
+        readerExperienceStore.listCollections(false).catch(error => {
+          console.warn('[Homepage] Collection loading failed; serving standalone curation only:', error);
+          return [] as ContentCollection[];
+        }),
+        store.getFreshArticles(false, true)
+      ]);
       const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
+      const homepageCuration = resolveHomepageCuration(homepage.config, collections, articles);
       res.json({
         config: homepage.config,
+        collections: homepageCuration.collections,
+        pieces: homepageCuration.pieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
         mostSellingPieces: homepage.mostSellingPieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
         pieceOfTheWeek: homepage.pieceOfTheWeek
           ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
@@ -4399,7 +4419,9 @@ export async function createApp() {
       }
 
       const filePrefix = prefix || (target ? target.replace(/[^a-zA-Z0-9_-]/g, '_') : 'img');
-      const saved = await store.saveUploadedImage(dataUrl, filePrefix);
+      const saved = target === 'collection_cover'
+        ? await store.saveUploadedImage(dataUrl, filePrefix, ['image/jpeg'])
+        : await store.saveUploadedImage(dataUrl, filePrefix);
 
       let updatedRecord: any = null;
 
@@ -4624,7 +4646,17 @@ export async function createApp() {
   app.get("/api/admin/homepage", requireAdminAuth, async (_req: Request, res: Response) => {
     try {
       res.setHeader('Cache-Control', 'no-store');
-      res.json(toHomepageAdminResponse(await store.getFreshHomepageConfig()));
+      const [homepage, collections] = await Promise.all([
+        store.getFreshHomepageConfig(),
+        readerExperienceStore.listCollections(true).catch(error => {
+          console.warn('[Admin Homepage] Collection loading failed; returning the homepage settings without collections:', error);
+          return [] as ContentCollection[];
+        })
+      ]);
+      res.json({
+        ...toHomepageAdminResponse(homepage),
+        collections
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch homepage data." });
     }
@@ -4638,6 +4670,8 @@ export async function createApp() {
       const expectedUpdatedAt = payload?.expectedUpdatedAt;
       const allowedFields = new Set<keyof HomepageConfig>([
         'welcomeBackground', 'startHerePieceIds', 'startHereHeading', 'startHereSubtitle',
+        'homepageCollectionIds', 'homepagePieceIds', 'homepageCollectionsHeading',
+        'homepageCollectionsSubtitle', 'homepagePiecesHeading', 'homepagePiecesSubtitle',
         'theWritingHeading', 'theWritingSubtitle', 'aboutTheWritingHeading',
         'aboutTheWritingStatement', 'aboutTheWritingPurpose', 'aboutTheWritingButtonText',
         'mostSellingPieceIds', 'pieceOfTheWeekId', 'mostSellingMode', 'banners',
@@ -4657,8 +4691,65 @@ export async function createApp() {
       ) {
         return res.status(400).json({ error: 'A valid versioned homepage configuration is required.' });
       }
+
+      const normalizedConfig = { ...(config as Record<string, unknown>) };
+      const idListRules = [
+        ['homepageCollectionIds', 6, 'homepage collections'],
+        ['homepagePieceIds', 8, 'homepage pieces']
+      ] as const;
+      for (const [field, maximum, label] of idListRules) {
+        if (!Object.hasOwn(normalizedConfig, field)) continue;
+        const value = normalizedConfig[field];
+        if (
+          !Array.isArray(value)
+          || value.length > maximum
+          || value.some(id => !isSafePublicIdentifier(id))
+          || new Set(value).size !== value.length
+        ) {
+          return res.status(400).json({
+            error: `Choose no more than ${maximum} unique, valid ${label}.`
+          });
+        }
+        normalizedConfig[field] = value.map(id => id.trim());
+      }
+
+      const textRules = [
+        ['homepageCollectionsHeading', 120],
+        ['homepageCollectionsSubtitle', 300],
+        ['homepagePiecesHeading', 120],
+        ['homepagePiecesSubtitle', 300]
+      ] as const;
+      for (const [field, maximum] of textRules) {
+        if (!Object.hasOwn(normalizedConfig, field)) continue;
+        const value = normalizedConfig[field];
+        if (typeof value !== 'string' || value.length > maximum) {
+          return res.status(400).json({ error: `${field} must be ${maximum} characters or fewer.` });
+        }
+        normalizedConfig[field] = value.trim();
+      }
+
+      if (Object.hasOwn(normalizedConfig, 'homepageCollectionIds')) {
+        const availableCollectionIds = new Set(
+          (await readerExperienceStore.listCollections(true)).map(collection => collection.id)
+        );
+        if ((normalizedConfig.homepageCollectionIds as string[]).some(id => !availableCollectionIds.has(id))) {
+          return res.status(400).json({ error: 'One or more selected homepage collections no longer exist.' });
+        }
+      }
+
+      if (Object.hasOwn(normalizedConfig, 'homepagePieceIds')) {
+        const selectedPieces = await Promise.all(
+          (normalizedConfig.homepagePieceIds as string[]).map(id =>
+            store.getFreshArticleById(id, false, true)
+          )
+        );
+        if (selectedPieces.some(article => !article)) {
+          return res.status(400).json({ error: 'One or more selected homepage pieces are not published.' });
+        }
+      }
+
       const result = await store.saveHomepageConfig(
-        config as Partial<HomepageConfig>,
+        normalizedConfig as Partial<HomepageConfig>,
         expectedUpdatedAt as string | null
       );
       res.setHeader('Cache-Control', 'no-store');

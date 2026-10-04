@@ -317,6 +317,45 @@ describe('homepage configuration persistence', () => {
       .toMatchObject(copySave.config);
   }, 60_000);
 
+  it('persists homepage collection and standalone-piece curation without collapsing explicit empty shelves', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const initialVersion = store.getHomepageConfig().config.updatedAt ?? null;
+
+    const populated = await store.saveHomepageConfig({
+      homepageCollectionIds: ['collection-one', 'collection-two'],
+      homepagePieceIds: ['piece-a', 'piece-b'],
+      homepageCollectionsHeading: 'Read in collections',
+      homepageCollectionsSubtitle: 'Connected work, arranged deliberately.',
+      homepagePiecesHeading: 'Individual pieces',
+      homepagePiecesSubtitle: 'Standalone writing from the archive.'
+    }, initialVersion);
+
+    expect(populated.config).toMatchObject({
+      homepageCollectionIds: ['collection-one', 'collection-two'],
+      homepagePieceIds: ['piece-a', 'piece-b'],
+      homepageCollectionsHeading: 'Read in collections',
+      homepagePiecesHeading: 'Individual pieces'
+    });
+
+    const emptied = await store.saveHomepageConfig({
+      homepageCollectionIds: [],
+      homepagePieceIds: []
+    }, populated.config.updatedAt!);
+    expect(emptied.config.homepageCollectionIds).toEqual([]);
+    expect(emptied.config.homepagePieceIds).toEqual([]);
+
+    vi.resetModules();
+    const { store: reloadedStore } = await import('./store.js');
+    await reloadedStore.init();
+    expect(reloadedStore.getHomepageConfig().config).toMatchObject({
+      homepageCollectionIds: [],
+      homepagePieceIds: [],
+      homepageCollectionsHeading: 'Read in collections',
+      homepagePiecesHeading: 'Individual pieces'
+    });
+  }, 60_000);
+
   it('refreshes the admin version from Firestore and preserves remote curation during background changes', async () => {
     const { store } = await import('./store.js');
     await store.init();

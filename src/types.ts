@@ -937,6 +937,12 @@ export interface HomepageSectionItem {
 
 export interface HomepageConfig {
   welcomeBackground: WelcomeBackgroundSettings;
+  homepageCollectionIds?: string[];
+  homepagePieceIds?: string[];
+  homepageCollectionsHeading?: string;
+  homepageCollectionsSubtitle?: string;
+  homepagePiecesHeading?: string;
+  homepagePiecesSubtitle?: string;
   startHerePieceIds?: string[]; // 3 curated piece IDs
   startHereHeading?: string;
   startHereSubtitle?: string;
