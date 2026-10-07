@@ -22,6 +22,7 @@ import {
   ChevronUp
 } from 'lucide-react';
 import { Article, ContentBundle, ContentCollection, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
+import { HOMEPAGE_SECTION_DEFINITIONS, normalizeHomepageSections } from '../../homepageSections.js';
 import { api } from '../../utils/api.js';
 import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
@@ -93,13 +94,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
     heroQuote: '“I write because the heart keeps a ledger the tongue is too proud to read.”',
     heroSubheadline: 'An archive of lived experience, intimacy, power, and memory authored by Jake.',
     heroBadge: 'Ink & Witness Narratives',
-    sections: [
-      { id: 'piece_of_the_week', title: 'Piece of the Week', isVisible: true, order: 1 },
-      { id: 'most_selling', title: 'Most Selling Pieces', isVisible: true, order: 2 },
-      { id: 'latest', title: 'Latest from the Ink', isVisible: true, order: 3 },
-      { id: 'catalogue', title: 'Explore Full Catalogue', isVisible: true, order: 4 },
-      { id: 'patronage', title: 'Patronage & Reader Support', isVisible: true, order: 5 }
-    ]
+    sections: normalizeHomepageSections(undefined)
   });
 
   const [publishedPieces, setPublishedPieces] = useState<Article[]>([]);
@@ -252,13 +247,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           heroQuote: data.config.heroQuote ?? '“I write because the heart keeps a ledger the tongue is too proud to read.”',
           heroSubheadline: data.config.heroSubheadline ?? 'An archive of lived experience, intimacy, power, and memory authored by Jake.',
           heroBadge: data.config.heroBadge ?? 'Ink & Witness Narratives',
-          sections: Array.isArray(data.config.sections) ? data.config.sections : [
-            { id: 'piece_of_the_week', title: 'Piece of the Week', isVisible: true, order: 1 },
-            { id: 'most_selling', title: 'Most Selling Pieces', isVisible: true, order: 2 },
-            { id: 'latest', title: 'Latest from the Ink', isVisible: true, order: 3 },
-            { id: 'catalogue', title: 'Explore Full Catalogue', isVisible: true, order: 4 },
-            { id: 'patronage', title: 'Patronage & Reader Support', isVisible: true, order: 5 }
-          ]
+          sections: normalizeHomepageSections(data.config.sections)
         };
         const currentConfigSnapshot = JSON.stringify(configRef.current);
         const persistedConfigSnapshot = persistedConfigSnapshotRef.current;
@@ -539,6 +528,10 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
   const selectedCollectionIds = config.homepageCollectionIds || [];
   const selectedBundleIds = config.homepageBundleIds || [];
   const selectedPieceIds = config.homepagePieceIds || [];
+  const homepageSections = useMemo(
+    () => normalizeHomepageSections(config.sections),
+    [config.sections]
+  );
   const selectedCollections = useMemo(() => {
     const byId = new Map(availableCollections.map(collection => [collection.id, collection]));
     return selectedCollectionIds
@@ -634,6 +627,32 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       if (index < 0 || nextIndex < 0 || nextIndex >= current.length) return previous;
       [current[index], current[nextIndex]] = [current[nextIndex], current[index]];
       return { ...previous, [field]: current };
+    });
+  };
+
+  const setHomepageSectionVisibility = (sectionId: string, isVisible: boolean) => {
+    setConfig(previous => ({
+      ...previous,
+      sections: normalizeHomepageSections(previous.sections).map(section => (
+        section.id === sectionId ? { ...section, isVisible } : section
+      )),
+    }));
+  };
+
+  const moveHomepageSection = (sectionId: string, direction: -1 | 1) => {
+    setConfig(previous => {
+      const sections = normalizeHomepageSections(previous.sections);
+      const index = sections.findIndex(section => section.id === sectionId);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= sections.length) return previous;
+      [sections[index], sections[nextIndex]] = [sections[nextIndex], sections[index]];
+      return {
+        ...previous,
+        sections: sections.map((section, sectionIndex) => ({
+          ...section,
+          order: sectionIndex + 1,
+        })),
+      };
     });
   };
 
@@ -1370,7 +1389,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       {/* ============================================================ */}
       {/* 3. PUBLIC LIBRARY, BUNDLES, COLLECTIONS & INDIVIDUAL PIECES */}
       {/* ============================================================ */}
-      {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
+      {activeSubTab === 'overview' && (
       <section id="section-homepage-curation" className="space-y-8 rounded-3xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -1480,7 +1499,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           <div className="flex items-center justify-between gap-4">
             <div>
               <h4 className="text-sm font-semibold text-white">Homepage bundles</h4>
-              <p className="mt-1 text-[11px] text-slate-500">Select published paid sets and arrange their order directly below the newsletter banner. Bundle prices and JPEG covers are managed in Reader Experience.</p>
+              <p className="mt-1 text-[11px] text-slate-500">Select published paid sets and arrange their order within the bundle section. Bundle prices, JPEG covers, and cover focal points are managed in Reader Experience.</p>
             </div>
             <span className="font-mono text-[10px] text-emerald-400">{selectedBundleIds.length}/6</span>
           </div>
@@ -1491,7 +1510,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
                 <div key={bundle.id} className="flex items-center gap-3 rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-2.5">
                   <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
                     {bundle.coverImage ? (
-                      <img src={bundle.coverImage} alt="" className="h-full w-full object-cover" />
+                      <img
+                        src={bundle.coverImage}
+                        alt=""
+                        style={{ objectPosition: `${bundle.coverPosition?.x ?? 50}% ${bundle.coverPosition?.y ?? 50}%` }}
+                        className="h-full w-full object-cover"
+                      />
                     ) : (
                       <Layers className="m-3 h-6 w-6 text-slate-600" />
                     )}
@@ -1554,7 +1578,12 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
                 <div key={collection.id} className="flex items-center gap-3 rounded-xl border border-sky-900/60 bg-sky-950/20 p-2.5">
                   <div className="h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-800 bg-slate-900">
                     {collection.coverImage ? (
-                      <img src={collection.coverImage} alt="" className="h-full w-full object-cover" />
+                      <img
+                        src={collection.coverImage}
+                        alt=""
+                        style={{ objectPosition: `${collection.coverPosition?.x ?? 50}% ${collection.coverPosition?.y ?? 50}%` }}
+                        className="h-full w-full object-cover"
+                      />
                     ) : (
                       <Layers className="m-3 h-6 w-6 text-slate-600" />
                     )}
@@ -1661,55 +1690,69 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       </section>
       )}
 
-      {/* Legacy shelves are retained in stored data for backward compatibility, but are no longer rendered publicly. */}
-      {false && (activeSubTab === 'overview' || activeSubTab === 'sections') && (
-      <section id="section-layout-ordering" className="p-6 sm:p-8 rounded-3xl bg-slate-900/60 border border-slate-800 space-y-6">
+      {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
+      <section id="section-layout-ordering" className="space-y-6 rounded-3xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 uppercase tracking-wider mb-1">
+            <div className="mb-1 flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-emerald-400">
               <Sliders className="w-4 h-4" />
-              <span>Section 3 • Section Configuration &amp; Visibility</span>
+              <span>Homepage structure</span>
             </div>
-            <h3 className="font-display font-bold text-xl text-white">
-              Homepage Sections &amp; Ordering
-            </h3>
-            <p className="text-xs text-slate-400 mt-1 font-sans">
-              Toggle visibility and arrange homepage components to curate reader discovery.
+            <h3 className="font-display text-xl font-bold text-white">Section visibility and order</h3>
+            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-400">
+              Switch any public section on or off, then use the arrows to set the exact order readers see. Hidden sections keep their saved content and can be restored later.
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {(config.sections || [
-            { id: 'piece_of_the_week', title: 'Piece of the Week', isVisible: true, order: 1 },
-            { id: 'most_selling', title: 'Most Selling Pieces', isVisible: true, order: 2 },
-            { id: 'latest', title: 'Latest from the Ink', isVisible: true, order: 3 },
-            { id: 'catalogue', title: 'Explore Full Catalogue', isVisible: true, order: 4 },
-            { id: 'patronage', title: 'Patronage & Reader Support', isVisible: true, order: 5 }
-          ]).map((sec, idx) => (
-            <div key={sec.id} className="p-4 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between">
-              <div>
-                <span className="text-xs font-mono text-slate-500">#{idx + 1}</span>
-                <h5 className="text-xs font-semibold text-slate-200">{sec.title || sec.id}</h5>
+        <div className="space-y-2">
+          {homepageSections.map((section, index) => {
+            const definition = HOMEPAGE_SECTION_DEFINITIONS.find(item => item.id === section.id);
+            return (
+            <div key={section.id} className={`flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center ${section.isVisible ? 'border-slate-700 bg-slate-950' : 'border-slate-800 bg-slate-950/50 opacity-75'}`}>
+              <div className="flex min-w-0 flex-1 items-start gap-3">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 font-mono text-xs text-slate-400">{index + 1}</span>
+                <div className="min-w-0">
+                  <h5 className="text-sm font-semibold text-slate-100">{definition?.title || section.title || section.id}</h5>
+                  <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">{definition?.description}</p>
+                </div>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={sec.isVisible}
-                  onChange={(e) => {
-                    const isVisible = e.target.checked;
-                    setConfig(prev => {
-                      const sections = (prev.sections || []).map(s => s.id === sec.id ? { ...s, isVisible } : s);
-                      return { ...prev, sections };
-                    });
-                  }}
-                  className="sr-only peer"
-                />
-                <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
-              </label>
+              <div className="flex items-center justify-between gap-2 sm:justify-end">
+                <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-[11px] font-semibold text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={section.isVisible}
+                    onChange={event => setHomepageSectionVisibility(section.id, event.target.checked)}
+                    className="h-4 w-4 accent-emerald-500"
+                  />
+                  {section.isVisible ? 'Shown' : 'Hidden'}
+                </label>
+                <button
+                  type="button"
+                  aria-label={`Move ${definition?.title || section.id} up`}
+                  disabled={index === 0}
+                  onClick={() => moveHomepageSection(section.id, -1)}
+                  className="rounded-lg border border-slate-800 p-2 text-slate-400 hover:border-slate-700 hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-25"
+                >
+                  <ChevronUp className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Move ${definition?.title || section.id} down`}
+                  disabled={index === homepageSections.length - 1}
+                  onClick={() => moveHomepageSection(section.id, 1)}
+                  className="rounded-lg border border-slate-800 p-2 text-slate-400 hover:border-slate-700 hover:bg-slate-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-25"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </button>
+              </div>
             </div>
-          ))}
+          );})}
         </div>
+
+        <p className="rounded-xl border border-amber-900/50 bg-amber-950/20 px-4 py-3 text-[11px] leading-relaxed text-amber-100/80">
+          Use <span className="font-semibold text-amber-100">Save Homepage</span> after arranging the list. Hiding bundles, collections, or pieces never deletes those records or changes reader access.
+        </p>
       </section>
       )}
 

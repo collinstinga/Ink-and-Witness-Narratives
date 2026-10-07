@@ -44,6 +44,7 @@ export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
         {bundles.map((bundle) => {
           const pieceCount = bundle.pieces.length;
           const coverImage = bundle.coverImage || bundle.pieces[0]?.coverImage;
+          const coverPosition = bundle.coverImage ? bundle.coverPosition : undefined;
           return (
             <article
               key={bundle.id}
@@ -63,6 +64,7 @@ export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
                       decoding="async"
                       referrerPolicy="no-referrer"
                       onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                      style={{ objectPosition: `${coverPosition?.x ?? 50}% ${coverPosition?.y ?? 50}%` }}
                       className="absolute inset-0 h-full w-full object-cover opacity-75"
                     />
                   ) : null}

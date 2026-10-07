@@ -328,7 +328,15 @@ describe('homepage configuration persistence', () => {
       homepageCollectionsHeading: 'Read in collections',
       homepageCollectionsSubtitle: 'Connected work, arranged deliberately.',
       homepagePiecesHeading: 'Individual pieces',
-      homepagePiecesSubtitle: 'Standalone writing from the archive.'
+      homepagePiecesSubtitle: 'Standalone writing from the archive.',
+      sections: [
+        { id: 'newsletter', isVisible: true, order: 1 },
+        { id: 'hero', isVisible: false, order: 2 },
+        { id: 'bundles', isVisible: true, order: 3 },
+        { id: 'library', isVisible: true, order: 4 },
+        { id: 'collections', isVisible: true, order: 5 },
+        { id: 'pieces', isVisible: true, order: 6 }
+      ]
     }, initialVersion);
 
     expect(populated.config).toMatchObject({
@@ -337,6 +345,10 @@ describe('homepage configuration persistence', () => {
       homepageCollectionsHeading: 'Read in collections',
       homepagePiecesHeading: 'Individual pieces'
     });
+    expect(populated.config.sections?.slice(0, 2)).toEqual([
+      { id: 'newsletter', title: 'Reader newsletter', isVisible: true, order: 1 },
+      { id: 'hero', title: 'Welcome hero', isVisible: false, order: 2 }
+    ]);
 
     const emptied = await store.saveHomepageConfig({
       homepageCollectionIds: [],
@@ -348,12 +360,17 @@ describe('homepage configuration persistence', () => {
     vi.resetModules();
     const { store: reloadedStore } = await import('./store.js');
     await reloadedStore.init();
-    expect(reloadedStore.getHomepageConfig().config).toMatchObject({
+    const reloadedConfig = reloadedStore.getHomepageConfig().config;
+    expect(reloadedConfig).toMatchObject({
       homepageCollectionIds: [],
       homepagePieceIds: [],
       homepageCollectionsHeading: 'Read in collections',
       homepagePiecesHeading: 'Individual pieces'
     });
+    expect(reloadedConfig.sections?.slice(0, 2)).toEqual([
+      { id: 'newsletter', title: 'Reader newsletter', isVisible: true, order: 1 },
+      { id: 'hero', title: 'Welcome hero', isVisible: false, order: 2 }
+    ]);
   }, 60_000);
 
   it('refreshes the admin version from Firestore and preserves remote curation during background changes', async () => {

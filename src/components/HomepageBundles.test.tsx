@@ -38,6 +38,8 @@ describe('HomepageBundles', () => {
       pieces: [first],
       checkoutArticle,
       priceKes: 750,
+      coverImage: '/bundle.jpg',
+      coverPosition: { x: 18, y: 82 },
       isPublished: true,
       createdAt: '2026-10-04',
       updatedAt: '2026-10-04',
@@ -52,5 +54,6 @@ describe('HomepageBundles', () => {
     expect(markup).toContain('permanently adds every included piece');
     expect(markup).toContain('KSh 750');
     expect(markup).toContain('Buy Starter Shelf bundle for KSh 750');
+    expect(markup).toContain('object-position:18% 82%');
   });
 });

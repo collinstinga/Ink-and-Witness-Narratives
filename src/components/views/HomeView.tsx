@@ -19,6 +19,79 @@ interface HomeViewProps {
   onOpenTip: () => void;
 }
 
+interface HomepageHeroProps {
+  backgroundUrl: string;
+  background: HomepageConfig['welcomeBackground'];
+  overlayOpacity: number;
+  heroBadge: string;
+  heroHeadline: string;
+  tagline: string;
+  authorIdentity: string;
+  onExplore: () => void;
+}
+
+const HomepageHero: React.FC<HomepageHeroProps> = ({
+  backgroundUrl,
+  background,
+  overlayOpacity,
+  heroBadge,
+  heroHeadline,
+  tagline,
+  authorIdentity,
+  onExplore,
+}) => (
+  <section
+    id="home-hero"
+    className="relative flex min-h-[480px] w-full items-center justify-center overflow-hidden pb-16 pt-28 text-center sm:min-h-[540px] sm:pb-24 sm:pt-36 lg:min-h-[620px] lg:pb-32 lg:pt-44"
+  >
+    {backgroundUrl && (
+      <div className="pointer-events-none absolute inset-0 z-0 h-full w-full select-none overflow-hidden">
+        <img
+          src={backgroundUrl}
+          alt="Ink & Witness Narratives"
+          referrerPolicy="no-referrer"
+          style={{
+            objectFit: background.fit === 'contain' ? 'contain' : background.fit === 'custom' ? 'fill' : 'cover',
+            objectPosition: `${background.positionX ?? 50}% ${background.positionY ?? 50}%`,
+            transform: `scale(${(background.zoom || 100) / 100})`,
+            transformOrigin: `${background.positionX ?? 50}% ${background.positionY ?? 50}%`,
+          }}
+          className="h-full w-full"
+        />
+        <div className="absolute inset-0 bg-[#070b14]" style={{ opacity: overlayOpacity }} />
+        <div className="absolute inset-0 bg-gradient-to-b from-[#070b14]/50 via-transparent to-[#0b101b]" />
+        <div className="absolute inset-0 bg-radial-[circle_at_center] from-transparent via-black/20 to-black/60" />
+      </div>
+    )}
+
+    <div className="relative z-10 mx-auto max-w-4xl space-y-6 px-4 sm:px-6">
+      <div className="inline-flex items-center gap-2 rounded-full border border-slate-800/80 bg-slate-950/80 px-3 py-1 font-mono text-[11px] uppercase tracking-widest text-sky-400 backdrop-blur-md">
+        <Feather className="h-3 w-3" />
+        <span>{heroBadge}</span>
+      </div>
+      <h1 className="font-display text-4xl font-bold leading-[1.1] tracking-tight text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)] sm:text-6xl lg:text-7xl">
+        {heroHeadline}
+      </h1>
+      <p className="mx-auto max-w-3xl font-serif text-xl font-light italic leading-relaxed text-slate-100 drop-shadow-[0_2px_12px_rgba(0,0,0,0.95)] sm:text-2xl lg:text-3xl">
+        {tagline}
+      </p>
+      <p className="mx-auto max-w-2xl text-xs font-normal leading-relaxed text-slate-200/90 drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)] sm:text-sm lg:text-base">
+        {authorIdentity}
+      </p>
+      <div className="pt-3">
+        <button
+          type="button"
+          onClick={onExplore}
+          className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-slate-700/80 bg-slate-950/85 px-6 py-2.5 font-mono text-xs text-slate-200 shadow-lg backdrop-blur-md transition-all hover:bg-slate-900 hover:text-white"
+        >
+          <span>Explore the Writing</span>
+          <ArrowRight className="h-3.5 w-3.5 text-sky-400" />
+        </button>
+      </div>
+    </div>
+  </section>
+);
+
 export const HomeView: React.FC<HomeViewProps> = ({
   author,
   articles,
@@ -126,61 +199,6 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </div>
       )}
 
-      <section
-        id="home-hero"
-        className="relative flex min-h-[480px] w-full items-center justify-center overflow-hidden pb-16 pt-28 text-center sm:min-h-[540px] sm:pb-24 sm:pt-36 lg:min-h-[620px] lg:pb-32 lg:pt-44"
-      >
-        {backgroundUrl && (
-          <div className="pointer-events-none absolute inset-0 z-0 h-full w-full select-none overflow-hidden">
-            <img
-              src={backgroundUrl}
-              alt="Ink & Witness Narratives"
-              referrerPolicy="no-referrer"
-              style={{
-                objectFit: bgSettings.fit === 'contain' ? 'contain' : bgSettings.fit === 'custom' ? 'fill' : 'cover',
-                objectPosition: `${bgSettings.positionX ?? 50}% ${bgSettings.positionY ?? 50}%`,
-                transform: `scale(${(bgSettings.zoom || 100) / 100})`,
-                transformOrigin: `${bgSettings.positionX ?? 50}% ${bgSettings.positionY ?? 50}%`,
-              }}
-              className="h-full w-full"
-            />
-            <div className="absolute inset-0 bg-[#070b14]" style={{ opacity: overlayOpacity }} />
-            <div className="absolute inset-0 bg-gradient-to-b from-[#070b14]/50 via-transparent to-[#0b101b]" />
-            <div className="absolute inset-0 bg-radial-[circle_at_center] from-transparent via-black/20 to-black/60" />
-          </div>
-        )}
-
-        <div className="relative z-10 mx-auto max-w-4xl space-y-6 px-4 sm:px-6">
-          <div className="inline-flex items-center gap-2 rounded-full border border-slate-800/80 bg-slate-950/80 px-3 py-1 font-mono text-[11px] uppercase tracking-widest text-sky-400 backdrop-blur-md">
-            <Feather className="h-3 w-3" />
-            <span>{heroBadge}</span>
-          </div>
-          <h1 className="font-display text-4xl font-bold leading-[1.1] tracking-tight text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.9)] sm:text-6xl lg:text-7xl">
-            {heroHeadline}
-          </h1>
-          <p className="mx-auto max-w-3xl font-serif text-xl font-light italic leading-relaxed text-slate-100 drop-shadow-[0_2px_12px_rgba(0,0,0,0.95)] sm:text-2xl lg:text-3xl">
-            {tagline}
-          </p>
-          <p className="mx-auto max-w-2xl text-xs font-normal leading-relaxed text-slate-200/90 drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)] sm:text-sm lg:text-base">
-            {authorIdentity}
-          </p>
-          <div className="pt-3">
-            <button
-              type="button"
-              onClick={scrollToDiscovery}
-              className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-slate-700/80 bg-slate-950/85 px-6 py-2.5 font-mono text-xs text-slate-200 shadow-lg backdrop-blur-md transition-all hover:bg-slate-900 hover:text-white"
-            >
-              <span>Explore the Writing</span>
-              <ArrowRight className="h-3.5 w-3.5 text-sky-400" />
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <div className="border-y border-slate-800/70 bg-slate-950/30">
-        <NewsletterSignup variant="compact" />
-      </div>
-
       <HomepageDiscovery
         config={homepageConfig}
         bundles={homepageBundles}
@@ -194,6 +212,23 @@ export const HomeView: React.FC<HomeViewProps> = ({
         onPurchaseBundle={onPurchaseBundle}
         onSelectCategory={onSelectCategory}
         onNavigate={onNavigate}
+        heroSection={(
+          <HomepageHero
+            backgroundUrl={backgroundUrl}
+            background={bgSettings}
+            overlayOpacity={overlayOpacity}
+            heroBadge={heroBadge}
+            heroHeadline={heroHeadline}
+            tagline={tagline}
+            authorIdentity={authorIdentity}
+            onExplore={scrollToDiscovery}
+          />
+        )}
+        newsletterSection={(
+          <div className="border-y border-slate-800/70 bg-slate-950/30">
+            <NewsletterSignup variant="compact" />
+          </div>
+        )}
       />
     </div>
   );

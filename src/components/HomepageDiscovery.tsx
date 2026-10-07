@@ -11,8 +11,9 @@ import {
 } from 'lucide-react';
 
 import type { Article, Category, ContentBundle, ContentCollection, HomepageConfig } from '../types.js';
+import { normalizeHomepageSections, type HomepageSectionId } from '../homepageSections.js';
 import { HomepageBundles, type HomepageBundle } from './HomepageBundles.js';
-import { HomepageLibraryGuide } from './HomepageLibraryGuide.js';
+import { buildHomepageLibrarySections, HomepageLibraryGuide } from './HomepageLibraryGuide.js';
 
 const MAX_HOMEPAGE_COLLECTIONS = 6;
 const MAX_HOMEPAGE_BUNDLES = 6;
@@ -36,6 +37,8 @@ export interface HomepageDiscoveryProps {
   onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
   onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: PublicView) => void;
+  heroSection?: React.ReactNode;
+  newsletterSection?: React.ReactNode;
 }
 
 export interface HomepageCollectionView {
@@ -175,6 +178,12 @@ const ShelfHeading: React.FC<{
   </header>
 );
 
+const DiscoverySectionFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+    {children}
+  </div>
+);
+
 export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   config,
   bundles,
@@ -188,6 +197,8 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   onPurchaseBundle,
   onSelectCategory,
   onNavigate,
+  heroSection,
+  newsletterSection,
 }) => {
   const model = useMemo(
     () => buildHomepageDiscoveryModel(collections, allArticles, pieces, bundles),
@@ -196,6 +207,10 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   const [activeCollection, setActiveCollection] = useState<HomepageCollectionView | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const hasLibrarySections = useMemo(
+    () => buildHomepageLibrarySections(categories, allArticles).length > 0,
+    [categories, allArticles],
+  );
 
   const closeCollection = useCallback(() => setActiveCollection(null), []);
   const openCollection = useCallback((collection: HomepageCollectionView) => {
@@ -264,191 +279,178 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   const piecesSubtitle = config?.homepagePiecesSubtitle?.trim() ||
     'Standalone writing, selected from the archive.';
 
-  return (
-    <div id="home-discovery" className="mx-auto w-full max-w-6xl space-y-16 px-4 py-14 sm:px-6 sm:py-20">
-      <HomepageBundles
-        bundles={model.bundles}
-        config={config}
-        onPurchaseBundle={onPurchaseBundle}
-      />
+  const collectionsSection = model.collections.length > 0 ? (
+    <section id="home-curated-collections" aria-labelledby="home-collections-heading" className="space-y-7">
+      <div>
+        <ShelfHeading
+          id="home-collections-heading"
+          eyebrow="Explore by collection"
+          heading={collectionsHeading}
+          subtitle={collectionsSubtitle}
+        />
+      </div>
 
-      <HomepageLibraryGuide
-        articles={allArticles}
-        categories={categories}
-        config={config}
-        onSelectCategory={onSelectCategory}
-      />
-
-      {model.collections.length > 0 && (
-        <section id="home-curated-collections" aria-labelledby="home-collections-heading" className="space-y-7">
-          <div>
-            <ShelfHeading
-              id="home-collections-heading"
-              eyebrow="Explore by collection"
-              heading={collectionsHeading}
-              subtitle={collectionsSubtitle}
-            />
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {model.collections.map((entry) => {
-              const coverImage = entry.collection.coverImage || entry.pieces[0]?.coverImage;
-              const countLabel = `${entry.pieces.length} ${entry.pieces.length === 1 ? 'piece' : 'pieces'}`;
-              return (
-                <button
-                  key={entry.collection.id}
-                  type="button"
-                  data-collection-id={entry.collection.id}
-                  onClick={() => openCollection(entry)}
-                  aria-label={`Open ${entry.collection.name} collection, ${countLabel}`}
-                  className="group overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/55 text-left shadow-lg shadow-black/10 transition hover:-translate-y-0.5 hover:border-sky-800/80 hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b101b]"
-                >
-                  <span className="relative block aspect-[16/10] overflow-hidden bg-gradient-to-br from-sky-950 via-slate-900 to-slate-950">
-                    <span className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
-                      <Layers3 className="h-10 w-10 text-sky-400/45" />
-                    </span>
-                    {coverImage ? (
-                      <img
-                        src={coverImage}
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                        referrerPolicy="no-referrer"
-                        onError={(event) => { event.currentTarget.style.display = 'none'; }}
-                        className="h-full w-full object-cover opacity-75 transition duration-500 group-hover:scale-[1.025] group-hover:opacity-90"
-                      />
-                    ) : null}
-                    <span className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent" />
-                    <span className="absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-950/85 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-slate-300 backdrop-blur">
-                      <Layers3 className="h-3 w-3 text-sky-400" aria-hidden="true" />
-                      {countLabel}
-                    </span>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {model.collections.map((entry) => {
+          const coverImage = entry.collection.coverImage || entry.pieces[0]?.coverImage;
+          const coverPosition = entry.collection.coverImage ? entry.collection.coverPosition : undefined;
+          const countLabel = `${entry.pieces.length} ${entry.pieces.length === 1 ? 'piece' : 'pieces'}`;
+          return (
+            <button
+              key={entry.collection.id}
+              type="button"
+              data-collection-id={entry.collection.id}
+              onClick={() => openCollection(entry)}
+              aria-label={`Open ${entry.collection.name} collection, ${countLabel}`}
+              className="group overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/55 text-left shadow-lg shadow-black/10 transition hover:-translate-y-0.5 hover:border-sky-800/80 hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b101b]"
+            >
+              <span className="relative block aspect-[16/10] overflow-hidden bg-gradient-to-br from-sky-950 via-slate-900 to-slate-950">
+                <span className="absolute inset-0 flex items-center justify-center" aria-hidden="true">
+                  <Layers3 className="h-10 w-10 text-sky-400/45" />
+                </span>
+                {coverImage ? (
+                  <img
+                    src={coverImage}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                    onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                    style={{ objectPosition: `${coverPosition?.x ?? 50}% ${coverPosition?.y ?? 50}%` }}
+                    className="h-full w-full object-cover opacity-75 transition duration-500 group-hover:scale-[1.025] group-hover:opacity-90"
+                  />
+                ) : null}
+                <span className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent" />
+                <span className="absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-950/85 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-slate-300 backdrop-blur">
+                  <Layers3 className="h-3 w-3 text-sky-400" aria-hidden="true" />
+                  {countLabel}
+                </span>
+              </span>
+              <span className="block space-y-2 p-5">
+                <span className="flex items-start justify-between gap-3">
+                  <span className="font-display text-lg font-bold leading-snug text-slate-100 transition group-hover:text-sky-300">
+                    {entry.collection.name}
                   </span>
-                  <span className="block space-y-2 p-5">
-                    <span className="flex items-start justify-between gap-3">
-                      <span className="font-display text-lg font-bold leading-snug text-slate-100 transition group-hover:text-sky-300">
-                        {entry.collection.name}
-                      </span>
-                      <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-slate-500 transition group-hover:translate-x-0.5 group-hover:text-sky-400" aria-hidden="true" />
-                    </span>
-                    {entry.collection.description && (
-                      <span className="line-clamp-2 block text-sm leading-relaxed text-slate-400">
-                        {entry.collection.description}
-                      </span>
-                    )}
+                  <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-slate-500 transition group-hover:translate-x-0.5 group-hover:text-sky-400" aria-hidden="true" />
+                </span>
+                {entry.collection.description && (
+                  <span className="line-clamp-2 block text-sm leading-relaxed text-slate-400">
+                    {entry.collection.description}
+                  </span>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  ) : null;
+
+  const piecesSection = model.pieces.length > 0 ? (
+    <div className="space-y-8">
+      <section id="home-individual-pieces" aria-labelledby="home-pieces-heading" className="space-y-7">
+        <div>
+          <ShelfHeading
+            id="home-pieces-heading"
+            eyebrow="From the archive"
+            heading={piecesHeading}
+            subtitle={piecesSubtitle}
+          />
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {model.pieces.map((article) => {
+            const isAccessible = isArticleAccessible(article, unlockedTokens);
+            return (
+              <article
+                key={article.id}
+                data-piece-id={article.id}
+                className="group flex min-h-full flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/55 transition hover:border-slate-700 hover:bg-slate-900/65"
+              >
+                <button
+                  type="button"
+                  onClick={() => onReadArticle(article)}
+                  aria-label={`Preview ${article.title}`}
+                  className="relative block aspect-[16/9] overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400"
+                >
+                  <img
+                    src={article.coverImage || FALLBACK_COVER}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover opacity-65 transition duration-500 group-hover:scale-[1.025] group-hover:opacity-80"
+                  />
+                  <span className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/15 to-transparent" />
+                  <span className="absolute bottom-3 left-3 rounded-full border border-slate-700/80 bg-slate-950/85 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-slate-300 backdrop-blur">
+                    {article.category || 'Narrative'}
                   </span>
                 </button>
-              );
-            })}
-          </div>
-        </section>
-      )}
 
-      {model.pieces.length > 0 && (
-        <section id="home-individual-pieces" aria-labelledby="home-pieces-heading" className="space-y-7">
-          <div>
-            <ShelfHeading
-              id="home-pieces-heading"
-              eyebrow="From the archive"
-              heading={piecesHeading}
-              subtitle={piecesSubtitle}
-            />
-          </div>
+                <div className="flex flex-1 flex-col p-5">
+                  <div className="mb-3 flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-wider text-slate-500">
+                    {article.showReadTime !== false ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Clock className="h-3 w-3" aria-hidden="true" />
+                        {article.readTimeMinutes || 1} min read
+                      </span>
+                    ) : <span />}
+                    <span className={isAccessible ? 'text-sky-400' : 'text-amber-400'}>
+                      {isAccessible ? 'Ready to read' : `KSh ${formatPrice(article.priceKes)}`}
+                    </span>
+                  </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {model.pieces.map((article) => {
-              const isAccessible = isArticleAccessible(article, unlockedTokens);
-              return (
-                <article
-                  key={article.id}
-                  data-piece-id={article.id}
-                  className="group flex min-h-full flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/55 transition hover:border-slate-700 hover:bg-slate-900/65"
-                >
                   <button
                     type="button"
                     onClick={() => onReadArticle(article)}
-                    aria-label={`Preview ${article.title}`}
-                    className="relative block aspect-[16/9] overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400"
+                    className="text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
                   >
-                    <img
-                      src={article.coverImage || FALLBACK_COVER}
-                      alt=""
-                      loading="lazy"
-                      decoding="async"
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-cover opacity-65 transition duration-500 group-hover:scale-[1.025] group-hover:opacity-80"
-                    />
-                    <span className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/15 to-transparent" />
-                    <span className="absolute bottom-3 left-3 rounded-full border border-slate-700/80 bg-slate-950/85 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-slate-300 backdrop-blur">
-                      {article.category || 'Narrative'}
-                    </span>
+                    <h3 className="font-display text-lg font-bold leading-snug text-slate-100 transition group-hover:text-sky-300">
+                      {article.title}
+                    </h3>
                   </button>
+                  {article.excerpt && (
+                    <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-400">{article.excerpt}</p>
+                  )}
 
-                  <div className="flex flex-1 flex-col p-5">
-                    <div className="mb-3 flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-wider text-slate-500">
-                      {article.showReadTime !== false ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <Clock className="h-3 w-3" aria-hidden="true" />
-                          {article.readTimeMinutes || 1} min read
-                        </span>
-                      ) : <span />}
-                      <span className={isAccessible ? 'text-sky-400' : 'text-amber-400'}>
-                        {isAccessible ? 'Ready to read' : `KSh ${formatPrice(article.priceKes)}`}
-                      </span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => onReadArticle(article)}
-                      className="text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-                    >
-                      <h3 className="font-display text-lg font-bold leading-snug text-slate-100 transition group-hover:text-sky-300">
-                        {article.title}
-                      </h3>
-                    </button>
-                    {article.excerpt && (
-                      <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-400">{article.excerpt}</p>
-                    )}
-
-                    <div className="mt-auto pt-5">
-                      {isAccessible ? (
+                  <div className="mt-auto pt-5">
+                    {isAccessible ? (
+                      <button
+                        type="button"
+                        onClick={() => onReadArticle(article)}
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                      >
+                        {article.isUnlocked || unlockedTokens[article.id] || unlockedTokens[article.slug]
+                          ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                          : <BookOpen className="h-4 w-4" aria-hidden="true" />}
+                        Read piece
+                      </button>
+                    ) : (
+                      <div className="grid grid-cols-[auto_1fr] gap-2">
                         <button
                           type="button"
                           onClick={() => onReadArticle(article)}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                          className="rounded-xl border border-slate-700 px-3 py-2.5 text-xs font-semibold text-slate-300 transition hover:border-slate-600 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
                         >
-                          {article.isUnlocked || unlockedTokens[article.id] || unlockedTokens[article.slug]
-                            ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                            : <BookOpen className="h-4 w-4" aria-hidden="true" />}
-                          Read piece
+                          Preview
                         </button>
-                      ) : (
-                        <div className="grid grid-cols-[auto_1fr] gap-2">
-                          <button
-                            type="button"
-                            onClick={() => onReadArticle(article)}
-                            className="rounded-xl border border-slate-700 px-3 py-2.5 text-xs font-semibold text-slate-300 transition hover:border-slate-600 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-                          >
-                            Preview
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onUnlockArticle(article)}
-                            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
-                          >
-                            <Smartphone className="h-4 w-4" aria-hidden="true" />
-                            Unlock
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                        <button
+                          type="button"
+                          onClick={() => onUnlockArticle(article)}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+                        >
+                          <Smartphone className="h-4 w-4" aria-hidden="true" />
+                          Unlock
+                        </button>
+                      </div>
+                    )}
                   </div>
-                </article>
-              );
-            })}
-          </div>
-        </section>
-      )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </section>
 
       <div className="flex justify-center border-t border-slate-800/80 pt-8">
         <button
@@ -460,6 +462,44 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
           <ArrowRight className="h-4 w-4" aria-hidden="true" />
         </button>
       </div>
+    </div>
+  ) : null;
+
+  const sectionNodes: Record<HomepageSectionId, React.ReactNode> = {
+    hero: heroSection || null,
+    newsletter: newsletterSection || null,
+    bundles: model.bundles.length > 0 ? (
+      <DiscoverySectionFrame>
+        <HomepageBundles bundles={model.bundles} config={config} onPurchaseBundle={onPurchaseBundle} />
+      </DiscoverySectionFrame>
+    ) : null,
+    library: hasLibrarySections ? (
+      <DiscoverySectionFrame>
+        <HomepageLibraryGuide
+          articles={allArticles}
+          categories={categories}
+          config={config}
+          onSelectCategory={onSelectCategory}
+        />
+      </DiscoverySectionFrame>
+    ) : null,
+    collections: collectionsSection ? <DiscoverySectionFrame>{collectionsSection}</DiscoverySectionFrame> : null,
+    pieces: piecesSection ? <DiscoverySectionFrame>{piecesSection}</DiscoverySectionFrame> : null,
+  };
+  const homepageSections = useMemo(
+    () => normalizeHomepageSections(config?.sections),
+    [config?.sections],
+  );
+
+  return (
+    <div id="home-discovery">
+      {homepageSections.map(section => (
+        section.isVisible && sectionNodes[section.id as HomepageSectionId] ? (
+          <React.Fragment key={section.id}>
+            {sectionNodes[section.id as HomepageSectionId]}
+          </React.Fragment>
+        ) : null
+      ))}
 
       {activeCollection && (
         <div

@@ -15,6 +15,8 @@ type EditorState = {
   order: number;
   priceKes: number;
   coverImage: string;
+  coverPositionX: number;
+  coverPositionY: number;
 };
 
 const emptyEditor = (): EditorState => ({
@@ -24,7 +26,9 @@ const emptyEditor = (): EditorState => ({
   isPublished: false,
   order: 0,
   priceKes: 1,
-  coverImage: ''
+  coverImage: '',
+  coverPositionX: 50,
+  coverPositionY: 50
 });
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -82,7 +86,9 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
       isPublished: collection.isPublished,
       order: collection.order,
       priceKes: 1,
-      coverImage: collection.coverImage || ''
+      coverImage: collection.coverImage || '',
+      coverPositionX: collection.coverPosition?.x ?? 50,
+      coverPositionY: collection.coverPosition?.y ?? 50
     } : emptyEditor());
   };
 
@@ -98,7 +104,9 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
       isPublished: bundle.isPublished,
       order: 0,
       priceKes: bundle.priceKes,
-      coverImage: bundle.coverImage || ''
+      coverImage: bundle.coverImage || '',
+      coverPositionX: bundle.coverPosition?.x ?? 50,
+      coverPositionY: bundle.coverPosition?.y ?? 50
     } : { ...emptyEditor(), priceKes: 500 });
   };
 
@@ -108,6 +116,18 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
       pieceIds: current.pieceIds.includes(pieceId)
         ? current.pieceIds.filter(id => id !== pieceId)
         : [...current.pieceIds, pieceId]
+    }));
+  };
+
+  const updateCoverPositionFromPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100));
+    setEditor(current => ({
+      ...current,
+      coverPositionX: Math.round(x),
+      coverPositionY: Math.round(y)
     }));
   };
 
@@ -163,7 +183,11 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
           pieceIds: editor.pieceIds,
           isPublished: editor.isPublished,
           order: editor.order,
-          coverImage: editor.coverImage || undefined
+          coverImage: editor.coverImage || undefined,
+          coverPosition: {
+            x: editor.coverPositionX,
+            y: editor.coverPositionY
+          }
         });
         setNotice('Collection saved. Piece categories were not changed.');
       } else {
@@ -174,7 +198,11 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
           pieceIds: editor.pieceIds,
           isPublished: editor.isPublished,
           priceKes: editor.priceKes,
-          coverImage: editor.coverImage || undefined
+          coverImage: editor.coverImage || undefined,
+          coverPosition: {
+            x: editor.coverPositionX,
+            y: editor.coverPositionY
+          }
         });
         setNotice('Bundle saved. Its current piece list will be snapshotted when each payment begins.');
       }
@@ -261,11 +289,42 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
               />
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                 {editor.coverImage ? (
-                  <img
-                    src={editor.coverImage}
-                    alt={`${editorKind === 'collection' ? 'Collection' : 'Bundle'} cover preview`}
-                    className="h-32 w-full rounded-xl border border-slate-700 object-cover sm:h-24 sm:w-36"
-                  />
+                  <div
+                    className="relative h-40 w-full touch-none cursor-crosshair overflow-hidden rounded-xl border border-slate-700 bg-slate-900 sm:h-28 sm:w-48"
+                    onPointerDown={event => {
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                      updateCoverPositionFromPointer(event);
+                    }}
+                    onPointerMove={event => {
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        updateCoverPositionFromPointer(event);
+                      }
+                    }}
+                    onPointerUp={event => {
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                      }
+                    }}
+                    onPointerCancel={event => {
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                      }
+                    }}
+                    role="group"
+                    aria-label="Cover focal-point preview. Drag to reposition."
+                  >
+                    <img
+                      src={editor.coverImage}
+                      alt={`${editorKind === 'collection' ? 'Collection' : 'Bundle'} cover preview`}
+                      style={{ objectPosition: `${editor.coverPositionX}% ${editor.coverPositionY}%` }}
+                      className="pointer-events-none h-full w-full select-none object-cover"
+                    />
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-sky-500/50 shadow-[0_0_0_3px_rgba(2,6,23,0.65)]"
+                      style={{ left: `${editor.coverPositionX}%`, top: `${editor.coverPositionY}%` }}
+                    />
+                  </div>
                 ) : (
                   <div className="flex h-24 w-full items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900 text-slate-500 sm:w-36">
                     <ImagePlus className="h-6 w-6" aria-hidden="true" />
@@ -285,7 +344,12 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
                   {editor.coverImage && (
                     <button
                       type="button"
-                      onClick={() => setEditor(current => ({ ...current, coverImage: '' }))}
+                      onClick={() => setEditor(current => ({
+                        ...current,
+                        coverImage: '',
+                        coverPositionX: 50,
+                        coverPositionY: 50
+                      }))}
                       disabled={uploadingCover}
                       className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-rose-800 hover:bg-rose-950/40 hover:text-rose-200 disabled:opacity-50"
                     >
@@ -294,6 +358,42 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
                   )}
                 </div>
               </div>
+              {editor.coverImage && (
+                <div className="grid gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3 sm:grid-cols-2">
+                  <label className="space-y-1 text-[10px] font-medium text-slate-400">
+                    <span className="flex items-center justify-between gap-3"><span>Horizontal focus</span><span>{editor.coverPositionX}%</span></span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={editor.coverPositionX}
+                      onChange={event => setEditor(current => ({ ...current, coverPositionX: Number(event.target.value) }))}
+                      className="w-full accent-sky-500"
+                    />
+                  </label>
+                  <label className="space-y-1 text-[10px] font-medium text-slate-400">
+                    <span className="flex items-center justify-between gap-3"><span>Vertical focus</span><span>{editor.coverPositionY}%</span></span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={editor.coverPositionY}
+                      onChange={event => setEditor(current => ({ ...current, coverPositionY: Number(event.target.value) }))}
+                      className="w-full accent-sky-500"
+                    />
+                  </label>
+                  <div className="flex items-center justify-between gap-3 sm:col-span-2">
+                    <p className="text-[10px] leading-relaxed text-slate-500">Drag the preview or use the sliders. The focal point is preserved on phones and desktops.</p>
+                    <button
+                      type="button"
+                      onClick={() => setEditor(current => ({ ...current, coverPositionX: 50, coverPositionY: 50 }))}
+                      className="shrink-0 rounded-lg border border-slate-700 px-2.5 py-1.5 text-[10px] font-semibold text-slate-300 hover:border-sky-700 hover:text-sky-200"
+                    >
+                      Center
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             {editorKind === 'collection' ? (
               <label className="space-y-1 text-xs text-slate-400">Display order<input type="number" min={0} value={editor.order} onChange={event => setEditor({ ...editor, order: Number(event.target.value) })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white" /></label>

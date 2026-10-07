@@ -313,6 +313,8 @@ describe('reader experience persistence', () => {
       name: 'Private Draft',
       description: 'Still being curated',
       pieceIds: ['piece-1', 'piece-1', 'piece-2'],
+      coverImage: '/uploads/collection.jpg',
+      coverPosition: { x: 20, y: 75 },
       order: 2,
       isPublished: false
     });
@@ -325,7 +327,12 @@ describe('reader experience persistence', () => {
       isPublished: true
     });
     await expect(readerExperienceStore.listCollections()).resolves.toMatchObject([
-      { id: publishedCollection.id, name: 'For Quiet Evenings', isPublished: true }
+      {
+        id: publishedCollection.id,
+        name: 'For Quiet Evenings',
+        isPublished: true,
+        coverPosition: { x: 20, y: 75 }
+      }
     ]);
 
     await expect(readerExperienceStore.saveBundle({
@@ -339,12 +346,15 @@ describe('reader experience persistence', () => {
       name: 'The Healing Pair',
       pieceIds: ['piece-1', 'piece-2'],
       priceKes: 450,
+      coverImage: '/uploads/bundle.jpg',
+      coverPosition: { x: 88.8, y: 5.2 },
       isPublished: true
     });
     await expect(readerExperienceStore.getBundle(bundle.id)).resolves.toMatchObject({
       name: 'The Healing Pair',
       pieceIds: ['piece-1', 'piece-2'],
       priceKes: 450,
+      coverPosition: { x: 88.8, y: 5.2 },
       isPublished: true
     });
 

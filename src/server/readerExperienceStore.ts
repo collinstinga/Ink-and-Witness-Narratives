@@ -77,6 +77,18 @@ function clampNumber(value: unknown, min: number, max: number): number {
   return Math.max(min, Math.min(max, parsed));
 }
 
+function normalizeCoverPosition(value: unknown): { x: number; y: number } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const input = value as { x?: unknown; y?: unknown };
+  const x = Number(input.x);
+  const y = Number(input.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+  return {
+    x: Math.round(clampNumber(x, 0, 100) * 10) / 10,
+    y: Math.round(clampNumber(y, 0, 100) * 10) / 10,
+  };
+}
+
 function emptyReactionCounts(): Record<ReaderReactionType, number> {
   return {
     this_hurt: 0,
@@ -157,6 +169,7 @@ function normalizeContentCollection(id: string, value: unknown): ContentCollecti
   const input = value as Partial<ContentCollection>;
   const name = cleanText(input.name, 120);
   if (!name) return null;
+  const coverPosition = normalizeCoverPosition(input.coverPosition);
   return {
     id,
     name,
@@ -166,6 +179,7 @@ function normalizeContentCollection(id: string, value: unknown): ContentCollecti
       ? [...new Set(input.pieceIds.map(item => cleanText(item, 128)).filter(Boolean))].slice(0, 100)
       : [],
     ...(cleanText(input.coverImage, 2_048) ? { coverImage: cleanText(input.coverImage, 2_048) } : {}),
+    ...(coverPosition ? { coverPosition } : {}),
     order: Math.floor(clampNumber(input.order, 0, 10_000)),
     isPublished: input.isPublished === true,
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : new Date().toISOString(),
@@ -178,6 +192,7 @@ function normalizeBundle(id: string, value: unknown): ContentBundle | null {
   const input = value as Partial<ContentBundle>;
   const name = cleanText(input.name, 120);
   if (!name) return null;
+  const coverPosition = normalizeCoverPosition(input.coverPosition);
   return {
     id,
     name,
@@ -188,6 +203,7 @@ function normalizeBundle(id: string, value: unknown): ContentBundle | null {
       : [],
     priceKes: Math.round(clampNumber(input.priceKes, 1, 1_000_000)),
     ...(cleanText(input.coverImage, 2_048) ? { coverImage: cleanText(input.coverImage, 2_048) } : {}),
+    ...(coverPosition ? { coverPosition } : {}),
     isPublished: input.isPublished === true,
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : new Date().toISOString(),
     updatedAt: typeof input.updatedAt === 'string' ? input.updatedAt : new Date().toISOString()

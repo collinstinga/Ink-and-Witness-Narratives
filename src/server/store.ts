@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
+import { normalizeHomepageSections } from '../homepageSections.js';
 import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
 import { ImageValidationError, sanitizeImageDataUrl, type SafeImageMimeType } from './imageSecurity.js';
@@ -232,6 +233,7 @@ let cachedHomepageConfig: HomepageConfig = {
   homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
   homepagePiecesHeading: 'Individual Pieces',
   homepagePiecesSubtitle: 'Selected standalone writing from the archive.',
+  sections: normalizeHomepageSections(undefined),
   startHerePieceIds: ['art-01', 'art-02', 'art-03'],
   startHereHeading: 'START HERE',
   startHereSubtitle: 'Three pieces to begin with.',
@@ -5152,10 +5154,12 @@ export const store = {
         homepagePiecesHeading: partial.homepagePiecesHeading !== undefined ? partial.homepagePiecesHeading : baseHomepage.homepagePiecesHeading,
         homepagePiecesSubtitle: partial.homepagePiecesSubtitle !== undefined ? partial.homepagePiecesSubtitle : baseHomepage.homepagePiecesSubtitle,
         banners: partial.banners !== undefined ? partial.banners : (baseHomepage.banners || []),
-        sections: partial.sections !== undefined ? partial.sections : (baseHomepage.sections || []),
+        sections: normalizeHomepageSections(
+          partial.sections !== undefined ? partial.sections : baseHomepage.sections
+        ),
         updatedAt: savedAt,
         lastSavedAt: savedAt,
-        version: '1.4.0'
+        version: '1.5.0'
       };
       const remoteAuthor = authorSnapshot.exists
         ? authorSnapshot.data() as Partial<AuthorProfile>

@@ -179,3 +179,26 @@ Production release gate:
 - Visual check: the custom domain rendered the compact newsletter first, the paid bundle immediately below it, category shelves, editorial collections, and the standalone section. A legacy missing bundle cover now renders a neutral layered-book fallback rather than a broken-image glyph.
 - Runtime-log check: production requests completed with expected 200/401 statuses and no application 5xx. Vercel still labels the existing Node `url.parse()` deprecation warning as an error; it is unchanged from earlier checkpoints and remains a separate maintenance item.
 - Rollback safety: this release made no database migration or destructive data write. The earlier promoted candidate remains available, and normal Vercel deployment promotion can restore a prior artifact without transforming Firestore data.
+
+## Homepage section controls and cover focal points — 2026-10-07
+
+Status: implementation and local release gate complete; production verification pending.
+
+- Writer Studio now exposes the six current public homepage sections—welcome hero, reader newsletter, bundles, library shelves, collections, and individual pieces—as one ordered list.
+- Every section can be shown or hidden independently, and arrow controls persist the exact reader-facing DOM order. Hiding a section does not delete its records, alter purchases, or revoke reader access.
+- Older homepage documents that contain the retired shelf identifiers are normalized safely to the complete current layout. No migration or production data rewrite is required.
+- Collection and bundle JPEG cover editors now support a saved horizontal and vertical focal point through drag/tap positioning, keyboard-operable range controls, and a center reset.
+- Saved focal points are validated server-side as finite percentages from 0 through 100, normalized in the durable reader-experience store, and applied consistently to Writer Studio previews and public cards.
+- A collection or bundle that falls back to a piece cover keeps the piece cover centered rather than incorrectly applying another image's focal point.
+- Homepage section input is constrained to the six supported unique identifiers with explicit visibility and finite order values.
+
+Local release gate:
+
+- Focused homepage/reader-experience suite: 20/20 passed across 5 files.
+- Full automated suite: 495/495 passed across 59 files. The existing password-reset integration harness needed a 20-second runner timeout on this Windows host; its isolated 7/7 assertions passed, and no production timeout was changed.
+- TypeScript: passed (`tsc --noEmit`).
+- Production client build: passed (Vite; existing large-chunk advisory only).
+- Production server bundle: passed (esbuild).
+- Diff integrity: `git diff --check` passed (line-ending warnings only).
+- Secret scan: no credential-shaped additions detected.
+- Production data migration: none required and none performed.

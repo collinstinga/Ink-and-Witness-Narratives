@@ -14,6 +14,7 @@ import {
   ContentBundle,
   ContentCollection,
   HomepageConfig,
+  HomepageSectionItem,
   NewsletterAudience,
   NewsletterCampaignContent,
   NewsletterCampaignStatus,
@@ -22,6 +23,11 @@ import {
   User,
   UserRecord
 } from "./src/types.js";
+import {
+  HOMEPAGE_SECTION_IDS,
+  isHomepageSectionId,
+  normalizeHomepageSections
+} from "./src/homepageSections.js";
 import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
 import { resolveHomepageCuration } from "./src/server/homepageCuration.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
@@ -3944,10 +3950,33 @@ export async function createApp() {
     return { pieceIds };
   };
 
+  const validateCoverPosition = (value: unknown) => {
+    if (value === undefined) return { coverPosition: undefined };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { error: 'Cover position must contain horizontal and vertical percentages.' };
+    }
+    const input = value as { x?: unknown; y?: unknown };
+    if (typeof input.x !== 'number' || typeof input.y !== 'number') {
+      return { error: 'Cover position percentages must be numbers between 0 and 100.' };
+    }
+    const { x, y } = input;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 100 || y < 0 || y > 100) {
+      return { error: 'Cover position percentages must be between 0 and 100.' };
+    }
+    return {
+      coverPosition: {
+        x: Math.round(x * 10) / 10,
+        y: Math.round(y * 10) / 10
+      }
+    };
+  };
+
   app.post('/api/admin/collections', requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const validation = validateExperiencePieceIds(req.body?.pieceIds, 1);
       if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const coverPosition = validateCoverPosition(req.body?.coverPosition);
+      if (coverPosition.error) return res.status(400).json({ error: coverPosition.error });
       const name = String(req.body?.name || '').trim();
       if (!name || name.length > 120) return res.status(400).json({ error: 'Collection name is required.' });
       const collection = await readerExperienceStore.saveCollection({
@@ -3956,6 +3985,7 @@ export async function createApp() {
         description: String(req.body?.description || '').slice(0, 1_500),
         pieceIds: validation.pieceIds,
         coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        coverPosition: coverPosition.coverPosition,
         order: Number(req.body?.order) || 0,
         isPublished: req.body?.isPublished === true
       });
@@ -3969,6 +3999,8 @@ export async function createApp() {
     try {
       const validation = validateExperiencePieceIds(req.body?.pieceIds, 1);
       if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const coverPosition = validateCoverPosition(req.body?.coverPosition);
+      if (coverPosition.error) return res.status(400).json({ error: coverPosition.error });
       const collection = await readerExperienceStore.saveCollection({
         id: req.params.id,
         name: String(req.body?.name || '').trim(),
@@ -3976,6 +4008,7 @@ export async function createApp() {
         description: String(req.body?.description || '').slice(0, 1_500),
         pieceIds: validation.pieceIds,
         coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        coverPosition: coverPosition.coverPosition,
         order: Number(req.body?.order) || 0,
         isPublished: req.body?.isPublished === true
       });
@@ -3998,6 +4031,8 @@ export async function createApp() {
     try {
       const validation = validateExperiencePieceIds(req.body?.pieceIds, 2);
       if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const coverPosition = validateCoverPosition(req.body?.coverPosition);
+      if (coverPosition.error) return res.status(400).json({ error: coverPosition.error });
       const name = String(req.body?.name || '').trim();
       const priceKes = Math.round(Number(req.body?.priceKes));
       if (!name || name.length > 120) return res.status(400).json({ error: 'Bundle name is required.' });
@@ -4009,6 +4044,7 @@ export async function createApp() {
         pieceIds: validation.pieceIds,
         priceKes,
         coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        coverPosition: coverPosition.coverPosition,
         isPublished: req.body?.isPublished === true
       });
       return res.status(201).json({ success: true, bundle });
@@ -4021,6 +4057,8 @@ export async function createApp() {
     try {
       const validation = validateExperiencePieceIds(req.body?.pieceIds, 2);
       if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const coverPosition = validateCoverPosition(req.body?.coverPosition);
+      if (coverPosition.error) return res.status(400).json({ error: coverPosition.error });
       const bundle = await readerExperienceStore.saveBundle({
         id: req.params.id,
         name: String(req.body?.name || '').trim(),
@@ -4029,6 +4067,7 @@ export async function createApp() {
         pieceIds: validation.pieceIds,
         priceKes: Math.round(Number(req.body?.priceKes)),
         coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
+        coverPosition: coverPosition.coverPosition,
         isPublished: req.body?.isPublished === true
       });
       return res.json({ success: true, bundle });
@@ -4775,6 +4814,27 @@ export async function createApp() {
           return res.status(400).json({ error: `${field} must be ${maximum} characters or fewer.` });
         }
         normalizedConfig[field] = value.trim();
+      }
+
+      if (Object.hasOwn(normalizedConfig, 'sections')) {
+        const sections = normalizedConfig.sections;
+        if (
+          !Array.isArray(sections)
+          || sections.length > HOMEPAGE_SECTION_IDS.length
+          || sections.some(section => (
+            !section
+            || typeof section !== 'object'
+            || Array.isArray(section)
+            || !isHomepageSectionId((section as HomepageSectionItem).id)
+            || typeof (section as HomepageSectionItem).isVisible !== 'boolean'
+            || typeof (section as HomepageSectionItem).order !== 'number'
+            || !Number.isFinite((section as HomepageSectionItem).order)
+          ))
+          || new Set(sections.map(section => (section as HomepageSectionItem).id)).size !== sections.length
+        ) {
+          return res.status(400).json({ error: 'Homepage sections must be unique, supported, and explicitly visible or hidden.' });
+        }
+        normalizedConfig.sections = normalizeHomepageSections(sections as HomepageSectionItem[]);
       }
 
       if (Object.hasOwn(normalizedConfig, 'homepageCollectionIds')) {

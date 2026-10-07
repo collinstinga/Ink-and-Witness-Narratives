@@ -149,6 +149,11 @@ export interface ReaderHomeItem {
   accessSource?: LibraryAccessSource;
 }
 
+export interface CoverPosition {
+  x: number;
+  y: number;
+}
+
 export interface ContentCollection {
   id: string;
   name: string;
@@ -156,6 +161,7 @@ export interface ContentCollection {
   description: string;
   pieceIds: string[];
   coverImage?: string;
+  coverPosition?: CoverPosition;
   order: number;
   isPublished: boolean;
   createdAt: string;
@@ -170,6 +176,7 @@ export interface ContentBundle {
   pieceIds: string[];
   priceKes: number;
   coverImage?: string;
+  coverPosition?: CoverPosition;
   isPublished: boolean;
   createdAt: string;
   updatedAt: string;

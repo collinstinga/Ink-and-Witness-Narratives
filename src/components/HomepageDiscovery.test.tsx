@@ -120,4 +120,51 @@ describe('HomepageDiscovery', () => {
     expect(model.bundles.map((item) => item.id)).toEqual(['valid']);
     expect(model.pieces.map((item) => item.id)).toEqual(['standalone']);
   });
+
+  it('honors writer section visibility and renders sections in the saved order', () => {
+    const inCollection = piece('in-collection');
+    const standalone = piece('standalone');
+    const markup = renderToStaticMarkup(
+      <HomepageDiscovery
+        config={{
+          welcomeBackground: { imageUrl: '', fit: 'cover', positionX: 50, positionY: 50, zoom: 100, overlayStrength: 25 },
+          mostSellingPieceIds: [],
+          sections: [
+            { id: 'collections', isVisible: true, order: 1 },
+            { id: 'newsletter', isVisible: true, order: 2 },
+            { id: 'hero', isVisible: false, order: 3 },
+            { id: 'pieces', isVisible: true, order: 4 },
+            { id: 'bundles', isVisible: false, order: 5 },
+            { id: 'library', isVisible: false, order: 6 },
+          ],
+        }}
+        collections={[collection('positioned', [inCollection.id], {
+          coverImage: '/collection.jpg',
+          coverPosition: { x: 12, y: 78 },
+        })]}
+        bundles={[]}
+        categories={[]}
+        allArticles={[inCollection, standalone]}
+        pieces={[standalone]}
+        unlockedTokens={{}}
+        onReadArticle={vi.fn()}
+        onUnlockArticle={vi.fn()}
+        onPurchaseBundle={vi.fn()}
+        onSelectCategory={vi.fn()}
+        onNavigate={vi.fn()}
+        heroSection={<section id="controlled-hero">Hero</section>}
+        newsletterSection={<section id="controlled-newsletter">Newsletter</section>}
+      />,
+    );
+
+    expect(markup).not.toContain('id="controlled-hero"');
+    expect(markup).toContain('id="controlled-newsletter"');
+    expect(markup).toContain('object-position:12% 78%');
+    expect(markup.indexOf('id="home-curated-collections"')).toBeLessThan(
+      markup.indexOf('id="controlled-newsletter"'),
+    );
+    expect(markup.indexOf('id="controlled-newsletter"')).toBeLessThan(
+      markup.indexOf('id="home-individual-pieces"'),
+    );
+  });
 });
