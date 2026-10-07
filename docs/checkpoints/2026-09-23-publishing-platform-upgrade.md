@@ -182,7 +182,7 @@ Production release gate:
 
 ## Homepage section controls and cover focal points — 2026-10-07
 
-Status: implementation and local release gate complete; production verification pending.
+Status: complete, deployed, and verified on the production custom domain.
 
 - Writer Studio now exposes the six current public homepage sections—welcome hero, reader newsletter, bundles, library shelves, collections, and individual pieces—as one ordered list.
 - Every section can be shown or hidden independently, and arrow controls persist the exact reader-facing DOM order. Hiding a section does not delete its records, alter purchases, or revoke reader access.
@@ -202,3 +202,15 @@ Local release gate:
 - Diff integrity: `git diff --check` passed (line-ending warnings only).
 - Secret scan: no credential-shaped additions detected.
 - Production data migration: none required and none performed.
+
+Production release gate:
+
+- Feature commit: `bb46248` (`feat: add homepage section controls`).
+- Tested production candidate and promoted deployment: `dpl_BcNBN8cFrKPy7pKvh63FDg1cDF4S` (`https://narrativesbyjake-aaf4k60ld-ink-n-witness.vercel.app`).
+- Custom domain check: `https://www.inkandwitness-narratives.co.ke` returned HTTP 200 in 0.81 seconds and served the candidate asset `index-DDBfrzim.js`.
+- Public-data check: `/api/homepage` returned two bundles, one collection, three deduplicated standalone pieces, and no non-empty paid article bodies. Its response remained `Cache-Control: no-store, max-age=0`.
+- Authorization check: unauthenticated `/api/admin/homepage` returned HTTP 401.
+- Backward-compatibility check: the production document still contains the retired section IDs, while the promoted client normalized them to the complete current six-section layout without writing or migrating that document.
+- Visual check: the custom domain rendered the announcement, hero, collapsed newsletter, bundles, library shelves, collection, and individual pieces in the safe default order. Collection imagery cropped cleanly, and no broken image or duplicate standalone card appeared.
+- Runtime-log check: checked candidate requests returned expected 200/401 statuses with no application 5xx. Vercel continues to classify the pre-existing Node `url.parse()` deprecation warning as an error; it is unchanged by this release.
+- Rollback safety: this additive release made no database migration or destructive data write. The prior production artifact remains available for normal Vercel promotion if rollback is required.
