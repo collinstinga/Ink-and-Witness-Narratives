@@ -927,6 +927,12 @@ export default function App() {
     }
   };
 
+  const handleSessionResolved = React.useCallback((user: User) => {
+    authSessionRequestIdRef.current += 1;
+    currentUserRef.current = user;
+    setCurrentUser(user);
+  }, []);
+
   const handlePurchaseBundle = (_bundle: ContentBundle, checkoutArticle: Article) => {
     if (!currentUser || currentUser.role !== 'client') {
       setPendingBundleCheckoutArticle(checkoutArticle);
@@ -1217,6 +1223,7 @@ export default function App() {
         onClose={handleCloseReader}
         author={author}
         currentUser={currentUser}
+        onSessionResolved={handleSessionResolved}
         onOpenAuth={(mode) => {
           setIsSignInOpen(true);
         }}

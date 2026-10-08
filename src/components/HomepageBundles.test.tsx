@@ -54,6 +54,8 @@ describe('HomepageBundles', () => {
     expect(markup).toContain('permanently adds every included piece');
     expect(markup).toContain('KSh 750');
     expect(markup).toContain('Buy Starter Shelf bundle for KSh 750');
+    expect(markup).toContain('View contents');
+    expect(markup).toContain('View every piece in Starter Shelf');
     expect(markup).toContain('object-position:18% 82%');
   });
 });

@@ -2517,31 +2517,58 @@ export async function createApp() {
   // Get Comments for a piece
   app.get("/api/articles/:id/comments", (req: Request, res: Response) => {
     const { id } = req.params;
-    const comments = store.getComments(id, false);
+    const comments = store.getComments(id, false).map(comment => ({
+      id: comment.id,
+      articleId: comment.articleId,
+      articleTitle: comment.articleTitle,
+      readerName: comment.readerName,
+      content: comment.content,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      status: comment.status
+    }));
+    res.setHeader('Cache-Control', 'public, max-age=15, s-maxage=30');
     res.json(comments);
   });
 
-  // Post Comment on a piece
-  app.post("/api/articles/:id/comments", publicWriteLimiter, commentWriteLimiter, publicWriteValidators.comment, (req: Request, res: Response) => {
+  // Post a comment as a signed-in reader with access to the piece. Identity and
+  // ownership are derived from the secure session, never from browser fields.
+  app.post("/api/articles/:id/comments", publicWriteLimiter, commentWriteLimiter, publicWriteValidators.comment, requireAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const { content, readerName, readerEmail, readerHash } = req.body;
+      const { content } = req.body;
       if (!isSafePublicIdentifier(id)) {
         return res.status(400).json({ error: "Invalid piece identifier." });
       }
       if (!content || !content.trim()) {
         return res.status(400).json({ error: "Comment text cannot be empty." });
       }
+      const access = await requireReaderArticleAccess(req, id);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const readerHash = `account_${crypto.createHash('sha256').update(access.user.id).digest('hex').slice(0, 40)}`;
       const recentDuplicate = store.getComments(id, true).find(comment =>
         comment.readerHash === readerHash &&
         comment.content === content.trim() &&
         Date.now() - new Date(comment.createdAt).getTime() < 5 * 60 * 1000
       );
       if (recentDuplicate) {
-        return res.json({ success: true, deduplicated: true, comment: recentDuplicate });
+        return res.json({
+          success: true,
+          deduplicated: true,
+          comment: { ...recentDuplicate, readerEmail: undefined, readerHash: undefined }
+        });
       }
-      const comment = store.addComment(id, content, readerName, readerEmail, readerHash);
-      res.status(201).json({ success: true, comment });
+      const comment = store.addComment(
+        access.article.id,
+        content,
+        access.user.name || 'Reader',
+        undefined,
+        readerHash
+      );
+      res.status(201).json({
+        success: true,
+        comment: { ...comment, readerEmail: undefined, readerHash: undefined }
+      });
     } catch (err: any) {
       res.status(400).json({ error: err.message || "Failed to post comment." });
     }
@@ -2566,16 +2593,14 @@ export async function createApp() {
   });
 
   // Delete own comment
-  app.delete("/api/comments/:commentId", publicWriteLimiter, engagementWriteLimiter, publicWriteValidators.commentDelete, (req: Request, res: Response) => {
+  app.delete("/api/comments/:commentId", publicWriteLimiter, engagementWriteLimiter, publicWriteValidators.commentDelete, requireAuth, (req: Request, res: Response) => {
     try {
       const { commentId } = req.params;
       if (!isSafePublicIdentifier(commentId, 160)) {
         return res.status(400).json({ error: "Invalid comment identifier." });
       }
-      const readerHash = req.body?.readerHash || (req.query?.readerHash as string);
-      if (!readerHash || !/^[A-Za-z0-9:_-]{1,128}$/.test(readerHash)) {
-        return res.status(400).json({ error: "A valid reader identifier is required." });
-      }
+      const user = (req as any).user as { id: string };
+      const readerHash = `account_${crypto.createHash('sha256').update(user.id).digest('hex').slice(0, 40)}`;
       const deleted = store.deleteComment(commentId, readerHash);
       if (!deleted) {
         return res.status(404).json({ error: "Comment not found." });
@@ -3029,6 +3054,41 @@ export async function createApp() {
       return res.json({ success: true, ...result });
     } catch (error: any) {
       return res.status(400).json({ error: error?.message || 'Bookmark could not be updated.' });
+    }
+  });
+
+  app.post('/api/reader/progress/:articleId/highlights', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const result = await readerExperienceStore.addHighlight({
+        userId: access.user.id,
+        articleId: access.article.id,
+        blockId: req.body?.blockId,
+        startOffset: req.body?.startOffset,
+        endOffset: req.body?.endOffset,
+        text: req.body?.text
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ success: true, ...result });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Highlight could not be saved.' });
+    }
+  });
+
+  app.delete('/api/reader/progress/:articleId/highlights/:highlightId', requireAuth, engagementWriteLimiter, async (req: Request, res: Response) => {
+    try {
+      const access = await requireReaderArticleAccess(req, req.params.articleId);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const result = await readerExperienceStore.removeHighlight({
+        userId: access.user.id,
+        articleId: access.article.id,
+        highlightId: req.params.highlightId
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ success: true, ...result });
+    } catch (error: any) {
+      return res.status(400).json({ error: error?.message || 'Highlight could not be removed.' });
     }
   });
 

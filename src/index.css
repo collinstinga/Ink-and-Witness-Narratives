@@ -28,11 +28,18 @@
 
   /* Protected in-browser reading shield */
   .protected-reader-content {
-    user-select: none !important;
-    -webkit-user-select: none !important;
-    -moz-user-select: none !important;
-    -ms-user-select: none !important;
-    -webkit-touch-callout: none !important;
+    user-select: text;
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+    -webkit-touch-callout: default;
+  }
+
+  ::highlight(ink-witness-reader-notes) {
+    color: #fef3c7;
+    background-color: rgba(245, 158, 11, 0.42);
+    text-decoration: underline;
+    text-decoration-color: rgba(251, 191, 36, 0.75);
   }
 }
 

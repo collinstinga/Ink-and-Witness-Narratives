@@ -4,7 +4,7 @@ import { Article, AuthorProfile } from '../../types.js';
 import { PhotosAndBrandingSection } from './PhotosAndBrandingSection.js';
 
 interface WriterMediaProps {
-  author: AuthorProfile;
+  author: AuthorProfile | null;
   pieces: Article[];
   onAuthorUpdated: (updated: AuthorProfile) => void;
   onPiecesUpdated?: (updated: Article[]) => void;
@@ -16,6 +16,21 @@ export const WriterMedia: React.FC<WriterMediaProps> = ({
   onAuthorUpdated,
   onPiecesUpdated
 }) => {
+  if (!author) {
+    return (
+      <div
+        id="writer-media-loading"
+        className="rounded-3xl border border-sky-900/60 bg-slate-950/70 px-6 py-12 text-center"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+        <p className="font-mono text-sm text-sky-200">Loading Media &amp; Branding safely…</p>
+        <p className="mt-2 text-xs text-slate-500">Your saved assets remain unchanged while the author profile loads.</p>
+      </div>
+    );
+  }
+
   return (
     <div id="writer-media-view" className="space-y-8">
       {/* Page Header */}

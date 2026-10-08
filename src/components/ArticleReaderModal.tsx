@@ -44,12 +44,14 @@ import {
   Shield,
   Star,
   Music2,
-  Bell
+  Bell,
+  Highlighter
 } from 'lucide-react';
 import {
   Article,
   AuthorProfile,
   PieceSocialProof,
+  PieceComment,
   ReaderArticleProgress,
   ReaderReactionType,
   User
@@ -60,6 +62,34 @@ import { SafeMarkdown } from './common/SafeMarkdown.js';
 import { ArticleCard } from './ArticleCard.js';
 
 const EMPTY_ARTICLES: Article[] = [];
+
+const isReaderAuthError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /authenticat|sign in|reader account/i.test(message);
+};
+
+function textBoundaryAt(root: HTMLElement, requestedOffset: number): { node: Text; offset: number } | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let remaining = Math.max(0, requestedOffset);
+  let current = walker.nextNode() as Text | null;
+  while (current) {
+    const length = current.data.length;
+    if (remaining <= length) return { node: current, offset: remaining };
+    remaining -= length;
+    current = walker.nextNode() as Text | null;
+  }
+  return null;
+}
+
+function rangeForSavedSelection(root: HTMLElement, startOffset: number, endOffset: number): Range | null {
+  const start = textBoundaryAt(root, startOffset);
+  const end = textBoundaryAt(root, endOffset);
+  if (!start || !end) return null;
+  const range = document.createRange();
+  range.setStart(start.node, start.offset);
+  range.setEnd(end.node, end.offset);
+  return range;
+}
 
 const REACTION_LABELS: Array<{ type: ReaderReactionType; label: string }> = [
   { type: 'this_hurt', label: 'This hurt' },
@@ -77,6 +107,7 @@ interface ArticleReaderModalProps {
   onUnlockRequest: (article: Article) => void;
   author?: AuthorProfile | null;
   currentUser?: User | null;
+  onSessionResolved?: (user: User) => void;
   onOpenAuth?: (mode?: 'signin' | 'register') => void;
   onSelectTag?: (tag: string) => void;
   onTipAuthor?: (article: Article) => void;
@@ -158,6 +189,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   onUnlockRequest,
   author,
   currentUser,
+  onSessionResolved,
   onOpenAuth,
   onSelectTag,
   onTipAuthor,
@@ -195,6 +227,17 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const [reviewText, setReviewText] = useState('');
   const [reviewSaving, setReviewSaving] = useState(false);
   const [reviewNotice, setReviewNotice] = useState('');
+  const [pieceComments, setPieceComments] = useState<PieceComment[]>([]);
+  const [commentText, setCommentText] = useState('');
+  const [commentSaving, setCommentSaving] = useState(false);
+  const [commentNotice, setCommentNotice] = useState('');
+  const [selectionDraft, setSelectionDraft] = useState<{
+    blockId: string;
+    startOffset: number;
+    endOffset: number;
+    text: string;
+  } | null>(null);
+  const [highlightSaving, setHighlightSaving] = useState(false);
   const [followSaving, setFollowSaving] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const progressSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -462,6 +505,29 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   }, [isOpen, article?.id, currentUser?.id]);
 
   useEffect(() => {
+    if (!isOpen || currentUser || !onSessionResolved) return;
+    let active = true;
+    void api.authGetMe().then(result => {
+      if (active && result.authenticated && result.user?.role === 'client') {
+        onSessionResolved(result.user);
+      }
+    });
+    return () => { active = false; };
+  }, [isOpen, currentUser?.id, onSessionResolved]);
+
+  useEffect(() => {
+    if (!isOpen || !article?.id) {
+      setPieceComments([]);
+      return;
+    }
+    let active = true;
+    void api.getPieceComments(article.id)
+      .then(comments => { if (active) setPieceComments(comments); })
+      .catch(() => { if (active) setPieceComments([]); });
+    return () => { active = false; };
+  }, [isOpen, article?.id]);
+
+  useEffect(() => {
     if (!isOpen || !article?.id || !effectiveUnlocked || !currentUser || currentUser.role !== 'client') {
       setReadingProgress(null);
       latestProgressRef.current = null;
@@ -491,6 +557,22 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       .catch(() => setReadingProgress(null));
     return () => { active = false; };
   }, [isOpen, article?.id, effectiveUnlocked, currentUser?.id, currentUser?.role]);
+
+  useEffect(() => {
+    const registry = (globalThis.CSS as any)?.highlights;
+    const HighlightConstructor = (globalThis as any).Highlight;
+    const registryKey = 'ink-witness-reader-notes';
+    if (!isOpen || !effectiveUnlocked || !registry || !HighlightConstructor) return;
+    const ranges = (readingProgress?.highlights || []).flatMap(highlight => {
+      const block = document.getElementById(highlight.blockId);
+      if (!(block instanceof HTMLElement)) return [];
+      const range = rangeForSavedSelection(block, highlight.startOffset, highlight.endOffset);
+      return range ? [range] : [];
+    });
+    if (ranges.length > 0) registry.set(registryKey, new HighlightConstructor(...ranges));
+    else registry.delete(registryKey);
+    return () => registry.delete(registryKey);
+  }, [isOpen, effectiveUnlocked, article?.id, readingProgress?.highlights]);
 
   const persistLatestProgress = useCallback(() => {
     if (!article || !currentUser || currentUser.role !== 'client' || !latestProgressRef.current) return;
@@ -564,26 +646,92 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   }, [isOpen, persistLatestProgress]);
 
   const handleBookmark = async () => {
-    if (!article || !currentUser) {
-      onOpenAuth?.('signin');
-      return;
-    }
+    if (!article) return;
     try {
       const block = document.getElementById(activeBlockId);
-      const label = block?.textContent?.trim().slice(0, 140) || article.title;
+      const label = selectionDraft?.blockId === activeBlockId
+        ? selectionDraft.text.slice(0, 140)
+        : block?.textContent?.trim().slice(0, 140) || article.title;
       const result = await api.toggleReaderBookmark(article.id, activeBlockId, label);
       setReadingProgress(result.progress);
       showToast(result.bookmarked ? 'Passage bookmarked' : 'Bookmark removed');
     } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
       showToast(error?.message || 'Bookmark could not be updated.');
     }
   };
 
-  const handleReaction = async (reaction: ReaderReactionType) => {
-    if (!article || !currentUser) {
-      onOpenAuth?.('signin');
-      return;
+  const captureReaderSelection = useCallback(() => {
+    window.setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+        setSelectionDraft(null);
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      const startElement = range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer as Element
+        : range.startContainer.parentElement;
+      const endElement = range.endContainer.nodeType === Node.ELEMENT_NODE
+        ? range.endContainer as Element
+        : range.endContainer.parentElement;
+      const startBlock = startElement?.closest<HTMLElement>('[id^="reader-para-"]');
+      const endBlock = endElement?.closest<HTMLElement>('[id^="reader-para-"]');
+      if (!startBlock || startBlock !== endBlock || !startBlock.contains(range.commonAncestorContainer)) {
+        setSelectionDraft(null);
+        return;
+      }
+      const selectedText = range.toString().replace(/\s+/g, ' ').trim();
+      if (!selectedText) {
+        setSelectionDraft(null);
+        return;
+      }
+      const prefix = document.createRange();
+      prefix.selectNodeContents(startBlock);
+      prefix.setEnd(range.startContainer, range.startOffset);
+      const startOffset = prefix.toString().length;
+      const endOffset = startOffset + range.toString().length;
+      setActiveBlockId(startBlock.id);
+      setSelectionDraft({
+        blockId: startBlock.id,
+        startOffset,
+        endOffset,
+        text: selectedText.slice(0, 500)
+      });
+    }, 0);
+  }, []);
+
+  const handleSaveHighlight = async () => {
+    if (!article || !selectionDraft) return;
+    setHighlightSaving(true);
+    try {
+      const result = await api.addReaderHighlight(article.id, selectionDraft);
+      setReadingProgress(result.progress);
+      setSelectionDraft(null);
+      window.getSelection()?.removeAllRanges();
+      showToast(result.created ? 'Highlight saved to your reader account' : 'That passage is already highlighted');
+    } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
+      showToast(error?.message || 'Highlight could not be saved.');
+    } finally {
+      setHighlightSaving(false);
     }
+  };
+
+  const handleRemoveHighlight = async (highlightId: string) => {
+    if (!article) return;
+    try {
+      const result = await api.removeReaderHighlight(article.id, highlightId);
+      setReadingProgress(result.progress);
+      showToast(result.removed ? 'Highlight removed' : 'Highlight was already removed');
+    } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
+      showToast(error?.message || 'Highlight could not be removed.');
+    }
+  };
+
+  const handleReaction = async (reaction: ReaderReactionType) => {
+    if (!article) return;
     setReactionSaving(true);
     try {
       const result = await api.setPieceReaction(article.id, reaction);
@@ -593,6 +741,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
         currentReaction: result.currentReaction
       } : previous);
     } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
       showToast(error?.message || 'Reaction could not be saved.');
     } finally {
       setReactionSaving(false);
@@ -601,7 +750,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
   const handleReviewSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!article || !currentUser) return onOpenAuth?.('signin');
+    if (!article) return;
     setReviewSaving(true);
     setReviewNotice('');
     try {
@@ -610,6 +759,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       setReviewNotice(result.message);
       await refreshSocialProof(article.id);
     } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
       setReviewNotice(error?.message || 'Review could not be saved.');
     } finally {
       setReviewSaving(false);
@@ -618,15 +768,37 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
   const handleFollowWork = async () => {
     if (!article) return;
-    if (!currentUser) return onOpenAuth?.('signin');
     setFollowSaving(true);
     try {
       const result = await api.followNewsletterWork(article.id);
       showToast(result.message);
     } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
       showToast(error?.message || 'Notification preference could not be saved.');
     } finally {
       setFollowSaving(false);
+    }
+  };
+
+  const handleCommentSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!article || commentText.trim().length < 2) return;
+    setCommentSaving(true);
+    setCommentNotice('');
+    try {
+      const comment = await api.submitPieceComment(
+        article.id,
+        commentText.trim(),
+        currentUser?.name || 'Reader'
+      );
+      setPieceComments(previous => [comment, ...previous.filter(item => item.id !== comment.id)]);
+      setCommentText('');
+      setCommentNotice('Comment posted.');
+    } catch (error: any) {
+      if (isReaderAuthError(error)) onOpenAuth?.('signin');
+      setCommentNotice(error?.message || 'Comment could not be posted.');
+    } finally {
+      setCommentSaving(false);
     }
   };
 
@@ -1356,6 +1528,53 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                   ))}
                 </div>
               )}
+              {(readingProgress.highlights || []).length > 0 && (
+                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-0.5" aria-label="Saved highlights">
+                  {(readingProgress.highlights || []).map(highlight => (
+                    <span key={highlight.id} className="inline-flex max-w-[16rem] shrink-0 items-center rounded-full border border-amber-700/60 bg-amber-950/45 text-[9px] text-amber-100">
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById(highlight.blockId)?.scrollIntoView({ block: 'center', behavior: 'smooth' })}
+                        className="max-w-[12rem] truncate px-2 py-1"
+                        title={highlight.text}
+                      >
+                        <Highlighter className="mr-1 inline h-2.5 w-2.5" />{highlight.text}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveHighlight(highlight.id)}
+                        className="border-l border-amber-800/60 px-1.5 py-1 text-amber-400 hover:text-rose-300"
+                        aria-label={`Remove highlight ${highlight.text}`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {effectiveUnlocked && selectionDraft && (
+            <div className="sticky top-14 z-20 -mx-2 flex flex-col gap-2 rounded-xl border border-amber-700/70 bg-slate-950/97 px-3 py-2 shadow-xl sm:flex-row sm:items-center sm:justify-between" role="status">
+              <p className="min-w-0 truncate text-xs text-amber-100">“{selectionDraft.text}”</p>
+              <div className="flex shrink-0 gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleSaveHighlight()}
+                  disabled={highlightSaving}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-[10px] font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-60"
+                >
+                  <Highlighter className="h-3.5 w-3.5" />{highlightSaving ? 'Saving…' : 'Highlight'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleBookmark()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-[10px] font-semibold text-slate-200 hover:border-sky-600"
+                >
+                  <Bookmark className="h-3.5 w-3.5" />Bookmark passage
+                </button>
+              </div>
             </div>
           )}
           
@@ -1478,7 +1697,14 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
             <div className="space-y-6">
               {effectiveUnlocked && article.content ? (
                 <div 
-                  className="protected-reader-content select-none space-y-6 relative watermark-pattern p-2 sm:p-4 rounded-2xl transition-all"
+                  className="protected-reader-content select-text space-y-6 relative watermark-pattern p-2 sm:p-4 rounded-2xl transition-all"
+                  onMouseUp={captureReaderSelection}
+                  onTouchEnd={captureReaderSelection}
+                  onPointerUp={(event) => {
+                    const element = event.target instanceof globalThis.Element ? event.target : null;
+                    const block = element?.closest('[id^="reader-para-"]') as HTMLElement | null;
+                    if (block) setActiveBlockId(block.id);
+                  }}
                   onCopy={(e) => {
                     e.preventDefault();
                     showToast("Protected Monograph • Online reader edition");
@@ -2161,6 +2387,62 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                 </div>
               </form>
             )}
+
+            <div className="space-y-4 border-t border-slate-800 pt-5" aria-labelledby="reader-comments-title">
+              <div>
+                <h5 id="reader-comments-title" className="text-sm font-semibold text-white">Reader comments</h5>
+                <p className="mt-1 text-[11px] text-slate-500">Comments show a reader name only; account emails and identities stay private.</p>
+              </div>
+
+              {pieceComments.length > 0 ? (
+                <div className="space-y-2">
+                  {pieceComments.slice(0, 20).map(comment => (
+                    <article key={comment.id} className="rounded-xl border border-slate-800 bg-slate-950/55 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold text-sky-200">{comment.readerName || 'Reader'}</p>
+                        <time className="text-[9px] font-mono text-slate-600" dateTime={comment.createdAt}>
+                          {new Date(comment.createdAt).toLocaleDateString()}
+                        </time>
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{comment.content}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-xl border border-dashed border-slate-800 px-3 py-4 text-center text-xs text-slate-500">No reader comments yet.</p>
+              )}
+
+              {effectiveUnlocked && (
+                <form onSubmit={handleCommentSubmit} className="space-y-2">
+                  <label htmlFor="reader-comment-input" className="text-xs font-semibold text-slate-300">Add a comment</label>
+                  <textarea
+                    id="reader-comment-input"
+                    value={commentText}
+                    onChange={event => setCommentText(event.target.value)}
+                    minLength={2}
+                    maxLength={3000}
+                    rows={3}
+                    placeholder="Share a thoughtful response to this piece…"
+                    className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500"
+                  />
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] text-slate-500" role="status">
+                      {commentNotice || (currentUser?.role === 'client'
+                        ? 'Posting as your signed-in reader account.'
+                        : 'A reader session is required; submitting will securely re-check your sign-in.')}
+                    </p>
+                    <button
+                      type="submit"
+                      disabled={commentSaving || commentText.trim().length < 2}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-4 py-2 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50"
+                    >
+                      <MessageCircle className="h-4 w-4" />
+                      {commentSaving ? 'Posting…' : 'Post comment'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
 
             {socialLoading && <p className="text-xs text-slate-500">Loading reader responses…</p>}
           </section>

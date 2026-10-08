@@ -6,6 +6,7 @@ import {
   PieceReview,
   ReaderArticleProgress,
   ReaderBookmark,
+  ReaderHighlight,
   ReaderReactionType
 } from '../types.js';
 import { getDb, sanitizeForFirestore } from './db.js';
@@ -19,6 +20,7 @@ const BUNDLES_COLLECTION = 'content_bundles';
 const MAX_PROGRESS_ITEMS = 100;
 const MAX_RECENT_ITEMS = 40;
 const MAX_BOOKMARKS = 30;
+const MAX_HIGHLIGHTS = 60;
 
 export const READER_REACTIONS: ReaderReactionType[] = [
   'this_hurt',
@@ -158,6 +160,44 @@ function normalizeBookmarks(value: unknown): ReaderBookmark[] {
   return result;
 }
 
+function normalizeHighlights(value: unknown): ReaderHighlight[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: ReaderHighlight[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const input = candidate as Partial<ReaderHighlight>;
+    const blockId = cleanText(input.blockId, 160);
+    const startOffset = Math.floor(clampNumber(input.startOffset, 0, 100_000));
+    const endOffset = Math.floor(clampNumber(input.endOffset, 0, 100_000));
+    const text = cleanText(input.text, 500);
+    const key = `${blockId}:${startOffset}:${endOffset}`;
+    if (
+      !/^reader-para-\d+$/.test(blockId)
+      || endOffset <= startOffset
+      || endOffset - startOffset > 2_000
+      || !text
+      || seen.has(key)
+    ) continue;
+    seen.add(key);
+    result.push({
+      id: typeof input.id === 'string' && /^[A-Za-z0-9_-]{8,80}$/.test(input.id)
+        ? input.id
+        : `highlight_${hashId(key, String(input.createdAt || '')).slice(0, 20)}`,
+      blockId,
+      startOffset,
+      endOffset,
+      text,
+      color: 'amber',
+      createdAt: typeof input.createdAt === 'string' && Number.isFinite(Date.parse(input.createdAt))
+        ? input.createdAt
+        : new Date().toISOString()
+    });
+    if (result.length >= MAX_HIGHLIGHTS) break;
+  }
+  return result;
+}
+
 function capProgress(progress: Record<string, ReaderArticleProgress>): Record<string, ReaderArticleProgress> {
   return Object.fromEntries(Object.entries(progress)
     .sort(([, left], [, right]) => Date.parse(right.lastReadAt) - Date.parse(left.lastReadAt))
@@ -253,7 +293,8 @@ export const readerExperienceStore = {
         ...(activeChapterId ? { activeChapterId } : {}),
         ...(activeChapterTitle ? { activeChapterTitle } : {}),
         ...(chapterPercent !== undefined ? { chapterPercent } : {}),
-        bookmarks: previous?.bookmarks || [],
+        bookmarks: normalizeBookmarks(previous?.bookmarks),
+        highlights: normalizeHighlights(previous?.highlights),
         startedAt: previous?.startedAt || now,
         lastReadAt: now,
         ...(previous?.completedAt || becameComplete ? { completedAt: previous?.completedAt || now } : {})
@@ -322,6 +363,96 @@ export const readerExperienceStore = {
       profile.updatedAt = now;
       transaction.set(profileRef, sanitizeForFirestore(profile), { merge: false });
       return { bookmarked: !existing, progress };
+    });
+  },
+
+  async addHighlight(input: {
+    userId: string;
+    articleId: string;
+    blockId: string;
+    startOffset: number;
+    endOffset: number;
+    text: string;
+  }): Promise<{ created: boolean; progress: ReaderArticleProgress }> {
+    const userId = safeId(input.userId);
+    const articleId = safeId(input.articleId);
+    const blockId = cleanText(input.blockId, 160);
+    const startOffset = Math.floor(clampNumber(input.startOffset, 0, 100_000));
+    const endOffset = Math.floor(clampNumber(input.endOffset, 0, 100_000));
+    const text = cleanText(input.text, 500);
+    if (!/^reader-para-\d+$/.test(blockId)) throw new Error('Invalid highlight position.');
+    if (!text || endOffset <= startOffset || endOffset - startOffset > 2_000) {
+      throw new Error('Select one valid passage to highlight.');
+    }
+    const profileRef = getDb().collection(PROFILE_COLLECTION).doc(hashId(userId));
+    return getDb().runTransaction(async transaction => {
+      const snapshot = await transaction.get(profileRef);
+      const profile = normalizeProfile(userId, snapshot.exists ? snapshot.data() : null);
+      const now = new Date().toISOString();
+      const previous = profile.progress[articleId] || {
+        articleId,
+        percent: 0,
+        bookmarks: [],
+        highlights: [],
+        startedAt: now,
+        lastReadAt: now
+      };
+      const highlights = normalizeHighlights(previous.highlights);
+      const existing = highlights.find(item =>
+        item.blockId === blockId
+        && item.startOffset === startOffset
+        && item.endOffset === endOffset
+      );
+      if (existing) return { created: false, progress: { ...previous, highlights } };
+      const nextHighlights = [{
+        id: `highlight_${crypto.randomBytes(12).toString('base64url')}`,
+        blockId,
+        startOffset,
+        endOffset,
+        text,
+        color: 'amber' as const,
+        createdAt: now
+      }, ...highlights].slice(0, MAX_HIGHLIGHTS);
+      const progress = { ...previous, highlights: nextHighlights, lastReadAt: now };
+      profile.progress[articleId] = progress;
+      profile.progress = capProgress(profile.progress);
+      profile.updatedAt = now;
+      transaction.set(profileRef, sanitizeForFirestore(profile), { merge: false });
+      return { created: true, progress };
+    });
+  },
+
+  async removeHighlight(input: {
+    userId: string;
+    articleId: string;
+    highlightId: string;
+  }): Promise<{ removed: boolean; progress: ReaderArticleProgress }> {
+    const userId = safeId(input.userId);
+    const articleId = safeId(input.articleId);
+    const highlightId = cleanText(input.highlightId, 100);
+    if (!/^highlight_[A-Za-z0-9_-]{8,80}$/.test(highlightId)) throw new Error('Invalid highlight.');
+    const profileRef = getDb().collection(PROFILE_COLLECTION).doc(hashId(userId));
+    return getDb().runTransaction(async transaction => {
+      const snapshot = await transaction.get(profileRef);
+      const profile = normalizeProfile(userId, snapshot.exists ? snapshot.data() : null);
+      const now = new Date().toISOString();
+      const previous = profile.progress[articleId] || {
+        articleId,
+        percent: 0,
+        bookmarks: [],
+        highlights: [],
+        startedAt: now,
+        lastReadAt: now
+      };
+      const highlights = normalizeHighlights(previous.highlights);
+      const nextHighlights = highlights.filter(item => item.id !== highlightId);
+      const removed = nextHighlights.length !== highlights.length;
+      const progress = { ...previous, highlights: nextHighlights, lastReadAt: now };
+      profile.progress[articleId] = progress;
+      profile.progress = capProgress(profile.progress);
+      profile.updatedAt = now;
+      transaction.set(profileRef, sanitizeForFirestore(profile), { merge: false });
+      return { removed, progress };
     });
   },
 

@@ -470,7 +470,12 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
     newsletter: newsletterSection || null,
     bundles: model.bundles.length > 0 ? (
       <DiscoverySectionFrame>
-        <HomepageBundles bundles={model.bundles} config={config} onPurchaseBundle={onPurchaseBundle} />
+        <HomepageBundles
+          bundles={model.bundles}
+          config={config}
+          onPurchaseBundle={onPurchaseBundle}
+          onPreviewPiece={onReadArticle}
+        />
       </DiscoverySectionFrame>
     ) : null,
     library: hasLibrarySections ? (

@@ -127,6 +127,16 @@ export interface ReaderBookmark {
   createdAt: string;
 }
 
+export interface ReaderHighlight {
+  id: string;
+  blockId: string;
+  startOffset: number;
+  endOffset: number;
+  text: string;
+  color: 'amber';
+  createdAt: string;
+}
+
 export interface ReaderArticleProgress {
   articleId: string;
   percent: number;
@@ -137,6 +147,8 @@ export interface ReaderArticleProgress {
   activeChapterTitle?: string;
   chapterPercent?: number;
   bookmarks: ReaderBookmark[];
+  /** Saved text selections. Optional for profiles created before highlights existed. */
+  highlights?: ReaderHighlight[];
   startedAt: string;
   lastReadAt: string;
   completedAt?: string;
@@ -229,7 +241,8 @@ export interface PieceComment {
   articleTitle?: string;
   readerName: string;
   readerEmail?: string;
-  readerHash: string;
+  /** Private ownership key. Public comment responses omit this field. */
+  readerHash?: string;
   content: string;
   createdAt: string;
   updatedAt?: string;

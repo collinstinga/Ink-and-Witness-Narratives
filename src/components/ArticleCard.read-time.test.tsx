@@ -25,11 +25,11 @@ const article: Article = {
   tags: []
 };
 
-function renderCard(piece: Article): string {
+function renderCard(piece: Article, isUnlocked = true): string {
   return renderToStaticMarkup(
     <ArticleCard
       article={piece}
-      isUnlocked
+      isUnlocked={isUnlocked}
       onRead={vi.fn()}
       onUnlock={vi.fn()}
     />
@@ -45,5 +45,12 @@ describe('piece reading-time visibility', () => {
     const html = renderCard({ ...article, showReadTime: false });
     expect(html).not.toContain('min read');
     expect(html).toContain('2026-09-17');
+  });
+
+  it('always offers a safe preview before payment for a locked piece', () => {
+    const html = renderCard({ ...article, isPaid: true, priceKes: 450 }, false);
+    expect(html).toContain('id="btn-preview-read-time-piece"');
+    expect(html).toContain('Preview');
+    expect(html).toContain('Pay — KSh 450');
   });
 });

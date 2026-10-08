@@ -5,7 +5,8 @@ import {
   Calendar, 
   Smartphone, 
   CheckCircle2, 
-  FileText
+  FileText,
+  Eye
 } from 'lucide-react';
 import { Article } from '../types.js';
 
@@ -161,14 +162,27 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
               <span>Read</span>
             </button>
           ) : (
-            <button
-              id={`btn-pay-to-read-${article.id}`}
-              onClick={() => onUnlock ? onUnlock(article) : onRead(article)}
-              className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold tracking-wide transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
-            >
-              <Smartphone className="w-4 h-4 text-emerald-200" />
-              <span>Pay to Read — KSh {article.priceKes}</span>
-            </button>
+            <div className="grid w-full grid-cols-[auto_1fr] gap-2">
+              <button
+                id={`btn-preview-${article.id}`}
+                type="button"
+                onClick={() => onRead(article)}
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-sky-800/80 bg-sky-950/40 px-3 py-2.5 text-xs font-semibold text-sky-200 transition hover:border-sky-600 hover:bg-sky-950/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                aria-label={`Preview ${article.title}`}
+              >
+                <Eye className="h-4 w-4" />
+                <span>Preview</span>
+              </button>
+              <button
+                id={`btn-pay-to-read-${article.id}`}
+                type="button"
+                onClick={() => onUnlock ? onUnlock(article) : onRead(article)}
+                className="inline-flex min-w-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-3 py-2.5 text-xs font-bold tracking-wide text-white shadow-sm transition hover:bg-emerald-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+              >
+                <Smartphone className="h-4 w-4 shrink-0 text-emerald-200" />
+                <span className="truncate">Pay — KSh {article.priceKes}</span>
+              </button>
+            </div>
           )}
         </div>
 

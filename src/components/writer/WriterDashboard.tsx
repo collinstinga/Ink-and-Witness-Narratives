@@ -949,9 +949,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
               author={author}
               pieces={pieces}
               onAuthorUpdated={(updated) => setAuthor(updated)}
-              onPieceUpdated={(updated) => {
-                setPieces(prev => prev.map(p => p.id === updated.id ? updated : p));
-              }}
+              onPiecesUpdated={(updated) => setPieces(updated)}
             />
           )}
 

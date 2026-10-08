@@ -933,6 +933,39 @@ export const api = {
     );
   },
 
+  async addReaderHighlight(articleId: string, highlight: {
+    blockId: string;
+    startOffset: number;
+    endOffset: number;
+    text: string;
+  }): Promise<{
+    success: true;
+    created: boolean;
+    progress: ReaderArticleProgress;
+  }> {
+    return safeFetchJson(
+      `/api/reader/progress/${encodeURIComponent(articleId)}/highlights`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(highlight)
+      },
+      'Highlight could not be saved.'
+    );
+  },
+
+  async removeReaderHighlight(articleId: string, highlightId: string): Promise<{
+    success: true;
+    removed: boolean;
+    progress: ReaderArticleProgress;
+  }> {
+    return safeFetchJson(
+      `/api/reader/progress/${encodeURIComponent(articleId)}/highlights/${encodeURIComponent(highlightId)}`,
+      { method: 'DELETE' },
+      'Highlight could not be removed.'
+    );
+  },
+
   async getPieceSocialProof(articleId: string): Promise<PieceSocialProof> {
     return safeFetchJson(
       `/api/pieces/${encodeURIComponent(articleId)}/social-proof`,
@@ -2004,7 +2037,7 @@ export const api = {
 
   // Reader Engagement: Comments
   async getPieceComments(articleId: string): Promise<PieceComment[]> {
-    const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`);
+    const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`, { credentials: 'include' });
     if (!res.ok) throw new Error('Failed to get comments');
     return res.json();
   },
@@ -2014,6 +2047,7 @@ export const api = {
     const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ content, readerName, readerEmail, readerHash })
     });
     if (!res.ok) {
@@ -2039,6 +2073,7 @@ export const api = {
     const res = await fetch(`/api/comments/${encodeURIComponent(commentId)}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ readerHash })
     });
     if (!res.ok) {

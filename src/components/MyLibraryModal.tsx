@@ -255,6 +255,23 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
                     <div key={bundle.id} className="rounded-2xl border border-emerald-800/50 bg-emerald-950/20 p-4">
                       <p className="font-display text-sm font-bold text-white">{bundle.name}</p>
                       <p className="mt-1 text-xs text-slate-400">{bundle.pieces.length} pieces • KSh {bundle.priceKes.toLocaleString()}</p>
+                      <details className="mt-3 rounded-xl border border-slate-800 bg-slate-950/50 p-2">
+                        <summary className="cursor-pointer text-xs font-semibold text-sky-300">View pieces and previews</summary>
+                        <div className="mt-2 space-y-2">
+                          {bundle.pieces.map(piece => (
+                            <div key={piece.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 px-2 py-2">
+                              <span className="min-w-0 truncate text-xs text-slate-300">{piece.title}</span>
+                              <button
+                                type="button"
+                                onClick={() => onReadArticle(piece)}
+                                className="shrink-0 rounded-lg border border-sky-800 px-2 py-1 text-[10px] font-semibold text-sky-200 hover:border-sky-600"
+                              >
+                                Preview
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
                       <button type="button" onClick={() => onPurchaseBundle?.(bundle, checkoutArticle)} className="mt-3 w-full rounded-xl bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-500">
                         Unlock Complete Bundle
                       </button>

@@ -222,6 +222,67 @@ describe('reader experience persistence', () => {
     })).rejects.toThrow('Invalid reading position');
   });
 
+  it('persists bounded, piece-specific highlights and removes them by account-owned id', async () => {
+    await readerExperienceStore.saveProgress({
+      userId: 'reader-1',
+      articleId: 'piece-1',
+      percent: 32,
+      blockId: 'reader-para-7'
+    });
+
+    const saved = await readerExperienceStore.addHighlight({
+      userId: 'reader-1',
+      articleId: 'piece-1',
+      blockId: 'reader-para-7',
+      startOffset: 4,
+      endOffset: 21,
+      text: 'a line worth saving'
+    });
+    expect(saved).toMatchObject({
+      created: true,
+      progress: {
+        percent: 32,
+        highlights: [{
+          blockId: 'reader-para-7',
+          startOffset: 4,
+          endOffset: 21,
+          text: 'a line worth saving',
+          color: 'amber'
+        }]
+      }
+    });
+
+    const duplicate = await readerExperienceStore.addHighlight({
+      userId: 'reader-1',
+      articleId: 'piece-1',
+      blockId: 'reader-para-7',
+      startOffset: 4,
+      endOffset: 21,
+      text: 'a line worth saving'
+    });
+    expect(duplicate.created).toBe(false);
+    expect(duplicate.progress.highlights).toHaveLength(1);
+
+    const highlightId = saved.progress.highlights?.[0]?.id;
+    expect(highlightId).toBeTruthy();
+    const removed = await readerExperienceStore.removeHighlight({
+      userId: 'reader-1',
+      articleId: 'piece-1',
+      highlightId: highlightId!
+    });
+    expect(removed.removed).toBe(true);
+    expect(removed.progress.highlights).toEqual([]);
+
+    await expect(readerExperienceStore.addHighlight({
+      userId: 'reader-1',
+      articleId: 'piece-1',
+      blockId: 'outside-reader',
+      startOffset: 0,
+      endOffset: 2,
+      text: 'no'
+    })).rejects.toThrow('Invalid highlight position');
+  });
+
   it('keeps reader identities private while reactions remain idempotent per reader and piece', async () => {
     await readerExperienceStore.setReaction('reader-1', 'piece-1', 'beautiful');
     await readerExperienceStore.setReaction('reader-2', 'piece-1', 'beautiful');
