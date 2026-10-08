@@ -1820,6 +1820,45 @@ function generateSeedEvents(): InteractionEvent[] {
   return events;
 }
 
+const LEGACY_X_HANDLE = '@bigboy_jake';
+const LEGACY_X_URL = 'https://twitter.com/bigboy_jake';
+const CURRENT_X_HANDLE = '@bigboyjake_';
+const CURRENT_X_URL = 'https://x.com/bigboyjake_';
+
+export function hasLegacyXIdentity(profile: Partial<AuthorProfile> | null | undefined): boolean {
+  return profile?.twitter === LEGACY_X_HANDLE && profile?.twitterUrl === LEGACY_X_URL;
+}
+
+async function migrateLegacyXIdentity(): Promise<Partial<AuthorProfile> | null> {
+  const db = getDb();
+  const canonicalRef = db.collection('site_configs').doc('author');
+  const legacyRef = db.collection('site_configs').doc('author_profile');
+  const publicMetadataRef = db.collection('site_configs').doc('public_metadata');
+
+  return db.runTransaction(async transaction => {
+    const canonicalSnapshot = await transaction.get(canonicalRef);
+    const legacySnapshot = await transaction.get(legacyRef);
+    const remote = canonicalSnapshot.exists
+      ? canonicalSnapshot.data() as Partial<AuthorProfile>
+      : legacySnapshot.exists
+        ? legacySnapshot.data() as Partial<AuthorProfile>
+        : null;
+
+    // A transaction-fresh recheck prevents this one-time correction from
+    // overwriting a writer edit that raced the server cold start.
+    if (!hasLegacyXIdentity(remote)) return remote;
+
+    const patch = { twitter: CURRENT_X_HANDLE, twitterUrl: CURRENT_X_URL };
+    transaction.set(canonicalRef, patch, { merge: true });
+    transaction.set(legacyRef, patch, { merge: true });
+    transaction.set(publicMetadataRef, {
+      version: crypto.randomUUID(),
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    return { ...remote, ...patch };
+  });
+}
+
 export const store = {
   async init() {
     ensureDataDir();
@@ -2069,6 +2108,20 @@ export const store = {
       }
     } catch {
       cachedAuthor = { ...JAKE_PROFILE };
+    }
+
+    if (hasLegacyXIdentity(cachedAuthor)) {
+      try {
+        const transactionFreshAuthor = await migrateLegacyXIdentity();
+        if (transactionFreshAuthor) {
+          cachedAuthor = { ...JAKE_PROFILE, ...cachedAuthor, ...transactionFreshAuthor };
+          writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
+        }
+      } catch {
+        // The profile remains usable with its last known value. A later cold
+        // start retries this narrow, idempotent correction.
+        console.warn('[Author Profile] Legacy X identity migration will be retried.');
+      }
     }
 
     // 4b. Restore assets only on writable, long-lived local development hosts.
