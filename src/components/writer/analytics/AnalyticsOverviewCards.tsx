@@ -107,21 +107,23 @@ export const AnalyticsOverviewCards: React.FC<AnalyticsOverviewCardsProps> = ({
         </div>
       </div>
 
-      {/* 3. UNIQUE READERS */}
+      {/* 3. WEBSITE TRAFFIC */}
       <div className="p-4 rounded-2xl bg-gradient-to-br from-[#0e1726] to-[#070b13] border border-slate-800 shadow-sm relative overflow-hidden flex flex-col justify-between group hover:border-slate-700 transition-colors">
         <div className="space-y-2">
           <div className="flex items-center justify-between text-xs font-mono text-slate-400">
-            <span className="uppercase tracking-wider font-semibold">Unique Readers</span>
+            <span className="uppercase tracking-wider font-semibold">Website Visits</span>
             <Users className="w-4 h-4 text-indigo-400" />
           </div>
           
           <div className="text-2xl font-display font-bold text-white tracking-tight">
-            {readers.uniqueReadersCount.toLocaleString()}
+            {(data.traffic?.siteVisits || 0).toLocaleString()}
           </div>
         </div>
 
-        <div className="pt-3 mt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] font-mono text-slate-400">
-          <span>{readers.totalArticleViews.toLocaleString()} views</span>
+        <div className="pt-3 mt-3 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[11px] font-mono text-slate-400">
+          <span className="truncate">
+            {(data.traffic?.uniqueVisitors || 0).toLocaleString()} unique • {readers.totalArticleViews.toLocaleString()} piece opens
+          </span>
           {renderGrowthBadge(growth?.readersGrowth)}
         </div>
       </div>

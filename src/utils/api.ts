@@ -47,6 +47,21 @@ const AFFILIATE_SESSION_MARKER_KEY = 'ink_affiliate_session_active';
 const LEGACY_ADMIN_SESSION_KEYS = ['ink_writer_session_token', 'ink_admin_token'];
 const LEGACY_AFFILIATE_SESSION_KEY = 'ink_affiliate_session_token';
 const READER_ID_KEY = 'ink_reader_anon_id';
+const SITE_VISIT_SESSION_KEY = 'ink_site_visit_session_v1';
+const SITE_VISIT_DAY_PREFIX = 'ink_site_visit_day_v1:';
+
+type ClientAnalyticsEvent =
+  | 'site_visit'
+  | 'piece_view'
+  | 'preview_view'
+  | 'unlock_select'
+  | 'payment_init'
+  | 'view'
+  | 'preview_read'
+  | 'unlock_start'
+  | 'unlock_complete'
+  | 'tip_start'
+  | 'tip_complete';
 
 export function getAnonymousReaderId(): string {
   try {
@@ -226,6 +241,42 @@ export async function safeFetchJson<T = any>(
   }
 
   return data as T;
+}
+
+function getNairobiDay(): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+async function postAnalyticsEvent(
+  eventType: ClientAnalyticsEvent,
+  articleId?: string,
+  category?: string,
+  metadata?: Record<string, unknown>
+): Promise<boolean> {
+  try {
+    const response = await fetch('/api/analytics/track', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({
+        eventType,
+        articleId,
+        category,
+        readerHash: getAnonymousReaderId(),
+        metadata
+      })
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 interface PublicBootstrapResponse {
@@ -1641,28 +1692,31 @@ export const api = {
   },
 
   // Reader Interaction Tracking
+  async trackSiteVisit(): Promise<void> {
+    try {
+      if (sessionStorage.getItem(SITE_VISIT_SESSION_KEY) === '1') return;
+      const day = getNairobiDay();
+      const dailyKey = `${SITE_VISIT_DAY_PREFIX}${day}`;
+      const firstVisitToday = localStorage.getItem(dailyKey) !== '1';
+      const tracked = await postAnalyticsEvent('site_visit', undefined, undefined, {
+        firstVisitToday,
+        surface: window.location.hash.startsWith('#piece-') ? 'piece' : 'site'
+      });
+      if (!tracked) return;
+      sessionStorage.setItem(SITE_VISIT_SESSION_KEY, '1');
+      if (firstVisitToday) localStorage.setItem(dailyKey, '1');
+    } catch {
+      // Privacy-safe telemetry must never block the reader experience.
+    }
+  },
+
   async trackInteraction(
-    eventType: 'view' | 'preview_read' | 'unlock_start' | 'unlock_complete' | 'tip_start' | 'tip_complete',
+    eventType: ClientAnalyticsEvent,
     articleId?: string,
     category?: string,
-    metadata?: Record<string, any>
+    metadata?: Record<string, unknown>
   ): Promise<void> {
-    try {
-      const readerHash = getAnonymousReaderId();
-      await fetch('/api/analytics/track', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          eventType,
-          articleId,
-          category,
-          readerHash,
-          metadata
-        })
-      });
-    } catch {
-      // Non-blocking telemetry
-    }
+    await postAnalyticsEvent(eventType, articleId, category, metadata);
   },
 
   // Detailed Analytics with Period Filtering

@@ -10,6 +10,7 @@ import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { HomepageSaveConflictError, store } from "./src/server/store.js";
 import {
+  AnalyticsTimePeriod,
   Article,
   ContentBundle,
   ContentCollection,
@@ -30,6 +31,12 @@ import {
 } from "./src/homepageSections.js";
 import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
 import { resolveHomepageCuration } from "./src/server/homepageCuration.js";
+import {
+  getDurableTrafficAnalytics,
+  mergeDurableTrafficIntoAnalytics,
+  normalizeTrafficEventType,
+  recordDurableTrafficEvent
+} from "./src/server/analyticsStore.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import {
   AffiliateSettingsValidationError,
@@ -2452,28 +2459,41 @@ export async function createApp() {
   });
 
   // Public Interaction Analytics Tracking
-  app.post("/api/analytics/track", publicWriteLimiter, analyticsWriteLimiter, publicWriteValidators.analytics, (req: Request, res: Response) => {
-    try {
-      const { eventType, articleId, category, readerHash, metadata } = req.body;
-      if (isDuplicatePublicWrite(
-        'analytics',
-        [getRequestNetworkKey(req), eventType, articleId || '', readerHash],
-        30 * 1000
-      )) {
-        return res.json({ success: true, deduplicated: true });
+  app.post(
+    "/api/analytics/track",
+    publicWriteLimiter,
+    analyticsWriteLimiter,
+    requireSameOriginPublicWrite,
+    publicWriteValidators.analytics,
+    async (req: Request, res: Response) => {
+      try {
+        const { eventType, articleId, category, readerHash, metadata } = req.body;
+        const normalizedEventType = normalizeTrafficEventType(eventType, articleId, metadata);
+        if (isDuplicatePublicWrite(
+          'analytics',
+          [getRequestNetworkKey(req), normalizedEventType, articleId || '', readerHash],
+          30 * 1000
+        )) {
+          return res.json({ success: true, deduplicated: true });
+        }
+        await recordDurableTrafficEvent({
+          eventType: normalizedEventType,
+          articleId,
+          metadata
+        });
+        const event = store.recordInteractionEvent({
+          eventType: normalizedEventType,
+          articleId,
+          category,
+          readerHash,
+          metadata
+        });
+        res.json({ success: true, eventId: event.id });
+      } catch (err: any) {
+        res.status(500).json({ error: err.message || "Failed to record event." });
       }
-      const event = store.recordInteractionEvent({
-        eventType,
-        articleId,
-        category,
-        readerHash,
-        metadata
-      });
-      res.json({ success: true, eventId: event.id });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to record event." });
     }
-  });
+  );
 
   // ==========================================
   // PUBLIC READER ENGAGEMENT (LIKES & COMMENTS)
@@ -3916,12 +3936,30 @@ export async function createApp() {
   // Writer: Comprehensive Analytics
   app.get("/api/admin/analytics", requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      await store.ensureTransactionsHydrated();
-      const period = req.query.period as any;
+      res.setHeader('Cache-Control', 'private, no-store');
+      const period = String(req.query.period || '30d') as AnalyticsTimePeriod;
       const startDate = req.query.startDate as string;
       const endDate = req.query.endDate as string;
+      const allowedPeriods = new Set(['today', '7d', '30d', '90d', 'this_year', 'all_time', 'custom']);
+      if (!allowedPeriods.has(period)) {
+        return res.status(400).json({ error: 'Choose a valid analytics period.' });
+      }
+      if (period === 'custom') {
+        const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dayPattern.test(startDate || '') || !dayPattern.test(endDate || '')) {
+          return res.status(400).json({ error: 'Choose a valid custom start and end date.' });
+        }
+        const durationDays = Math.ceil((Date.parse(`${endDate}T00:00:00.000Z`) - Date.parse(`${startDate}T00:00:00.000Z`)) / 86_400_000);
+        if (!Number.isFinite(durationDays) || durationDays < 0 || durationDays > 365) {
+          return res.status(400).json({ error: 'Custom analytics windows must be between 1 and 366 days.' });
+        }
+      }
+      const [, traffic] = await Promise.all([
+        store.ensureTransactionsHydrated(),
+        getDurableTrafficAnalytics({ period, startDate, endDate })
+      ]);
       const analytics = store.getDetailedAnalytics({ period, startDate, endDate });
-      res.json(analytics);
+      res.json(mergeDurableTrafficIntoAnalytics(analytics, traffic, store.getArticles(true)));
     } catch (err: any) {
       console.error("Analytics error:", err);
       res.status(500).json({ error: err.message || "Failed to load analytics." });

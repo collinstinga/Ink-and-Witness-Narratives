@@ -1,7 +1,12 @@
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ArticleReaderModal, selectReaderRecommendations } from './ArticleReaderModal.js';
+import {
+  ArticleReaderModal,
+  normalizeAuthorXHandle,
+  selectReaderRecommendations
+} from './ArticleReaderModal.js';
+import { JAKE_PROFILE } from '../data/seedArticles.js';
 import type { Article } from '../types.js';
 
 const article: Article = {
@@ -119,5 +124,26 @@ describe('article reader cover', () => {
     );
 
     expect(recommendations.map(piece => piece.id)).toEqual(['curated', 'newer']);
+  });
+
+  it('uses the configured X identity and safely falls back for invalid handles', () => {
+    expect(JAKE_PROFILE.twitter).toBe('@bigboyjake_');
+    expect(JAKE_PROFILE.twitterUrl).toBe('https://x.com/bigboyjake_');
+    expect(normalizeAuthorXHandle('@bigboyjake_')).toBe('@bigboyjake_');
+    expect(normalizeAuthorXHandle('https://x.com/bigboyjake_')).toBe('@bigboyjake_');
+    expect(normalizeAuthorXHandle('not a valid handle')).toBe('@bigboyjake_');
+
+    vi.stubGlobal('localStorage', { getItem: () => null });
+    const markup = renderToStaticMarkup(
+      <ArticleReaderModal
+        article={article}
+        author={{ ...JAKE_PROFILE, name: 'BigBoy Jake', twitter: '@bigboyjake_' }}
+        isOpen
+        isUnlocked
+        onClose={() => {}}
+        onUnlockRequest={() => {}}
+      />
+    );
+    expect(markup).toContain('BigBoy Jake (@bigboyjake_) • A Book of Stories');
   });
 });

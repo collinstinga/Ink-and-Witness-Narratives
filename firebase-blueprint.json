@@ -290,6 +290,8 @@
         "handle": { "type": "string" },
         "instagram": { "type": "string" },
         "instagramUrl": { "type": "string" },
+        "twitter": { "type": "string" },
+        "twitterUrl": { "type": "string" },
         "title": { "type": "string" },
         "bio": { "type": "string" },
         "extendedBio": { "type": "string" },

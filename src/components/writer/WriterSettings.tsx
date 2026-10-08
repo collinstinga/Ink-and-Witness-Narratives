@@ -59,6 +59,8 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
   const [location, setLocation] = useState(author.location || 'Nairobi, Kenya • Global Reach');
   const [featuredQuote, setFeaturedQuote] = useState(author.featuredQuote || '');
   const [instagramUrl, setInstagramUrl] = useState(author.instagramUrl || 'https://www.instagram.com/its_bigboy_jake/');
+  const [twitter, setTwitter] = useState(author.twitter || '@bigboyjake_');
+  const [twitterUrl, setTwitterUrl] = useState(author.twitterUrl || 'https://x.com/bigboyjake_');
   const [avatarUrl, setAvatarUrl] = useState(author.avatarUrl || '');
 
   // M-Pesa Form State
@@ -146,6 +148,8 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
         location,
         featuredQuote,
         instagramUrl,
+        twitter,
+        twitterUrl,
         avatarUrl
       };
       const updated = await api.updateAuthorProfile(payload);
@@ -490,6 +494,34 @@ export const WriterSettings: React.FC<WriterSettingsProps> = ({
                   type="text"
                   value={handle}
                   onChange={(e) => setHandle(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-[#080d1a] border border-slate-700 text-white focus:outline-none focus:border-sky-500 font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label htmlFor="writer-x-handle" className="block font-mono text-slate-400 mb-1">X Handle</label>
+                <input
+                  id="writer-x-handle"
+                  type="text"
+                  value={twitter}
+                  onChange={(e) => setTwitter(e.target.value)}
+                  placeholder="@bigboyjake_"
+                  autoComplete="off"
+                  className="w-full px-3 py-2 rounded-lg bg-[#080d1a] border border-slate-700 text-white focus:outline-none focus:border-sky-500 font-mono"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="writer-x-url" className="block font-mono text-slate-400 mb-1">X Profile URL</label>
+                <input
+                  id="writer-x-url"
+                  type="url"
+                  value={twitterUrl}
+                  onChange={(e) => setTwitterUrl(e.target.value)}
+                  placeholder="https://x.com/bigboyjake_"
+                  autoComplete="url"
                   className="w-full px-3 py-2 rounded-lg bg-[#080d1a] border border-slate-700 text-white focus:outline-none focus:border-sky-500 font-mono"
                 />
               </div>

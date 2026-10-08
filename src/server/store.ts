@@ -9,7 +9,7 @@ import { affiliateStore } from './affiliateStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
 import { ImageValidationError, sanitizeImageDataUrl, type SafeImageMimeType } from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
-import { enrichSalesTransaction } from './salesLedger.js';
+import { enrichSalesTransaction, isSettledTransactionStatus } from './salesLedger.js';
 import {
   MANUAL_ACCESS_ENTITLEMENT_COLLECTION,
   MANUAL_ACCESS_ENTITLEMENT_VERSION,
@@ -5012,7 +5012,7 @@ export const store = {
     }
 
     // Auto-calculate rank based on verified purchases and revenue
-    const txList = Array.from(cachedTransactions.values()).filter(t => t.status === 'SUCCESS' || t.status === 'CONFIRMED');
+    const txList = Array.from(cachedTransactions.values()).filter(t => isSettledTransactionStatus(t.status));
     const pieceSalesMap = new Map<string, { purchases: number; revenue: number }>();
     for (const tx of txList) {
       if (tx.articleId && tx.type === 'PURCHASE') {
@@ -5278,8 +5278,8 @@ export const store = {
     const txList = Array.from(cachedTransactions.values());
 
     // Verified purchases & tips
-    const verifiedPurchases = txList.filter(t => t.type === 'PURCHASE' && (t.status === 'SUCCESS' || t.status === 'CONFIRMED'));
-    const verifiedTips = txList.filter(t => t.type === 'TIP' && (t.status === 'SUCCESS' || t.status === 'CONFIRMED'));
+    const verifiedPurchases = txList.filter(t => t.type === 'PURCHASE' && isSettledTransactionStatus(t.status));
+    const verifiedTips = txList.filter(t => t.type === 'TIP' && isSettledTransactionStatus(t.status));
 
     const payToReadSalesKes = verifiedPurchases.reduce((sum, t) => sum + (t.amount || 0), 0);
     const tipsReceivedKes = verifiedTips.reduce((sum, t) => sum + (t.amount || 0), 0);
@@ -5339,8 +5339,8 @@ export const store = {
       prevStartTimestamp = prevYearStart.getTime();
       prevEndTimestamp = startTimestamp;
     } else if (period === 'custom' && options?.startDate) {
-      startTimestamp = new Date(options.startDate).getTime();
-      endTimestamp = options.endDate ? new Date(options.endDate).getTime() : now.getTime();
+      startTimestamp = new Date(`${options.startDate}T00:00:00.000Z`).getTime();
+      endTimestamp = options.endDate ? new Date(`${options.endDate}T23:59:59.999Z`).getTime() : now.getTime();
       const duration = endTimestamp - startTimestamp;
       prevStartTimestamp = startTimestamp - duration;
       prevEndTimestamp = startTimestamp;
@@ -5366,11 +5366,11 @@ export const store = {
       return txTime >= prevStartTimestamp && txTime < prevEndTimestamp;
     });
 
-    // 1. Confirmed Transactions (STRICT: only SUCCESS or CONFIRMED)
-    const confirmedSales = inPeriodTx.filter(t => t.type === 'PURCHASE' && (t.status === 'SUCCESS' || t.status === 'CONFIRMED'));
+    // 1. Settled Transactions (SUCCESS, CONFIRMED, or PAID only)
+    const confirmedSales = inPeriodTx.filter(t => t.type === 'PURCHASE' && isSettledTransactionStatus(t.status));
     const pendingSales = inPeriodTx.filter(t => t.status === 'PENDING');
     const failedSales = inPeriodTx.filter(t => t.status === 'FAILED' || t.status === 'CANCELLED' || t.status === 'EXPIRED');
-    const confirmedTips = inPeriodTx.filter(t => t.type === 'TIP' && (t.status === 'SUCCESS' || t.status === 'CONFIRMED'));
+    const confirmedTips = inPeriodTx.filter(t => t.type === 'TIP' && isSettledTransactionStatus(t.status));
 
     const confirmedRevenueKes = confirmedSales.reduce((sum, t) => sum + (t.amount || 0), 0);
     const pendingRevenueKes = pendingSales.reduce((sum, t) => sum + (t.amount || 0), 0);
@@ -5381,7 +5381,7 @@ export const store = {
     const averagePurchaseKes = confirmedPurchasesCount > 0 ? Math.round(confirmedRevenueKes / confirmedPurchasesCount) : 0;
 
     // Previous period revenue & purchases for growth
-    const prevConfirmedSales = prevPeriodTx.filter(t => t.type === 'PURCHASE' && (t.status === 'SUCCESS' || t.status === 'CONFIRMED'));
+    const prevConfirmedSales = prevPeriodTx.filter(t => t.type === 'PURCHASE' && isSettledTransactionStatus(t.status));
     const prevRevenueKes = prevConfirmedSales.reduce((sum, t) => sum + (t.amount || 0), 0);
     const prevPurchasesCount = prevConfirmedSales.length;
 
@@ -5420,23 +5420,11 @@ export const store = {
       }
     }
 
-    // Fallback if events are empty
-    if (totalPieceViews === 0) {
-      totalPieceViews = allPieces.reduce((sum, a) => sum + (a.viewsCount || 0), 0);
-      totalPreviewViews = Math.floor(totalPieceViews * 0.55);
-      totalSynopsisViews = Math.floor(totalPieceViews * 0.4);
-      totalUnlockSelects = Math.floor(totalPieceViews * 0.25);
-      totalPaymentInits = Math.floor(totalPieceViews * 0.15);
-      readerSet.add('reader_demo_1');
-      readerSet.add('reader_demo_2');
-      readerSet.add('reader_demo_3');
-    }
-
-    const uniqueReadersCount = Math.max(readerSet.size, 1);
+    const uniqueReadersCount = readerSet.size;
     const conversionRate = totalPieceViews > 0 ? Math.round((confirmedPurchasesCount / totalPieceViews) * 1000) / 10 : 0;
 
     // Previous period stats for growth
-    const prevViewsCount = prevPeriodEvents.filter(e => e.eventType === 'piece_view').length || 1;
+    const prevViewsCount = prevPeriodEvents.filter(e => e.eventType === 'piece_view').length;
     const prevConversionRate = prevViewsCount > 0 ? (prevPurchasesCount / prevViewsCount) * 100 : 0;
 
     const calcGrowth = (curr: number, prev: number) => {
@@ -5501,7 +5489,7 @@ export const store = {
           viewsCount: views,
           previewCount: previews,
           tipsCount: bucketTips.length,
-          uniqueReaders: Math.max(1, Math.floor(views * 0.7))
+          uniqueReaders: 0
         });
       }
     } else if (period === '7d' || period === '30d' || period === '90d' || period === 'custom') {
@@ -5548,7 +5536,7 @@ export const store = {
           viewsCount: views,
           previewCount: previews,
           tipsCount: bucketTips.length,
-          uniqueReaders: Math.max(1, Math.floor(views * 0.7))
+          uniqueReaders: 0
         });
       }
     } else {
@@ -5590,16 +5578,16 @@ export const store = {
           viewsCount: views,
           previewCount: previews,
           tipsCount: bucketTips.length,
-          uniqueReaders: Math.max(1, Math.floor(views * 0.7))
+          uniqueReaders: 0
         });
       }
     }
 
     // 3. Reader Conversion Funnel
     const stage1Count = totalPieceViews;
-    const stage2Count = Math.min(stage1Count, Math.max(totalPreviewViews, Math.floor(stage1Count * 0.6)));
-    const stage3Count = Math.min(stage2Count, Math.max(totalUnlockSelects, Math.floor(stage2Count * 0.4)));
-    const stage4Count = Math.min(stage3Count, Math.max(totalPaymentInits, confirmedSales.length + pendingSales.length));
+    const stage2Count = Math.min(stage1Count, totalPreviewViews);
+    const stage3Count = Math.min(stage2Count, totalUnlockSelects);
+    const stage4Count = Math.min(stage3Count, totalPaymentInits);
     const stage5Count = confirmedPurchasesCount;
 
     const rawStages = [
@@ -5642,25 +5630,28 @@ export const store = {
 
     // 4. Per Piece Performance Table
     const piecePerformance: PiecePerformanceItem[] = allPieces.map(piece => {
-      const pieceSales = confirmedSales.filter(t => t.articleId === piece.id);
+      const directPieceSales = confirmedSales.filter(t => t.articleId === piece.id && t.purchaseKind !== 'bundle');
+      const bundlePieceSales = confirmedSales.filter(t =>
+        t.purchaseKind === 'bundle' && Array.isArray(t.bundlePieceIds) && t.bundlePieceIds.includes(piece.id)
+      );
+      const pieceSales = [...directPieceSales, ...bundlePieceSales];
       const piecePending = pendingSales.filter(t => t.articleId === piece.id);
       const pieceFailed = failedSales.filter(t => t.articleId === piece.id);
       const pieceTips = confirmedTips.filter(t => t.articleId === piece.id);
 
       const pieceEvents = inPeriodEvents.filter(e => e.articleId === piece.id);
-      let pViews = pieceEvents.filter(e => e.eventType === 'piece_view').length;
-      if (pViews === 0) {
-        pViews = piece.viewsCount || 0;
-      }
-      const pUnique = new Set(pieceEvents.map(e => e.readerHash).filter(Boolean)).size || Math.max(1, Math.floor(pViews * 0.7));
-      const pPreviews = pieceEvents.filter(e => e.eventType === 'preview_view').length || Math.floor(pViews * 0.5);
-      const pSynopsis = pieceEvents.filter(e => e.eventType === 'synopsis_view').length || Math.floor(pViews * 0.35);
+      const pViews = pieceEvents.filter(e => e.eventType === 'piece_view').length;
+      const pUnique = new Set(pieceEvents.map(e => e.readerHash).filter(Boolean)).size;
+      const pPreviews = pieceEvents.filter(e => e.eventType === 'preview_view').length;
+      const pSynopsis = pieceEvents.filter(e => e.eventType === 'synopsis_view').length;
       const pPayAttempts = pieceEvents.filter(e => e.eventType === 'payment_init').length + pieceSales.length + piecePending.length;
 
       const pPurchases = pieceSales.length;
-      const pRevenueKes = pieceSales.reduce((sum, t) => sum + (t.amount || 0), 0);
+      // Bundle revenue belongs to the bundle order. Count its included-piece
+      // unlocks here without allocating the same payment to every piece.
+      const pRevenueKes = directPieceSales.reduce((sum, t) => sum + (t.amount || 0), 0);
       const pTipsKes = pieceTips.reduce((sum, t) => sum + (t.amount || 0), 0);
-      const pAvg = pPurchases > 0 ? Math.round(pRevenueKes / pPurchases) : piece.priceKes;
+      const pAvg = directPieceSales.length > 0 ? Math.round(pRevenueKes / directPieceSales.length) : piece.priceKes;
       const pConversion = pViews > 0 ? Math.round((pPurchases / pViews) * 1000) / 10 : 0;
 
       const mpesaConfirmedCount = pieceSales.filter(t => (t.paymentMethod || 'mpesa') === 'mpesa').length;
@@ -5686,6 +5677,8 @@ export const store = {
         paymentAttempts: pPayAttempts,
         confirmedPurchases: pPurchases,
         purchasesCount: pPurchases,
+        directPurchases: directPieceSales.length,
+        bundlePurchases: bundlePieceSales.length,
         failedPayments: pieceFailed.length,
         pendingPayments: piecePending.length,
         conversionRate: pConversion,
@@ -5962,12 +5955,12 @@ export const store = {
       const pieceEvents = inPeriodEvents.filter(e => e.articleId === id);
       const pieceStats = piecePerformance.find(p => p.articleId === id);
       
-      const impressions = Math.max(pieceEvents.filter(e => e.eventType === 'start_here_impression' || e.eventType === 'piece_view').length, art?.viewsCount ? Math.floor(art.viewsCount * 0.4) : 10);
-      const clicks = Math.max(pieceEvents.filter(e => e.eventType === 'start_here_click').length, Math.floor(impressions * 0.35));
-      const previewClicks = Math.max(pieceEvents.filter(e => e.eventType === 'start_here_preview_click' || e.eventType === 'preview_view').length, Math.floor(impressions * 0.25));
-      const synopsisClicks = Math.max(pieceEvents.filter(e => e.eventType === 'start_here_synopsis_click' || e.eventType === 'synopsis_view').length, Math.floor(impressions * 0.18));
-      const payToReadClicks = Math.max(pieceEvents.filter(e => e.eventType === 'start_here_pay_click' || e.eventType === 'unlock_select' || e.eventType === 'payment_init').length, Math.floor(impressions * 0.12));
-      const confirmedPurchases = pieceStats?.confirmedPurchases || art?.downloadsCount || 0;
+      const impressions = pieceEvents.filter(e => e.eventType === 'start_here_impression' || e.eventType === 'piece_view').length;
+      const clicks = pieceEvents.filter(e => e.eventType === 'start_here_click').length;
+      const previewClicks = pieceEvents.filter(e => e.eventType === 'start_here_preview_click' || e.eventType === 'preview_view').length;
+      const synopsisClicks = pieceEvents.filter(e => e.eventType === 'start_here_synopsis_click' || e.eventType === 'synopsis_view').length;
+      const payToReadClicks = pieceEvents.filter(e => e.eventType === 'start_here_pay_click' || e.eventType === 'unlock_select' || e.eventType === 'payment_init').length;
+      const confirmedPurchases = pieceStats?.confirmedPurchases || 0;
       const revenueKes = pieceStats?.revenueKes || 0;
       const conversionRate = impressions > 0 ? Math.round((confirmedPurchases / impressions) * 1000) / 10 : 0;
 

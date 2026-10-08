@@ -91,7 +91,9 @@ export const PiecePerformanceTable: React.FC<PiecePerformanceTableProps> = ({
       'Price (KES)', 
       'Views', 
       'Preview Reads', 
-      'Purchases', 
+      'Direct Purchases',
+      'Bundle Unlocks',
+      'Total Piece Sales',
       'Conversion Rate (%)', 
       'Sales Revenue (KES)', 
       'Tips Total (KES)', 
@@ -105,9 +107,11 @@ export const PiecePerformanceTable: React.FC<PiecePerformanceTableProps> = ({
       `"${p.category}"`,
       p.status,
       p.priceKes,
-      p.viewsCount,
-      p.previewCount,
-      p.purchasesCount,
+      p.viewsCount || 0,
+      p.previewCount || 0,
+      p.directPurchases || 0,
+      p.bundlePurchases || 0,
+      p.purchasesCount || 0,
       p.conversionRate,
       p.revenueKes,
       p.tipsTotalKes,
@@ -138,10 +142,10 @@ export const PiecePerformanceTable: React.FC<PiecePerformanceTableProps> = ({
             <span>Monograph Performance &amp; Unit Economics</span>
           </div>
           <h3 className="font-serif font-bold text-xl text-white">
-            Comprehensive Piece Performance
+            Traffic &amp; Sales by Piece
           </h3>
           <p className="text-xs text-slate-400 font-sans mt-0.5">
-            Real-time reader interest, conversion rates, confirmed sales, and reader tip totals across your entire published repertoire.
+            Persistent piece opens and previews alongside direct purchases, bundle unlocks, settled revenue, and reader tips.
           </p>
         </div>
 
@@ -244,7 +248,7 @@ export const PiecePerformanceTable: React.FC<PiecePerformanceTableProps> = ({
                 onClick={() => handleSort('purchasesCount')}
               >
                 <div className="flex items-center justify-end gap-1">
-                  <span>Sales</span>
+                  <span>Sales / Bundle</span>
                   <ArrowUpDown className="w-3 h-3 text-slate-500" />
                 </div>
               </th>
@@ -329,17 +333,20 @@ export const PiecePerformanceTable: React.FC<PiecePerformanceTableProps> = ({
 
                   {/* Views */}
                   <td className="py-3.5 px-3 text-right text-slate-300">
-                    {item.viewsCount.toLocaleString()}
+                    {(item.viewsCount || 0).toLocaleString()}
                   </td>
 
                   {/* Previews */}
                   <td className="py-3.5 px-3 text-right text-slate-400">
-                    {item.previewCount.toLocaleString()}
+                    {(item.previewCount || 0).toLocaleString()}
                   </td>
 
                   {/* Purchases */}
                   <td className="py-3.5 px-3 text-right font-bold text-sky-300">
-                    {item.purchasesCount}
+                    <div>{item.purchasesCount || 0}</div>
+                    <div className="mt-0.5 whitespace-nowrap text-[9px] font-normal text-slate-500">
+                      {item.directPurchases || 0} direct • {item.bundlePurchases || 0} bundle
+                    </div>
                   </td>
 
                   {/* Conversion */}

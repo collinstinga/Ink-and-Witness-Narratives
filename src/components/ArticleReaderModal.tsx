@@ -62,6 +62,18 @@ import { SafeMarkdown } from './common/SafeMarkdown.js';
 import { ArticleCard } from './ArticleCard.js';
 
 const EMPTY_ARTICLES: Article[] = [];
+const DEFAULT_X_HANDLE = '@bigboyjake_';
+
+export const normalizeAuthorXHandle = (value?: string | null): string => {
+  const trimmed = value?.trim() || '';
+  const handleCandidate = trimmed
+    .replace(/^https?:\/\/(?:www\.)?(?:x|twitter)\.com\//i, '')
+    .split(/[/?#]/, 1)[0]
+    .replace(/^@/, '');
+  return /^[A-Za-z0-9_]{1,15}$/.test(handleCandidate)
+    ? `@${handleCandidate}`
+    : DEFAULT_X_HANDLE;
+};
 
 const isReaderAuthError = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error || '');
@@ -1042,6 +1054,8 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
   const currentQuote = quotes[activeQuoteIndex] || quotes[0] || article.excerpt || article.title;
   const receipt = getArticleReceipt(article.id);
+  const authorDisplayName = author?.name?.trim() || 'Jake';
+  const authorXHandle = normalizeAuthorXHandle(author?.twitter);
 
   // Generate specific deep-link URL for this monograph
   const getMonographUrl = () => {
@@ -1071,7 +1085,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       ? `${quoteText.substring(0, maxQuoteLen).trim()}...` 
       : quoteText;
 
-    const tweetText = `“${cleanQuote}”\n\n— From “${article.title}” by Jake (@its_bigboy_jake)`;
+    const tweetText = `“${cleanQuote}”\n\n— From “${article.title}” by ${authorDisplayName} (${authorXHandle})`;
     const tagsParam = article.tags && article.tags.length > 0 ? article.tags.slice(0, 2).join(',') : 'InkAndWitness';
     const xUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(tweetText)}&url=${encodeURIComponent(url)}&hashtags=${encodeURIComponent(tagsParam)}`;
     
@@ -1120,7 +1134,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     if (navigator.share) {
       navigator.share({
         title: `${article.title} | Ink & Witness`,
-        text: `“${currentQuote}” — From “${article.title}” by Jake (@its_bigboy_jake)`,
+        text: `“${currentQuote}” — From “${article.title}” by ${authorDisplayName} (${authorXHandle})`,
         url,
       }).catch(() => {});
     } else {
@@ -2236,7 +2250,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
                 “{currentQuote}”
               </blockquote>
               <div className="mt-3 pt-3 border-t border-slate-900 flex items-center justify-between text-xs font-mono text-slate-400">
-                <span className="text-sky-400 font-medium">Jake (@its_bigboy_jake) • {article.title}</span>
+                <span className="text-sky-400 font-medium">{authorDisplayName} ({authorXHandle}) • {article.title}</span>
                 <span className="text-slate-500 truncate max-w-[200px] hidden sm:inline">{article.category}</span>
               </div>
             </div>

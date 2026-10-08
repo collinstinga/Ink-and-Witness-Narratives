@@ -174,6 +174,10 @@ export default function App() {
     currentUserRef.current = currentUser;
   }, [currentUser]);
 
+  useEffect(() => {
+    void api.trackSiteVisit();
+  }, []);
+
   const libraryArticles = React.useMemo(() => {
     const unlockedById = new Map<string, LibraryArticle>();
     for (const article of accountLibraryArticles) {
@@ -444,14 +448,14 @@ export default function App() {
         setActiveReaderArticle(detailed);
         if (onLoaded) onLoaded(detailed);
         // Telemetry tracking
-        api.trackInteraction('view', matched.id, matched.category);
+        void api.trackInteraction('piece_view', matched.id, matched.category);
         if (matched.isPaid && !detailed.isUnlocked) {
-          api.trackInteraction('preview_read', matched.id, matched.category);
+          void api.trackInteraction('preview_view', matched.id, matched.category);
         }
       } catch {
         setActiveReaderArticle(matched);
         if (onLoaded) onLoaded(matched);
-        api.trackInteraction('view', matched.id, matched.category);
+        void api.trackInteraction('piece_view', matched.id, matched.category);
       }
       pendingArticleSlugOrIdRef.current = null;
     } else {

@@ -125,7 +125,7 @@ export const WriterAnalytics: React.FC<WriterAnalyticsProps> = ({
             Analytics &amp; Editorial Hub
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 font-sans mt-1 max-w-2xl">
-            Real-time analytics, revenue reconciliation, conversion funnels, and curated homepage placement calculated strictly from verified system records.
+            Website visits, per-piece traffic, verified sales, revenue reconciliation, and editorial performance from persistent system records.
           </p>
         </div>
 
@@ -248,6 +248,17 @@ export const WriterAnalytics: React.FC<WriterAnalyticsProps> = ({
             data={data}
             onNavigateTab={onNavigateTab}
           />
+
+          <div className="rounded-xl border border-sky-900/50 bg-sky-950/20 px-4 py-3 text-xs text-slate-300">
+            <span className="font-semibold text-sky-300">Traffic definitions:</span>{' '}
+            a visit is one browser session, unique visitors are counted once per browser per Nairobi day, and a piece view is counted when its reader opens.
+            {' '}Sales and revenue include settled payments only.
+            {data.traffic?.trackingSince ? (
+              <span className="ml-1 text-slate-400">Reliable traffic history begins {data.traffic.trackingSince}.</span>
+            ) : (
+              <span className="ml-1 text-slate-400">Traffic collection begins with this release.</span>
+            )}
+          </div>
 
           {/* 4. TIME-SERIES REVENUE & VOLUME TRAJECTORY GRAPH */}
           <TimeSeriesChart

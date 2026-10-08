@@ -499,6 +499,8 @@ export interface TimeSeriesPoint {
   previewCount?: number;
   tipsCount?: number;
   uniqueReaders?: number;
+  siteVisits?: number;
+  uniqueVisitors?: number;
 }
 
 export interface PiecePerformanceItem {
@@ -521,6 +523,8 @@ export interface PiecePerformanceItem {
   paymentAttempts?: number;
   confirmedPurchases?: number;
   purchasesCount?: number;
+  directPurchases?: number;
+  bundlePurchases?: number;
   failedPayments?: number;
   pendingPayments?: number;
   conversionRate: number; // %
@@ -534,6 +538,35 @@ export interface PiecePerformanceItem {
   isMostSelling?: boolean;
   mpesaConfirmedCount?: number;
   bankConfirmedCount?: number;
+}
+
+export interface TrafficPieceAggregate {
+  articleId: string;
+  views: number;
+  previews: number;
+  unlockStarts: number;
+  paymentStarts: number;
+}
+
+export interface TrafficDayAggregate {
+  date: string;
+  siteVisits: number;
+  uniqueVisitors: number;
+  pieceViews: number;
+  previewViews: number;
+  unlockStarts: number;
+  paymentStarts: number;
+  pieces: Record<string, TrafficPieceAggregate>;
+}
+
+export interface TrafficPeriodAggregate extends Omit<TrafficDayAggregate, 'date'> {
+  days: TrafficDayAggregate[];
+}
+
+export interface TrafficAnalyticsSnapshot {
+  trackingSince?: string;
+  current: TrafficPeriodAggregate;
+  previous: TrafficPeriodAggregate;
 }
 
 export interface FunnelStage {
@@ -675,6 +708,14 @@ export interface DetailedAnalytics {
     conversionRate: number;
     averagePurchaseKes: number;
     topPiece?: { id: string; title: string; revenueKes: number; purchasesCount: number } | null;
+  };
+  traffic?: {
+    siteVisits: number;
+    uniqueVisitors: number;
+    pieceViews: number;
+    previewViews: number;
+    trackingSince?: string;
+    collectionNote: string;
   };
   growth: GrowthMetrics;
   revenue: {

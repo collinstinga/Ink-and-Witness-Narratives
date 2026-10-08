@@ -30,6 +30,8 @@ export const JAKE_PROFILE: AuthorProfile = {
   handle: '@collinstinga',
   instagram: 'collinstinga',
   instagramUrl: '',
+  twitter: '@bigboyjake_',
+  twitterUrl: 'https://x.com/bigboyjake_',
   title: 'Writer',
   bio: 'Writer and storyteller.',
   extendedBio: 'Ink & Witness Narratives explores stories, poetry, desire and the human experience.',

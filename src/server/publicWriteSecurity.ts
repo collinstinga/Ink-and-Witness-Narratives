@@ -30,6 +30,7 @@ const SAFE_PHONE = /^[0-9+()\-\s]{7,32}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CURRENCY = /^[A-Za-z]{3}$/;
 const TELEMETRY_EVENTS = [
+  'site_visit', 'site_page_view',
   'view', 'preview_read', 'unlock_start', 'unlock_complete', 'tip_start', 'tip_complete',
   'piece_view', 'preview_view', 'synopsis_view', 'unlock_select', 'payment_init'
 ] as const;
