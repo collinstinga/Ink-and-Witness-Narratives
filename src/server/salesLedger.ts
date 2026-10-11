@@ -22,7 +22,7 @@ type LegacyPaymentTransaction = Partial<PaymentTransaction> & {
 
 export type AdminSalesTransaction = Omit<
   PaymentTransaction,
-  'paymentCapabilityHash' | 'callbackCapabilityHash' | 'downloadToken'
+  'paymentCapabilityHash' | 'callbackCapabilityHash' | 'downloadToken' | 'affiliateAttributionClaimId'
 > & {
   orderId: string;
   paymentMethod: PaymentMethod;
@@ -173,6 +173,7 @@ export function toAdminSalesTransaction(
     paymentCapabilityHash: _paymentCapabilityHash,
     callbackCapabilityHash: _callbackCapabilityHash,
     downloadToken: _downloadToken,
+    affiliateAttributionClaimId: _affiliateAttributionClaimId,
     ...safeTransaction
   } = transaction;
   const enriched = enrichSalesTransaction(safeTransaction as PaymentTransaction);

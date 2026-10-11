@@ -41,7 +41,7 @@ const firestoreMock = vi.hoisted(() => {
   });
   const runTransaction = async (callback: (transaction: any) => Promise<any>) => {
     const writes: Array<
-      | { operation: 'set' | 'create'; ref: FakeRef; data: any; merge: boolean }
+      | { operation: 'set' | 'create' | 'update'; ref: FakeRef; data: any; merge: boolean }
       | { operation: 'delete'; ref: FakeRef }
     > = [];
     const result = await callback({
@@ -52,6 +52,10 @@ const firestoreMock = vi.hoisted(() => {
       create: (ref: FakeRef, data: any) => {
         if (documents.has(ref.key)) throw new Error('document already exists');
         writes.push({ operation: 'create', ref, data: clone(data), merge: false });
+      },
+      update: (ref: FakeRef, data: any) => {
+        if (!documents.has(ref.key)) throw new Error('document does not exist');
+        writes.push({ operation: 'update', ref, data: clone(data), merge: true });
       },
       delete: (ref: FakeRef) => writes.push({ operation: 'delete', ref })
     });
@@ -256,6 +260,78 @@ describe('M-Pesa request locks and intent attachment', () => {
       .resolves.toMatchObject({ checkoutRequestId: 'ws_CO_123456789' });
   });
 
+  it('atomically consumes a matching v2 affiliate claim when attaching the checkout', async () => {
+    const issuedAt = Date.now() - 1_000;
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const claimId = 'f'.repeat(64);
+    const prepared = intent('a', 'b', {
+      affiliateCode: 'affiliate1',
+      campaignCode: 'launch',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: claimId,
+      affiliateAttributionAt: new Date(issuedAt).toISOString(),
+      affiliateAttributionExpiresAt: new Date(expiresAt).toISOString()
+    });
+    firestoreMock.documents.set(`affiliate_attribution_claims/${claimId}`, {
+      version: 1,
+      status: 'claimed',
+      affiliateCode: 'affiliate1',
+      campaignCode: 'launch',
+      checkoutArticleId: prepared.articleId,
+      channel: 'mpesa',
+      issuedAt,
+      expiresAt,
+      claimedAt: Date.now()
+    });
+    await store.saveMpesaCallbackIntent(prepared);
+
+    const result = await store.attachMpesaCallbackIntent(
+      prepared.callbackCapabilityHash,
+      'ws_CO_bound_123456',
+      'merchant_bound_123456'
+    );
+
+    expect(result).toMatchObject({
+      affiliateCode: 'affiliate1',
+      campaignCode: 'launch',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: claimId
+    });
+    expect(firestoreMock.documents.get(`affiliate_attribution_claims/${claimId}`)).toMatchObject({
+      status: 'consumed',
+      checkoutRequestId: 'ws_CO_bound_123456',
+      consumedAt: expect.any(Number)
+    });
+    expect(firestoreMock.documents.get('transactions/ws_CO_bound_123456')).toEqual(result);
+  });
+
+  it('keeps the customer checkout but strips commission fields when a v2 claim cannot be proven', async () => {
+    const issuedAt = Date.now() - 1_000;
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const prepared = intent('a', 'b', {
+      affiliateCode: 'affiliate1',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'd'.repeat(64),
+      affiliateAttributionAt: new Date(issuedAt).toISOString(),
+      affiliateAttributionExpiresAt: new Date(expiresAt).toISOString()
+    });
+    await store.saveMpesaCallbackIntent(prepared);
+
+    const result = await store.attachMpesaCallbackIntent(
+      prepared.callbackCapabilityHash,
+      'ws_CO_direct_123456',
+      'merchant_direct_123456'
+    );
+
+    expect(result).toMatchObject({
+      checkoutRequestId: 'ws_CO_direct_123456',
+      saleChannel: 'DIRECT',
+      status: 'PENDING'
+    });
+    expect(result).not.toHaveProperty('affiliateCode');
+    expect(result).not.toHaveProperty('affiliateAttributionClaimId');
+  });
+
   it('fails closed if a payment attempt identifier is duplicated in the transaction ledger', async () => {
     const paymentAttemptId = 'attempt_abcdef0123456789abcdef0123456789abcd';
     firestoreMock.documents.set('transactions/checkout_1', {
@@ -300,5 +376,86 @@ describe('M-Pesa request locks and intent attachment', () => {
     expect(firestoreMock.documents.get(
       `mpesa_payment_intents/${prepared.paymentCapabilityHash}`
     )).toMatchObject({ status: 'PREPARED' });
+  });
+
+  it('leaves both the v2 claim and checkout unchanged when the atomic attachment commit fails', async () => {
+    const issuedAt = Date.now() - 1_000;
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const claimId = 'e'.repeat(64);
+    const prepared = intent('a', 'b', {
+      affiliateCode: 'affiliate1',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: claimId,
+      affiliateAttributionAt: new Date(issuedAt).toISOString(),
+      affiliateAttributionExpiresAt: new Date(expiresAt).toISOString()
+    });
+    firestoreMock.documents.set(`affiliate_attribution_claims/${claimId}`, {
+      version: 1,
+      status: 'claimed',
+      affiliateCode: 'affiliate1',
+      checkoutArticleId: prepared.articleId,
+      channel: 'mpesa',
+      issuedAt,
+      expiresAt,
+      claimedAt: Date.now()
+    });
+    await store.saveMpesaCallbackIntent(prepared);
+    firestoreMock.failCommit();
+
+    await expect(store.attachMpesaCallbackIntent(
+      prepared.callbackCapabilityHash,
+      'ws_CO_atomic_fail_123',
+      'merchant_atomic_fail_123'
+    )).rejects.toThrow('injected atomic commit failure');
+
+    expect(firestoreMock.documents.has('transactions/ws_CO_atomic_fail_123')).toBe(false);
+    const unchangedClaim = firestoreMock.documents.get(`affiliate_attribution_claims/${claimId}`);
+    expect(unchangedClaim).toMatchObject({ status: 'claimed' });
+    expect(unchangedClaim).not.toHaveProperty('checkoutRequestId');
+    expect(unchangedClaim).not.toHaveProperty('consumedAt');
+  });
+
+  it('creates a bank order and consumes its matching affiliate claim in one commit', async () => {
+    const issuedAt = Date.now() - 1_000;
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const claimId = '9'.repeat(64);
+    firestoreMock.documents.set(`affiliate_attribution_claims/${claimId}`, {
+      version: 1,
+      status: 'claimed',
+      affiliateCode: 'affiliate1',
+      checkoutArticleId: 'article_1',
+      channel: 'bank',
+      issuedAt,
+      expiresAt,
+      claimedAt: Date.now()
+    });
+
+    const result = await store.createBankTransactionWithAffiliateClaim({
+      id: 'tx_bank_bound_1',
+      checkoutRequestId: 'bank_bound_1',
+      articleId: 'article_1',
+      articleTitle: 'Bank binding test',
+      amount: 300,
+      paymentMethod: 'bank',
+      type: 'PURCHASE',
+      status: 'PENDING',
+      createdAt: new Date().toISOString(),
+      affiliateCode: 'affiliate1',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: claimId,
+      affiliateAttributionAt: new Date(issuedAt).toISOString(),
+      affiliateAttributionExpiresAt: new Date(expiresAt).toISOString()
+    });
+
+    expect(result).toMatchObject({
+      checkoutRequestId: 'bank_bound_1',
+      affiliateCode: 'affiliate1',
+      affiliateAttributionClaimId: claimId
+    });
+    expect(firestoreMock.documents.get(`affiliate_attribution_claims/${claimId}`)).toMatchObject({
+      status: 'consumed',
+      checkoutRequestId: 'bank_bound_1'
+    });
+    expect(firestoreMock.documents.get('transactions/bank_bound_1')).toEqual(result);
   });
 });

@@ -29,6 +29,7 @@ import {
 } from '../types.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
+import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import {
   AFFILIATE_SESSION_MAX_AGE_MS,
   AFFILIATE_SESSION_STORAGE_VERSION,
@@ -177,6 +178,20 @@ function isCampaignValidAttribution(
 }
 
 function transactionHasValidAffiliateAttribution(transaction: PaymentTransaction): boolean {
+  if (transaction.affiliateAttributionVersion !== undefined && transaction.affiliateAttributionVersion !== 2) {
+    return false;
+  }
+  if (transaction.affiliateAttributionClaimId && transaction.affiliateAttributionVersion !== 2) {
+    return false;
+  }
+  if (transaction.affiliateAttributionVersion === 2 && (
+    typeof transaction.affiliateAttributionClaimId !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(transaction.affiliateAttributionClaimId) ||
+    typeof transaction.affiliateCode !== 'string' ||
+    (transaction.paymentMethod !== 'mpesa' && transaction.paymentMethod !== 'bank')
+  )) {
+    return false;
+  }
   const hasIssuedAt = typeof transaction.affiliateAttributionAt === 'string';
   const hasExpiresAt = typeof transaction.affiliateAttributionExpiresAt === 'string';
   // Historical confirmed transactions predate signed attribution metadata.
@@ -1114,6 +1129,12 @@ export const affiliateStore = {
     if (!affiliateRefCode) return null;
     const cleanAffiliateCode = affiliateRefCode.trim().toUpperCase();
     if (!cleanAffiliateCode) return null;
+    if (tx.affiliateCode?.trim().toUpperCase() !== cleanAffiliateCode) return null;
+    const canonicalCampaignCode = tx.campaignCode?.trim();
+    if (
+      campaignCode !== undefined &&
+      campaignCode.trim().toUpperCase() !== (canonicalCampaignCode || '').toUpperCase()
+    ) return null;
     if (!['CONFIRMED', 'SUCCESS', 'PAID'].includes(tx.status)) return null;
     if (!transactionHasValidAffiliateAttribution(tx)) return null;
     const saleAmountKes = Number(tx.amount);
@@ -1140,6 +1161,35 @@ export const affiliateStore = {
           freshCampaign: undefined,
           freshSettings: undefined
         };
+      }
+
+      if (tx.affiliateAttributionVersion === 2) {
+        const issuedAt = Date.parse(tx.affiliateAttributionAt || '');
+        const expiresAt = Date.parse(tx.affiliateAttributionExpiresAt || '');
+        const claimIsValid = await verifyConsumedAffiliateAttributionClaimInTransaction(
+          firestoreTransaction,
+          db,
+          tx.affiliateAttributionClaimId || '',
+          {
+            checkoutRequestId: tx.checkoutRequestId,
+            checkoutArticleId: tx.articleId,
+            affiliateCode: tx.affiliateCode || '',
+            campaignCode: tx.campaignCode,
+            channel: tx.paymentMethod === 'bank' ? 'bank' : 'mpesa',
+            issuedAt,
+            expiresAt
+          }
+        );
+        if (!claimIsValid) {
+          return {
+            created: false,
+            commission: null,
+            affiliateId: undefined,
+            freshAffiliate: undefined,
+            freshCampaign: undefined,
+            freshSettings: undefined
+          };
+        }
       }
 
       const affiliateQuery = db.collection('affiliates')
@@ -1201,9 +1251,9 @@ export const affiliateStore = {
 
       let freshCampaign: AffiliateCampaign | undefined;
       let campaignRef: any;
-      if (campaignCode) {
+      if (canonicalCampaignCode) {
         const campaignQuery = db.collection('affiliate_campaigns')
-          .where('code', '==', campaignCode.trim().toUpperCase())
+          .where('code', '==', canonicalCampaignCode.toUpperCase())
           .limit(2);
         const campaignQuerySnapshot = await firestoreTransaction.get(campaignQuery) as any;
         const campaignDocuments = campaignQuerySnapshot.docs || [];
@@ -1215,7 +1265,7 @@ export const affiliateStore = {
             id: campaignSnapshot.id || campaignRef.id
           };
           if (
-            candidate.code?.trim().toUpperCase() === campaignCode?.trim().toUpperCase() &&
+            candidate.code?.trim().toUpperCase() === canonicalCampaignCode.toUpperCase() &&
             isCampaignValidAttribution(candidate, tx.articleId, attributedAtMs)
           ) {
             freshCampaign = candidate;

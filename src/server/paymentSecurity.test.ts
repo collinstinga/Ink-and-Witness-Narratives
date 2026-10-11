@@ -54,7 +54,7 @@ describe('payment capabilities', () => {
     expect(parsed.searchParams.get('existing')).toBe('1');
   });
 
-  it('redacts both server-only hashes without mutating the transaction', () => {
+  it('redacts all server-only correlation hashes without mutating the transaction', () => {
     const transaction = {
       id: 'tx_1',
       checkoutRequestId: 'checkout_1',
@@ -65,13 +65,16 @@ describe('payment capabilities', () => {
       status: 'PENDING',
       createdAt: '2026-09-05T00:00:00.000Z',
       paymentCapabilityHash: 'a'.repeat(64),
-      callbackCapabilityHash: 'b'.repeat(64)
+      callbackCapabilityHash: 'b'.repeat(64),
+      affiliateAttributionClaimId: 'c'.repeat(64)
     } as const;
 
     const redacted = redactPaymentTransaction(transaction);
     expect(redacted).not.toHaveProperty('paymentCapabilityHash');
     expect(redacted).not.toHaveProperty('callbackCapabilityHash');
+    expect(redacted).not.toHaveProperty('affiliateAttributionClaimId');
     expect(transaction.paymentCapabilityHash).toBe('a'.repeat(64));
+    expect(transaction.affiliateAttributionClaimId).toBe('c'.repeat(64));
   });
 
   it('never treats a pending checkout ID as a recoverable receipt', () => {

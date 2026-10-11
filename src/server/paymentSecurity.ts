@@ -63,6 +63,7 @@ export function redactPaymentTransaction(transaction: PaymentTransaction): Payme
   const {
     paymentCapabilityHash: _paymentCapabilityHash,
     callbackCapabilityHash: _callbackCapabilityHash,
+    affiliateAttributionClaimId: _affiliateAttributionClaimId,
     ...safeTransaction
   } = transaction;
   return safeTransaction;

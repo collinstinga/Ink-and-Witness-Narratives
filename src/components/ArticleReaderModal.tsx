@@ -798,11 +798,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
     setCommentSaving(true);
     setCommentNotice('');
     try {
-      const comment = await api.submitPieceComment(
-        article.id,
-        commentText.trim(),
-        currentUser?.name || 'Reader'
-      );
+      const comment = await api.submitPieceComment(article.id, commentText.trim());
       setPieceComments(previous => [comment, ...previous.filter(item => item.id !== comment.id)]);
       setCommentText('');
       setCommentNotice('Comment posted.');

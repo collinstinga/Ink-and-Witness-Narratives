@@ -308,6 +308,8 @@ export interface InitiateStkPushParams {
   exchangeRateTimestamp?: string;
   affiliateCode?: string;
   campaignCode?: string;
+  affiliateAttributionVersion?: 2;
+  affiliateAttributionClaimId?: string;
   affiliateAttributionAt?: string;
   affiliateAttributionExpiresAt?: string;
   userId?: string;
@@ -350,6 +352,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     exchangeRateTimestamp,
     affiliateCode,
     campaignCode,
+    affiliateAttributionVersion,
+    affiliateAttributionClaimId,
     affiliateAttributionAt,
     affiliateAttributionExpiresAt,
     userId,
@@ -466,6 +470,8 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     type: paymentType,
     affiliateCode: affiliateCode || undefined,
     campaignCode: campaignCode || undefined,
+    affiliateAttributionVersion,
+    affiliateAttributionClaimId: affiliateAttributionClaimId || undefined,
     affiliateAttributionAt: affiliateAttributionAt || undefined,
     affiliateAttributionExpiresAt: affiliateAttributionExpiresAt || undefined,
     userId: userId || undefined,

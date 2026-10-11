@@ -880,6 +880,8 @@ export interface PaymentTransaction {
   isSeed?: boolean; // Distinguish seed demo records from real earnings
   affiliateCode?: string;
   campaignCode?: string;
+  affiliateAttributionVersion?: 2;
+  affiliateAttributionClaimId?: string;
   affiliateAttributionAt?: string;
   affiliateAttributionExpiresAt?: string;
   shortcodeUsed?: string;

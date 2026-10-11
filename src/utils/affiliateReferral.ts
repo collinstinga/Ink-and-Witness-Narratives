@@ -1,13 +1,12 @@
 /**
  * Affiliate & Referral Tracking Utility for Ink & Witness Narratives
- * Handles referral code extraction, persistence, attribution window validation,
- * and payload enrichment for payment requests.
+ * Handles referral code extraction and current-tab checkout context. The signed
+ * HttpOnly server cookie remains the only authority for commission attribution.
  */
 
 const REF_STORAGE_KEY = 'ink_witness_affiliate_ref';
 const REF_TIMESTAMP_KEY = 'ink_witness_affiliate_time';
 const CAMPAIGN_STORAGE_KEY = 'ink_witness_affiliate_campaign';
-const DEFAULT_ATTRIBUTION_DAYS = 30;
 
 export interface StoredReferral {
   code: string;
@@ -23,6 +22,11 @@ export function initReferralTracking(): StoredReferral | null {
   if (typeof window === 'undefined') return null;
 
   try {
+    // Remove the legacy 30-day referral state. Attribution is intentionally
+    // scoped to the browser tab/session and consumed by the first checkout.
+    localStorage.removeItem(REF_STORAGE_KEY);
+    localStorage.removeItem(REF_TIMESTAMP_KEY);
+    localStorage.removeItem(CAMPAIGN_STORAGE_KEY);
     const urlParams = new URLSearchParams(window.location.search);
     const refCode = urlParams.get('ref') || urlParams.get('aff') || urlParams.get('referral');
     const campaign = urlParams.get('c') || urlParams.get('campaign');
@@ -31,15 +35,16 @@ export function initReferralTracking(): StoredReferral | null {
       const cleanCode = refCode.trim().toLowerCase();
       const now = Date.now();
 
-      // Store in localStorage & sessionStorage
-      localStorage.setItem(REF_STORAGE_KEY, cleanCode);
-      localStorage.setItem(REF_TIMESTAMP_KEY, now.toString());
+      // Session storage is display context only; it is never trusted by the
+      // payment server as proof of affiliate attribution.
       sessionStorage.setItem(REF_STORAGE_KEY, cleanCode);
+      sessionStorage.setItem(REF_TIMESTAMP_KEY, now.toString());
 
       if (campaign && campaign.trim()) {
         const cleanCampaign = campaign.trim().toLowerCase();
-        localStorage.setItem(CAMPAIGN_STORAGE_KEY, cleanCampaign);
         sessionStorage.setItem(CAMPAIGN_STORAGE_KEY, cleanCampaign);
+      } else {
+        sessionStorage.removeItem(CAMPAIGN_STORAGE_KEY);
       }
 
       // The server deduplicates redirect-originated clicks with a short-lived,
@@ -54,7 +59,7 @@ export function initReferralTracking(): StoredReferral | null {
       };
     }
 
-    // Check if existing stored referral is within attribution window
+    // Continue only the current browser-tab referral journey.
     return getActiveReferral();
   } catch (err) {
     console.warn('[Affiliate] Error initializing referral tracking:', err);
@@ -63,26 +68,19 @@ export function initReferralTracking(): StoredReferral | null {
 }
 
 /**
- * Retrieves the currently active stored referral if valid and not expired
+ * Retrieves referral display context for the current browser tab.
  */
-export function getActiveReferral(attributionDays = DEFAULT_ATTRIBUTION_DAYS): StoredReferral | null {
+export function getActiveReferral(): StoredReferral | null {
   if (typeof window === 'undefined') return null;
 
   try {
-    const code = sessionStorage.getItem(REF_STORAGE_KEY) || localStorage.getItem(REF_STORAGE_KEY);
-    const timeStr = localStorage.getItem(REF_TIMESTAMP_KEY);
-    const campaign = sessionStorage.getItem(CAMPAIGN_STORAGE_KEY) || localStorage.getItem(CAMPAIGN_STORAGE_KEY) || undefined;
+    const code = sessionStorage.getItem(REF_STORAGE_KEY);
+    const timeStr = sessionStorage.getItem(REF_TIMESTAMP_KEY);
+    const campaign = sessionStorage.getItem(CAMPAIGN_STORAGE_KEY) || undefined;
 
     if (!code) return null;
 
     const timestamp = timeStr ? parseInt(timeStr, 10) : Date.now();
-    const maxAgeMs = attributionDays * 24 * 60 * 60 * 1000;
-
-    if (Date.now() - timestamp > maxAgeMs) {
-      // Expired attribution window
-      clearReferral();
-      return null;
-    }
 
     return {
       code,
@@ -104,6 +102,7 @@ export function clearReferral() {
     localStorage.removeItem(REF_TIMESTAMP_KEY);
     localStorage.removeItem(CAMPAIGN_STORAGE_KEY);
     sessionStorage.removeItem(REF_STORAGE_KEY);
+    sessionStorage.removeItem(REF_TIMESTAMP_KEY);
     sessionStorage.removeItem(CAMPAIGN_STORAGE_KEY);
   } catch {
     // ignore

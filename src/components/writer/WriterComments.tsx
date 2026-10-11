@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   MessageSquare, 
   Check, 
@@ -34,6 +34,9 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const fetchComments = async () => {
     try {
@@ -41,10 +44,36 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
       setError(null);
       const res = await api.getAdminComments();
       setComments(res.comments || []);
+      setNextCursor(res.nextCursor || null);
+      setHasMore(res.hasMore === true);
     } catch (err: any) {
       setError(err.message || 'Failed to load comments.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMoreComments = async () => {
+    if (!nextCursor || loadingMore) return;
+    try {
+      setLoadingMore(true);
+      setError(null);
+      const res = await api.getAdminComments(nextCursor);
+      setComments(previous => {
+        const merged = new Map<string, PieceComment>(
+          previous.map(comment => [comment.id, comment] as const)
+        );
+        for (const comment of res.comments || []) merged.set(comment.id, comment);
+        return [...merged.values()].sort(
+          (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+        );
+      });
+      setNextCursor(res.nextCursor || null);
+      setHasMore(res.hasMore === true);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load more comments.');
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -80,6 +109,11 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
       setActionLoadingId(null);
     }
   };
+
+  const articleById = useMemo(
+    () => new Map(articles.map(article => [article.id, article])),
+    [articles]
+  );
 
   // Filtered comments
   const filteredComments = comments.filter(c => {
@@ -263,7 +297,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
           </div>
         ) : (
           filteredComments.map((comment) => {
-            const article = articles.find(a => a.id === comment.articleId);
+            const article = articleById.get(comment.articleId);
             const isProcessing = actionLoadingId === comment.id;
 
             return (
@@ -392,6 +426,20 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
           })
         )}
       </div>
+
+      {hasMore && nextCursor ? (
+        <div className="flex justify-center pt-2">
+          <button
+            type="button"
+            onClick={loadMoreComments}
+            disabled={loadingMore}
+            className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-900/70 text-xs font-mono flex items-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingMore ? 'animate-spin' : ''}`} />
+            <span>{loadingMore ? 'Loading more…' : 'Load older comments'}</span>
+          </button>
+        </div>
+      ) : null}
 
     </div>
   );

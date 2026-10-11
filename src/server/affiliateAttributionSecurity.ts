@@ -4,7 +4,9 @@ export const AFFILIATE_ATTRIBUTION_COOKIE_NAME = 'iw_affiliate_attribution';
 export const AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const AFFILIATE_ATTRIBUTION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
-const TOKEN_PREFIX = 'aff_attr_v1';
+// v2 intentionally invalidates legacy 30-day cookies. A v2 cookie is issued as
+// a browser-session cookie and consumed by the first successful checkout.
+const TOKEN_PREFIX = 'aff_attr_v2';
 const MAX_TOKEN_LENGTH = 1024;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
 const DEVELOPMENT_SIGNING_SECRET = crypto.randomBytes(32).toString('hex');
@@ -16,15 +18,17 @@ export interface AffiliateAttribution {
 }
 
 export interface VerifiedAffiliateAttribution extends AffiliateAttribution {
+  attributionId: string;
   issuedAt: number;
   expiresAt: number;
 }
 
 type AttributionPayload = {
-  v: 1;
+  v: 2;
   r: string;
   c?: string;
   a?: string;
+  j: string;
   iat: number;
   exp: number;
 };
@@ -34,6 +38,7 @@ type AttributionOptions = {
   signingSecret?: string;
   maxAgeMs?: number;
   allowCrossArticle?: boolean;
+  attributionId?: string;
 };
 
 function resolveSigningSecret(explicitSecret?: unknown): string | null {
@@ -69,13 +74,15 @@ export function createAffiliateAttributionCookieValue(
   const secret = resolveSigningSecret(options.signingSecret);
   if (!normalized || !secret) return null;
   const payload: AttributionPayload = {
-    v: 1,
+    v: 2,
     r: normalized.ref,
     c: normalized.campaign,
     a: normalized.articleId,
+    j: options.attributionId || crypto.randomBytes(18).toString('base64url'),
     iat: options.now ?? Date.now(),
     exp: 0
   };
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(payload.j)) return null;
   const requestedMaxAge = Number(options.maxAgeMs ?? AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS);
   const maxAgeMs = Number.isFinite(requestedMaxAge)
     ? Math.max(1, Math.min(AFFILIATE_ATTRIBUTION_MAX_AGE_MS, Math.floor(requestedMaxAge)))
@@ -114,7 +121,9 @@ export function verifyAffiliateAttributionCookie(
   const now = options.now ?? Date.now();
   if (
     !normalized ||
-    payload.v !== 1 ||
+    payload.v !== 2 ||
+    typeof payload.j !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,64}$/.test(payload.j) ||
     !Number.isSafeInteger(payload.iat) ||
     !Number.isSafeInteger(payload.exp) ||
     payload.iat > now + MAX_CLOCK_SKEW_MS ||
@@ -123,5 +132,5 @@ export function verifyAffiliateAttributionCookie(
     now > payload.exp ||
     (!options.allowCrossArticle && normalized.articleId && normalized.articleId !== articleId)
   ) return null;
-  return { ...normalized, issuedAt: payload.iat, expiresAt: payload.exp };
+  return { ...normalized, attributionId: payload.j, issuedAt: payload.iat, expiresAt: payload.exp };
 }

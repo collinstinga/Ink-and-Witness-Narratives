@@ -20,8 +20,12 @@ const storeMocks = vi.hoisted(() => {
     confirmTransaction: vi.fn(),
     savePurchasedToken: vi.fn(async () => undefined),
     saveTransaction: vi.fn(async (transaction: unknown) => transaction),
+    createBankTransactionWithAffiliateClaim: vi.fn(async (transaction: unknown) => transaction),
     getArticleById,
     getFreshArticleById: vi.fn(async (id: string, includeDrafts?: boolean, _forceRefresh?: boolean) => getArticleById(id, includeDrafts)),
+    getFreshComments: vi.fn(async () => []),
+    getFreshCommentsPage: vi.fn(async () => ({ comments: [], hasMore: false, nextCursor: null })),
+    getFreshReportedComments: vi.fn(async () => []),
     getMpesaSettings: vi.fn(() => ({ defaultPriceKes: 300, minTipKes: 300, tippingEnabled: true })),
     getArticles,
     getFreshArticles: vi.fn(async (includeDrafts?: boolean, _forceRefresh?: boolean) => getArticles(includeDrafts))
@@ -58,6 +62,14 @@ const mpesaMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('./src/server/mpesa.js', () => mpesaMocks);
+
+const attributionClaimMocks = vi.hoisted(() => ({
+  claimAffiliateAttribution: vi.fn(),
+  getAffiliateAttributionClaimDocumentId: vi.fn(() => 'c'.repeat(64)),
+  releaseAffiliateAttributionClaim: vi.fn()
+}));
+
+vi.mock('./src/server/affiliateAttributionClaimStore.js', () => attributionClaimMocks);
 
 import { createApp } from './server.js';
 import { createAffiliateAttributionCookieValue } from './src/server/affiliateAttributionSecurity.js';
@@ -134,6 +146,11 @@ describe('public payment route security', () => {
       merchantRequestId: 'merchant_new',
       paymentCapability
     });
+    attributionClaimMocks.claimAffiliateAttribution.mockResolvedValue('claimed');
+    attributionClaimMocks.releaseAffiliateAttributionClaim.mockResolvedValue(undefined);
+    storeMocks.getFreshComments.mockResolvedValue([]);
+    storeMocks.getFreshCommentsPage.mockResolvedValue({ comments: [], hasMore: false, nextCursor: null });
+    storeMocks.getFreshReportedComments.mockResolvedValue([]);
   });
 
   it('does not expose payment status or download tokens without the capability', async () => {
@@ -282,6 +299,84 @@ describe('public payment route security', () => {
     expect(body.amount).toBe(825);
   });
 
+  it('returns only approved public comment fields for a published piece', async () => {
+    storeMocks.getArticles.mockReturnValueOnce([{
+      id: 'article_1',
+      slug: 'test-article',
+      title: 'Test article',
+      status: 'published'
+    }]);
+    storeMocks.getFreshComments.mockResolvedValueOnce([{
+      id: 'comment_1',
+      articleId: 'article_1',
+      articleTitle: 'Test article',
+      readerName: 'Reader',
+      readerEmail: 'private@example.test',
+      readerHash: 'private-reader-hash',
+      content: 'Visible comment',
+      createdAt: '2026-10-09T10:00:00.000Z',
+      status: 'approved',
+      isReported: true,
+      reportedReason: 'private moderation detail'
+    }]);
+
+    const response = await fetch(`${baseUrl}/api/articles/test-article/comments`);
+    const body = await response.json() as Array<Record<string, unknown>>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(body).toEqual([expect.objectContaining({ id: 'comment_1', content: 'Visible comment' })]);
+    expect(body[0]).not.toHaveProperty('readerEmail');
+    expect(body[0]).not.toHaveProperty('readerHash');
+    expect(body[0]).not.toHaveProperty('isReported');
+    expect(body[0]).not.toHaveProperty('reportedReason');
+    expect(storeMocks.getFreshComments).toHaveBeenCalledWith('article_1', false, {
+      maxAgeMs: 15_000,
+      maxResults: 20
+    });
+  });
+
+  it('does not expose comments for an unpublished or missing piece', async () => {
+    storeMocks.getArticles.mockReturnValueOnce([]);
+
+    const response = await fetch(`${baseUrl}/api/articles/draft_piece/comments`);
+
+    expect(response.status).toBe(404);
+    expect(storeMocks.getFreshComments).not.toHaveBeenCalled();
+  });
+
+  it('returns paginated comments to the authenticated Writer Portal', async () => {
+    storeMocks.getFreshCommentsPage.mockResolvedValueOnce({
+      comments: [{
+        id: 'comment_2',
+        articleId: 'article_1',
+        readerName: 'Reader Two',
+        readerEmail: 'reader@example.test',
+        readerHash: 'account_reader_2',
+        content: 'Writer-visible comment',
+        createdAt: '2026-10-09T09:00:00.000Z',
+        status: 'approved'
+      }],
+      hasMore: true,
+      nextCursor: { createdAt: '2026-10-09T09:00:00.000Z', id: 'comment_2' }
+    });
+
+    const response = await fetch(`${baseUrl}/api/admin/comments?limit=25`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(body.comments).toEqual([expect.objectContaining({
+      id: 'comment_2',
+      readerEmail: 'reader@example.test'
+    })]);
+    expect(body.hasMore).toBe(true);
+    expect(body.nextCursor).toEqual(expect.any(String));
+    expect(storeMocks.getFreshCommentsPage).toHaveBeenCalledWith({ limit: 25, cursor: undefined });
+  });
+
   it('accepts a reader-selected tip of KSh 1 without applying the legacy KSh 300 floor', async () => {
     const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
       method: 'POST',
@@ -385,12 +480,14 @@ describe('public payment route security', () => {
     expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
       affiliateCode: 'partner_7',
       campaignCode: 'launch_2026',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'c'.repeat(64),
       affiliateAttributionAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       affiliateAttributionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)
     }));
   });
 
-  it('continues a signed affiliate attribution across a subsequent piece purchase', async () => {
+  it('accepts a signed cross-piece referral once and expires its checkout cookie', async () => {
     const signed = createAffiliateAttributionCookieValue({
       ref: 'PARTNER_7',
       articleId: 'another_piece'
@@ -405,19 +502,25 @@ describe('public payment route security', () => {
       body: JSON.stringify({ articleId: 'article_1', phoneNumber: '0712345678', amount: 300 })
     });
 
+    const body = await response.json() as Record<string, unknown>;
     expect(response.status).toBe(200);
+    expect(body.affiliateAttributionConsumed).toBe(true);
+    expect(response.headers.get('set-cookie')).toMatch(/iw_affiliate_attribution=;/);
     expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
       affiliateCode: 'partner_7',
       campaignCode: undefined
     }));
   });
 
-  it('continues signed attribution and ignores forged affiliate fields for a later bank order', async () => {
+  it('uses one signed bank referral and leaves a replay of the same signed cookie unattributed', async () => {
     const signed = createAffiliateAttributionCookieValue({
       ref: 'PARTNER_7',
       campaign: 'LAUNCH_2026',
       articleId: 'origin_piece'
     });
+    attributionClaimMocks.claimAffiliateAttribution
+      .mockResolvedValueOnce('claimed')
+      .mockResolvedValueOnce('consumed');
 
     const response = await fetch(`${baseUrl}/api/payments/bank-order`, {
       method: 'POST',
@@ -433,14 +536,98 @@ describe('public payment route security', () => {
       })
     });
 
+    const body = await response.json() as Record<string, unknown>;
     expect(response.status).toBe(200);
-    expect(storeMocks.saveTransaction).toHaveBeenCalledWith(expect.objectContaining({
+    expect(body.affiliateAttributionConsumed).toBe(true);
+    expect(response.headers.get('set-cookie')).toMatch(/iw_affiliate_attribution=;/);
+    expect(storeMocks.createBankTransactionWithAffiliateClaim).toHaveBeenCalledWith(expect.objectContaining({
       articleId: 'article_1',
       affiliateCode: 'partner_7',
       campaignCode: 'launch_2026',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'c'.repeat(64),
       affiliateAttributionAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       affiliateAttributionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/)
     }));
+
+    const directResponse = await fetch(`${baseUrl}/api/payments/bank-order`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({ articleId: 'article_1', amount: 300 })
+    });
+    expect(directResponse.status).toBe(200);
+    expect(storeMocks.createBankTransactionWithAffiliateClaim).toHaveBeenLastCalledWith(expect.objectContaining({
+      articleId: 'article_1',
+      affiliateCode: undefined,
+      campaignCode: undefined
+    }));
+    expect(attributionClaimMocks.claimAffiliateAttribution).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a concurrent replay before creating another attributed checkout', async () => {
+    const signed = createAffiliateAttributionCookieValue({
+      ref: 'PARTNER_7',
+      articleId: 'article_1'
+    });
+    attributionClaimMocks.claimAffiliateAttribution.mockResolvedValueOnce('in_progress');
+
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({ articleId: 'article_1', phoneNumber: '0712345678', amount: 300 })
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({
+      code: 'AFFILIATE_CHECKOUT_IN_PROGRESS',
+      affiliateAttributionConsumed: false
+    });
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(mpesaMocks.initiateStkPush).not.toHaveBeenCalled();
+  });
+
+  it('releases an attribution claim only when Daraja explicitly rejects the checkout', async () => {
+    const signed = createAffiliateAttributionCookieValue({ ref: 'PARTNER_7', articleId: 'article_1' });
+    mpesaMocks.initiateStkPush.mockResolvedValueOnce({
+      success: false,
+      error: 'Daraja rejected the request.'
+    });
+
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({ articleId: 'article_1', phoneNumber: '0712345678', amount: 300 })
+    });
+
+    expect(response.status).toBe(400);
+    expect(attributionClaimMocks.releaseAffiliateAttributionClaim).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it('keeps an attribution claim fail-closed when Daraja dispatch is ambiguous', async () => {
+    const signed = createAffiliateAttributionCookieValue({ ref: 'PARTNER_7', articleId: 'article_1' });
+    mpesaMocks.initiateStkPush.mockRejectedValueOnce(new Error('Connection ended after dispatch'));
+
+    const response = await fetch(`${baseUrl}/api/mpesa/stkpush`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({ articleId: 'article_1', phoneNumber: '0712345678', amount: 300 })
+    });
+
+    expect(response.status).toBe(500);
+    expect(attributionClaimMocks.releaseAffiliateAttributionClaim).not.toHaveBeenCalled();
   });
 
   it('charges a bank order at the fresh server price instead of the client amount', async () => {
@@ -460,7 +647,7 @@ describe('public payment route security', () => {
 
     expect(response.status).toBe(200);
     expect(storeMocks.getFreshArticleById).toHaveBeenCalledWith('article_1', false, true);
-    expect(storeMocks.saveTransaction).toHaveBeenCalledWith(expect.objectContaining({
+    expect(storeMocks.createBankTransactionWithAffiliateClaim).toHaveBeenCalledWith(expect.objectContaining({
       articleId: 'article_1',
       amount: 975,
       originalAmount: 975,

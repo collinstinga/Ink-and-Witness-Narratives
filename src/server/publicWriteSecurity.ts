@@ -285,10 +285,7 @@ export const publicWriteValidators = {
   }, { maxBytes: 1_024 }),
 
   comment: validateJsonBody({
-    content: { kind: 'string', required: true, minLength: 1, maxLength: 3_000, normalize: 'trim' },
-    readerName: { kind: 'string', maxLength: 80, normalize: 'trim' },
-    readerEmail: { kind: 'string', maxLength: 254, pattern: EMAIL, normalize: 'lower' },
-    readerHash: { kind: 'string', required: true, maxLength: 128, pattern: SAFE_READER_HASH, normalize: 'trim' }
+    content: { kind: 'string', required: true, minLength: 1, maxLength: 3_000, normalize: 'trim' }
   }, { maxBytes: 8_192 }),
 
   commentReport: validateJsonBody({

@@ -52,10 +52,15 @@ import {
 import {
   AFFILIATE_ATTRIBUTION_COOKIE_NAME,
   AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS,
-  AFFILIATE_ATTRIBUTION_MAX_AGE_MS,
   createAffiliateAttributionCookieValue,
-  verifyAffiliateAttributionCookie
+  verifyAffiliateAttributionCookie,
+  type VerifiedAffiliateAttribution
 } from "./src/server/affiliateAttributionSecurity.js";
+import {
+  claimAffiliateAttribution,
+  getAffiliateAttributionClaimDocumentId,
+  releaseAffiliateAttributionClaim
+} from "./src/server/affiliateAttributionClaimStore.js";
 import {
   generateAffiliateTemporaryPassword,
   hashAffiliatePassword,
@@ -169,6 +174,29 @@ function isSafePublicIdentifier(value: unknown, maxLength = 128): value is strin
     value.length > 0 &&
     value.length <= maxLength &&
     /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
+}
+
+type AdminCommentCursor = { createdAt: string; id: string };
+
+function encodeAdminCommentCursor(cursor: AdminCommentCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeAdminCommentCursor(value: unknown): AdminCommentCursor | null {
+  if (typeof value !== 'string' || value.length < 8 || value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<AdminCommentCursor>;
+    if (
+      typeof parsed.createdAt !== 'string' ||
+      !Number.isFinite(Date.parse(parsed.createdAt)) ||
+      !isSafePublicIdentifier(parsed.id, 160)
+    ) return null;
+    return { createdAt: parsed.createdAt, id: parsed.id };
+  } catch {
+    return null;
+  }
 }
 
 function getPaymentCapability(req: Request): unknown {
@@ -718,12 +746,20 @@ function clearAffiliateClickDedupCookie(res: Response) {
   });
 }
 
-function setAffiliateAttributionCookie(res: Response, cookieValue: string, maxAgeMs: number) {
+function setAffiliateAttributionCookie(res: Response, cookieValue: string) {
   res.cookie(AFFILIATE_ATTRIBUTION_COOKIE_NAME, cookieValue, {
     httpOnly: true,
     secure: isProduction,
     sameSite: 'lax',
-    maxAge: Math.max(1, Math.min(AFFILIATE_ATTRIBUTION_MAX_AGE_MS, maxAgeMs)),
+    path: '/'
+  });
+}
+
+function clearAffiliateAttributionCookie(res: Response) {
+  res.clearCookie(AFFILIATE_ATTRIBUTION_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
     path: '/'
   });
 }
@@ -735,8 +771,57 @@ function setVerifiedAffiliateAttribution(
 ) {
   const cookieValue = createAffiliateAttributionCookieValue(attribution, { maxAgeMs });
   if (!cookieValue) return false;
-  setAffiliateAttributionCookie(res, cookieValue, maxAgeMs);
+  setAffiliateAttributionCookie(res, cookieValue);
   return true;
+}
+
+type CheckoutAffiliateAttribution = {
+  attribution: VerifiedAffiliateAttribution | null;
+  state: 'none' | 'claimed' | 'in_progress' | 'consumed' | 'invalid';
+  clearClientReferral: boolean;
+};
+
+async function reserveCheckoutAffiliateAttribution(
+  req: Request,
+  res: Response,
+  checkoutArticleId: string,
+  channel: 'mpesa' | 'bank'
+): Promise<CheckoutAffiliateAttribution> {
+  const rawCookie = (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME];
+  if (typeof rawCookie !== 'string' || !rawCookie) {
+    return { attribution: null, state: 'none', clearClientReferral: false };
+  }
+  const attribution = verifyAffiliateAttributionCookie(rawCookie, checkoutArticleId, {
+    allowCrossArticle: true
+  });
+  if (!attribution) {
+    clearAffiliateAttributionCookie(res);
+    return { attribution: null, state: 'invalid', clearClientReferral: true };
+  }
+  const state = await claimAffiliateAttribution(attribution, { checkoutArticleId, channel });
+  if (state === 'claimed') {
+    return { attribution, state, clearClientReferral: true };
+  }
+  // An in-flight duplicate is rejected without destroying the original
+  // referral. If that first attempt is definitively rejected and releases its
+  // reservation, the same browser can safely retry. Consumed/invalid tokens
+  // are cleared and any later checkout proceeds as a direct sale.
+  if (state === 'in_progress') {
+    return { attribution: null, state, clearClientReferral: false };
+  }
+  clearAffiliateAttributionCookie(res);
+  return { attribution: null, state, clearClientReferral: true };
+}
+
+async function releaseKnownFailedAffiliateClaim(attribution: VerifiedAffiliateAttribution | null): Promise<void> {
+  if (!attribution) return;
+  try {
+    await releaseAffiliateAttributionClaim(attribution.attributionId);
+  } catch (error) {
+    // Fail closed: a claim that cannot be safely released remains unusable for
+    // another attributed checkout rather than risking duplicate commission.
+    console.error('[Affiliate Attribution] Failed checkout claim could not be released.', error);
+  }
 }
 
 // Cookie-authenticated state changes must come from this same site. Combined
@@ -1035,6 +1120,15 @@ export async function createApp() {
     legacyHeaders: false,
     validate: { xForwardedForHeader: false, default: false },
     message: { success: false, error: "Comment limit reached. Please try again later." }
+  });
+
+  const commentReadLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    message: { success: false, error: "Comment refresh limit reached. Please try again in a moment." }
   });
 
   const commentReportLimiter = rateLimit({
@@ -2058,6 +2152,8 @@ export async function createApp() {
 
   // Initiate M-Pesa STK Push
   app.post("/api/mpesa/stkpush", publicWriteLimiter, stkPushLimiter, publicWriteValidators.stkPush, async (req: Request, res: Response) => {
+    let reservedAttribution: VerifiedAffiliateAttribution | null = null;
+    let providerRequestStarted = false;
     try {
       const { 
         articleId, 
@@ -2150,12 +2246,24 @@ export async function createApp() {
       }
 
       const formattedPhone = formatKenyanPhone(rawPhone);
-      const trustedAttribution = verifyAffiliateAttributionCookie(
-        (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
+      const attributionResolution = await reserveCheckoutAffiliateAttribution(
+        req,
+        res,
         canonicalArticleId || "general_tip",
-        { allowCrossArticle: true }
+        'mpesa'
       );
+      if (attributionResolution.state === 'in_progress') {
+        return res.status(409).json({
+          success: false,
+          code: 'AFFILIATE_CHECKOUT_IN_PROGRESS',
+          error: 'This referral has already started a checkout. Retry to continue without duplicate affiliate attribution.',
+          affiliateAttributionConsumed: false
+        });
+      }
+      const trustedAttribution = attributionResolution.attribution;
+      reservedAttribution = trustedAttribution;
 
+      providerRequestStarted = true;
       const stkResult = await initiateStkPush({
         phoneNumber: formattedPhone,
         amount: chargeAmount,
@@ -2172,6 +2280,10 @@ export async function createApp() {
         exchangeRateTimestamp: exchangeRateTimestamp || new Date().toISOString(),
         affiliateCode: trustedAttribution?.ref,
         campaignCode: trustedAttribution?.campaign,
+        affiliateAttributionVersion: trustedAttribution ? 2 : undefined,
+        affiliateAttributionClaimId: trustedAttribution
+          ? getAffiliateAttributionClaimDocumentId(trustedAttribution.attributionId)
+          : undefined,
         affiliateAttributionAt: trustedAttribution
           ? new Date(trustedAttribution.issuedAt).toISOString()
           : undefined,
@@ -2183,12 +2295,22 @@ export async function createApp() {
       });
 
       if (!stkResult.success || !stkResult.checkoutRequestId || !stkResult.paymentCapability) {
+        await releaseKnownFailedAffiliateClaim(reservedAttribution);
+        reservedAttribution = null;
         return res.status(400).json({
           success: false,
-          error: stkResult.error || "Failed to dispatch STK Push to Safaricom Daraja."
+          error: stkResult.error || "Failed to dispatch STK Push to Safaricom Daraja.",
+          affiliateAttributionConsumed: false
         });
       }
 
+      if (trustedAttribution) {
+        // The callback-intent attachment atomically consumes and binds this
+        // claim to Daraja's real CheckoutRequestID. Ambiguous responses retain
+        // the reservation for callback recovery and must never bind it here to
+        // the local payment-attempt identifier.
+        clearAffiliateAttributionCookie(res);
+      }
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
@@ -2201,9 +2323,13 @@ export async function createApp() {
         originalAmount: originalAmount ? Number(originalAmount) : chargeAmount,
         phoneNumber: formattedPhone,
         paymentCapability: stkResult.paymentCapability,
+        affiliateAttributionConsumed: attributionResolution.clearClientReferral,
         live: true
       });
     } catch (err: any) {
+      if (reservedAttribution && !providerRequestStarted) {
+        await releaseKnownFailedAffiliateClaim(reservedAttribution);
+      }
       console.error("STK Push controller exception:", err);
       res.status(500).json({ error: err.message || "Failed to initiate M-Pesa payment" });
     }
@@ -2211,6 +2337,8 @@ export async function createApp() {
 
   // Bank Payment Order Creation (Direct Bank / RTGS / EFT / Paybill Bank Transfer)
   app.post("/api/payments/bank-order", publicWriteLimiter, bankOrderLimiter, publicWriteValidators.bankOrder, async (req: Request, res: Response) => {
+    let reservedAttribution: VerifiedAffiliateAttribution | null = null;
+    let transactionWriteCommitted = false;
     try {
       const { 
         articleId, 
@@ -2235,11 +2363,22 @@ export async function createApp() {
       const canonicalArticleId = article.id;
       const articleTitle = article.title;
       const chargeAmount = resolveArticlePriceKes(article, mpesaSettings.defaultPriceKes || 1050);
-      const trustedAttribution = verifyAffiliateAttributionCookie(
-        (req as any).cookies?.[AFFILIATE_ATTRIBUTION_COOKIE_NAME],
+      const attributionResolution = await reserveCheckoutAffiliateAttribution(
+        req,
+        res,
         canonicalArticleId,
-        { allowCrossArticle: true }
+        'bank'
       );
+      if (attributionResolution.state === 'in_progress') {
+        return res.status(409).json({
+          success: false,
+          code: 'AFFILIATE_CHECKOUT_IN_PROGRESS',
+          error: 'This referral has already started a checkout. Retry to continue without duplicate affiliate attribution.',
+          affiliateAttributionConsumed: false
+        });
+      }
+      const trustedAttribution = attributionResolution.attribution;
+      reservedAttribution = trustedAttribution;
 
       const randomSuffix = Math.floor(100000 + Math.random() * 900000).toString();
       const bankRef = `BW-${randomSuffix}`;
@@ -2248,7 +2387,7 @@ export async function createApp() {
       const normalizedBuyerPhone = phoneNumber ? formatKenyanPhone(phoneNumber) : undefined;
       const reader = (req as any).user;
 
-      const tx: PaymentTransaction = enrichSalesTransaction({
+      const candidateTx: PaymentTransaction = enrichSalesTransaction({
         id: `tx_bank_${Date.now()}`,
         checkoutRequestId,
         articleId: canonicalArticleId,
@@ -2276,6 +2415,10 @@ export async function createApp() {
         }),
         affiliateCode: trustedAttribution?.ref,
         campaignCode: trustedAttribution?.campaign,
+        affiliateAttributionVersion: trustedAttribution ? 2 : undefined,
+        affiliateAttributionClaimId: trustedAttribution
+          ? getAffiliateAttributionClaimDocumentId(trustedAttribution.attributionId)
+          : undefined,
         affiliateAttributionAt: trustedAttribution
           ? new Date(trustedAttribution.issuedAt).toISOString()
           : undefined,
@@ -2284,7 +2427,12 @@ export async function createApp() {
           : undefined,
       });
 
-      await store.saveTransaction(tx);
+      const tx = await store.createBankTransactionWithAffiliateClaim(candidateTx);
+      transactionWriteCommitted = true;
+
+      if (trustedAttribution) {
+        clearAffiliateAttributionCookie(res);
+      }
 
       if (trustedAttribution) {
         console.log(`[Attributed Checkout Initiated] Method: Bank Order, Tx ID: ${tx.id}, BankRef: ${bankRef}, Affiliate: ${trustedAttribution.ref}, Campaign: ${trustedAttribution.campaign || 'none'}, Amount: KES ${chargeAmount}`);
@@ -2296,6 +2444,7 @@ export async function createApp() {
         checkoutRequestId,
         bankReference: bankRef,
         paymentCapability,
+        affiliateAttributionConsumed: attributionResolution.clearClientReferral,
         bankDetails: {
           bankName: "NCBA Bank Kenya / Absa Kenya",
           accountName: "Ink & Witness Narratives / Jake",
@@ -2309,6 +2458,9 @@ export async function createApp() {
         message: `Bank payment order created with reference ${bankRef}. Transfer KES ${chargeAmount} and submit your bank confirmation reference to unlock.`
       });
     } catch (err: any) {
+      if (reservedAttribution && !transactionWriteCommitted) {
+        await releaseKnownFailedAffiliateClaim(reservedAttribution);
+      }
       console.error("Bank order error:", err);
       res.status(500).json({ error: err.message || "Failed to create bank order" });
     }
@@ -2535,20 +2687,37 @@ export async function createApp() {
   });
 
   // Get Comments for a piece
-  app.get("/api/articles/:id/comments", (req: Request, res: Response) => {
-    const { id } = req.params;
-    const comments = store.getComments(id, false).map(comment => ({
-      id: comment.id,
-      articleId: comment.articleId,
-      articleTitle: comment.articleTitle,
-      readerName: comment.readerName,
-      content: comment.content,
-      createdAt: comment.createdAt,
-      updatedAt: comment.updatedAt,
-      status: comment.status
-    }));
-    res.setHeader('Cache-Control', 'public, max-age=15, s-maxage=30');
-    res.json(comments);
+  app.get("/api/articles/:id/comments", commentReadLimiter, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      if (!isSafePublicIdentifier(id)) {
+        return res.status(400).json({ error: 'Invalid piece identifier.' });
+      }
+      const publishedArticle = (await store.getFreshArticles(false)).find(article =>
+        article.id === id || article.slug === id
+      );
+      if (!publishedArticle) {
+        return res.status(404).json({ error: 'Published piece not found.' });
+      }
+      const comments = (await store.getFreshComments(publishedArticle.id, false, {
+        maxAgeMs: 15_000,
+        maxResults: 20
+      })).map(comment => ({
+        id: comment.id,
+        articleId: comment.articleId,
+        articleTitle: comment.articleTitle,
+        readerName: comment.readerName,
+        content: comment.content,
+        createdAt: comment.createdAt,
+        updatedAt: comment.updatedAt,
+        status: comment.status
+      }));
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(comments);
+    } catch (err: any) {
+      console.error('[Comments] Public comments could not be loaded.', err);
+      return res.status(503).json({ error: 'Reader comments are temporarily unavailable.' });
+    }
   });
 
   // Post a comment as a signed-in reader with access to the piece. Identity and
@@ -2566,19 +2735,7 @@ export async function createApp() {
       const access = await requireReaderArticleAccess(req, id);
       if (!('user' in access)) return res.status(access.status).json({ error: access.error });
       const readerHash = `account_${crypto.createHash('sha256').update(access.user.id).digest('hex').slice(0, 40)}`;
-      const recentDuplicate = store.getComments(id, true).find(comment =>
-        comment.readerHash === readerHash &&
-        comment.content === content.trim() &&
-        Date.now() - new Date(comment.createdAt).getTime() < 5 * 60 * 1000
-      );
-      if (recentDuplicate) {
-        return res.json({
-          success: true,
-          deduplicated: true,
-          comment: { ...recentDuplicate, readerEmail: undefined, readerHash: undefined }
-        });
-      }
-      const comment = store.addComment(
+      const comment = await store.addComment(
         access.article.id,
         content,
         access.user.name || 'Reader',
@@ -2595,14 +2752,14 @@ export async function createApp() {
   });
 
   // Report a comment
-  app.post("/api/comments/:commentId/report", publicWriteLimiter, commentReportLimiter, publicWriteValidators.commentReport, (req: Request, res: Response) => {
+  app.post("/api/comments/:commentId/report", publicWriteLimiter, commentReportLimiter, publicWriteValidators.commentReport, async (req: Request, res: Response) => {
     try {
       const { commentId } = req.params;
       const { reason } = req.body;
       if (!isSafePublicIdentifier(commentId, 160)) {
         return res.status(400).json({ error: "Invalid comment identifier." });
       }
-      const updated = store.reportComment(commentId, reason);
+      const updated = await store.reportComment(commentId, reason);
       if (!updated) {
         return res.status(404).json({ error: "Comment not found." });
       }
@@ -2613,7 +2770,7 @@ export async function createApp() {
   });
 
   // Delete own comment
-  app.delete("/api/comments/:commentId", publicWriteLimiter, engagementWriteLimiter, publicWriteValidators.commentDelete, requireAuth, (req: Request, res: Response) => {
+  app.delete("/api/comments/:commentId", publicWriteLimiter, engagementWriteLimiter, publicWriteValidators.commentDelete, requireAuth, async (req: Request, res: Response) => {
     try {
       const { commentId } = req.params;
       if (!isSafePublicIdentifier(commentId, 160)) {
@@ -2621,7 +2778,7 @@ export async function createApp() {
       }
       const user = (req as any).user as { id: string };
       const readerHash = `account_${crypto.createHash('sha256').update(user.id).digest('hex').slice(0, 40)}`;
-      const deleted = store.deleteComment(commentId, readerHash);
+      const deleted = await store.deleteComment(commentId, readerHash);
       if (!deleted) {
         return res.status(404).json({ error: "Comment not found." });
       }
@@ -4006,10 +4163,35 @@ export async function createApp() {
   );
 
   // Writer: Comments Moderation
-  app.get("/api/admin/comments", requireAdminAuth, (_req: Request, res: Response) => {
+  app.get("/api/admin/comments", requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const comments = store.getComments(undefined, true);
-      res.json({ count: comments.length, comments });
+      const requestedLimit = Number(req.query.limit);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.max(1, Math.min(100, Math.floor(requestedLimit)))
+        : 100;
+      const cursorValue = req.query.cursor;
+      const cursor = cursorValue === undefined ? undefined : decodeAdminCommentCursor(cursorValue);
+      if (cursorValue !== undefined && !cursor) {
+        return res.status(400).json({ error: 'Invalid comment page cursor.' });
+      }
+      const [page, reportedComments] = await Promise.all([
+        store.getFreshCommentsPage({ limit, cursor }),
+        cursor ? Promise.resolve([]) : store.getFreshReportedComments(100)
+      ]);
+      const byId = new Map(page.comments.map(comment => [comment.id, comment]));
+      for (const comment of reportedComments) byId.set(comment.id, comment);
+      const comments = [...byId.values()].sort((left, right) => {
+        const reportPriority = Number(Boolean(right.isReported)) - Number(Boolean(left.isReported));
+        if (reportPriority !== 0) return reportPriority;
+        return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+      });
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({
+        count: comments.length,
+        comments,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor ? encodeAdminCommentCursor(page.nextCursor) : null
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to load comments." });
     }
@@ -4204,7 +4386,7 @@ export async function createApp() {
       if (!status || !['approved', 'hidden', 'deleted'].includes(status)) {
         return res.status(400).json({ error: "Valid status ('approved', 'hidden', 'deleted') is required." });
       }
-      const updated = store.updateCommentStatus(commentId, status);
+      const updated = await store.updateCommentStatus(commentId, status);
       if (!updated) {
         return res.status(404).json({ error: "Comment not found." });
       }
@@ -4217,7 +4399,7 @@ export async function createApp() {
   app.delete("/api/admin/comments/:commentId", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { commentId } = req.params;
-      const deleted = store.deleteComment(commentId);
+      const deleted = await store.deleteComment(commentId);
       if (!deleted) {
         return res.status(404).json({ error: "Comment not found." });
       }

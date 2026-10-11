@@ -207,6 +207,38 @@ function confirmedAffiliateTransaction() {
   } as const;
 }
 
+const v2ClaimId = 'c'.repeat(64);
+const v2IssuedAt = Date.parse('2026-09-07T08:00:00.000Z');
+const v2ExpiresAt = Date.parse('2026-10-07T08:00:00.000Z');
+
+function confirmedV2AffiliateTransaction() {
+  return {
+    ...confirmedAffiliateTransaction(),
+    affiliateAttributionVersion: 2 as const,
+    affiliateAttributionClaimId: v2ClaimId,
+    affiliateAttributionAt: new Date(v2IssuedAt).toISOString(),
+    affiliateAttributionExpiresAt: new Date(v2ExpiresAt).toISOString()
+  };
+}
+
+function consumedV2Claim(overrides: Record<string, unknown> = {}) {
+  const transaction = confirmedV2AffiliateTransaction();
+  return {
+    version: 1,
+    status: 'consumed',
+    affiliateCode: affiliate.affiliateCode.toLowerCase(),
+    campaignCode: campaign.code.toLowerCase(),
+    checkoutArticleId: transaction.articleId,
+    channel: 'mpesa',
+    issuedAt: v2IssuedAt,
+    expiresAt: v2ExpiresAt,
+    claimedAt: v2IssuedAt,
+    consumedAt: v2IssuedAt + 1_000,
+    checkoutRequestId: transaction.checkoutRequestId,
+    ...overrides
+  };
+}
+
 describe('affiliate commission durability', () => {
   beforeEach(async () => {
     process.env.VERCEL = '1';
@@ -262,6 +294,65 @@ describe('affiliate commission durability', () => {
       salesCount: 1,
       revenueKes: 500,
       commissionsKes: 100
+    });
+  });
+
+  it('creates a v2 commission only when the consumed one-time claim matches the sale exactly', async () => {
+    const transaction = confirmedV2AffiliateTransaction();
+    firestoreMock.documents.set(
+      `affiliate_attribution_claims/${v2ClaimId}`,
+      consumedV2Claim()
+    );
+
+    const commission = await affiliateStore.recordAffiliateSale(
+      transaction,
+      affiliate.affiliateCode,
+      campaign.code
+    );
+
+    expect(commission).toMatchObject({
+      checkoutRequestId: transaction.checkoutRequestId,
+      affiliateCode: affiliate.affiliateCode,
+      commissionAmountKes: 100
+    });
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)).toMatchObject({
+      totalSalesCount: 1,
+      totalCommissionEarnedKes: 100
+    });
+  });
+
+  it.each([
+    ['missing claim', null],
+    ['unconsumed claim', { status: 'claimed', checkoutRequestId: undefined }],
+    ['another checkout', { checkoutRequestId: 'checkout_other' }],
+    ['another affiliate', { affiliateCode: 'another_affiliate' }],
+    ['another campaign', { campaignCode: 'another_campaign' }],
+    ['another piece', { checkoutArticleId: 'article_other' }],
+    ['another channel', { channel: 'bank' }],
+    ['another issue time', { issuedAt: v2IssuedAt - 1 }],
+    ['another expiry time', { expiresAt: v2ExpiresAt + 1 }]
+  ])('rejects a v2 commission bound to %s', async (_label, claimOverrides) => {
+    const transaction = confirmedV2AffiliateTransaction();
+    if (claimOverrides) {
+      firestoreMock.documents.set(
+        `affiliate_attribution_claims/${v2ClaimId}`,
+        consumedV2Claim(claimOverrides)
+      );
+    }
+
+    await expect(affiliateStore.recordAffiliateSale(
+      transaction,
+      affiliate.affiliateCode,
+      campaign.code
+    )).resolves.toBeNull();
+
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('affiliate_commissions/')
+    )).toBe(false);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)).toMatchObject({
+      totalSalesCount: 0,
+      totalCommissionEarnedKes: 0,
+      balanceAvailableKes: 0
     });
   });
 

@@ -86,6 +86,37 @@ describe('M-Pesa initiation durability', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/mpesa/stkpush/'))).toHaveLength(0);
   });
 
+  it('persists the internal v2 affiliate claim binding before contacting Daraja', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))
+      .mockResolvedValueOnce(acceptedStkResponse());
+    const initiateStkPush = await loadInitiator();
+    const issuedAt = new Date(Date.now() - 1_000).toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    await initiateStkPush({
+      phoneNumber: '0712345678',
+      amount: 300,
+      articleId: 'article_1',
+      articleTitle: 'Test article',
+      affiliateCode: 'partner_7',
+      campaignCode: 'launch_2026',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'c'.repeat(64),
+      affiliateAttributionAt: issuedAt,
+      affiliateAttributionExpiresAt: expiresAt
+    });
+
+    expect(storeMocks.saveMpesaCallbackIntent).toHaveBeenCalledWith(expect.objectContaining({
+      affiliateCode: 'partner_7',
+      campaignCode: 'launch_2026',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'c'.repeat(64),
+      affiliateAttributionAt: issuedAt,
+      affiliateAttributionExpiresAt: expiresAt
+    }));
+  });
+
   it('returns the stored attempt handle when response-side attachment throws after provider acceptance', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 'oauth-token', expires_in: 3599 }))

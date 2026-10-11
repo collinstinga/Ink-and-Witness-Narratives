@@ -1,11 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldPath, FieldValue } from 'firebase-admin/firestore';
 import { INITIAL_ARTICLES, JAKE_PROFILE } from '../data/seedArticles.js';
 import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { normalizeHomepageSections } from '../homepageSections.js';
 import { affiliateStore } from './affiliateStore.js';
+import { consumeAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
 import { ImageValidationError, sanitizeImageDataUrl, type SafeImageMimeType } from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
@@ -175,6 +176,8 @@ export type MpesaCallbackIntent = {
   type: 'PURCHASE' | 'TIP';
   affiliateCode?: string;
   campaignCode?: string;
+  affiliateAttributionVersion?: 2;
+  affiliateAttributionClaimId?: string;
   affiliateAttributionAt?: string;
   affiliateAttributionExpiresAt?: string;
   userId?: string;
@@ -202,6 +205,102 @@ let cachedSessions: Map<string, { createdAt: number; expiresAt: number }> = new 
 let cachedEvents: InteractionEvent[] = [];
 let cachedLikes: PieceLike[] = [];
 let cachedComments: PieceComment[] = [];
+const cachedPublicCommentsByArticle = new Map<string, PieceComment[]>();
+const cachedCommentsMutationVersions = new Map<string, number>();
+const commentsRefreshSequences = new Map<string, number>();
+const commentsFreshUntil = new Map<string, number>();
+const commentsRefreshPromises = new Map<string, Promise<PieceComment[]>>();
+
+const COMMENT_DEDUPLICATION_WINDOW_MS = 5 * 60 * 1000;
+const COMMENT_SUBMISSION_LOCK_COLLECTION = 'comment_submission_locks';
+const MAX_PUBLIC_COMMENTS_RESULTS = 100;
+const MAX_ADMIN_COMMENTS_RESULTS = 250;
+
+type FreshCommentsOptions = {
+  maxAgeMs?: number;
+  maxResults?: number;
+};
+
+type CommentPageCursor = {
+  createdAt: string;
+  id: string;
+};
+
+function getCommentsScopeKey(articleId?: string, includeHidden = false): string {
+  if (!articleId) return 'all';
+  return `article:${articleId}:${includeHidden ? 'all' : 'public'}`;
+}
+
+function bumpCommentsMutationVersion(articleId: string): void {
+  for (const scopeKey of [
+    'all',
+    getCommentsScopeKey(articleId, true),
+    getCommentsScopeKey(articleId, false)
+  ]) {
+    cachedCommentsMutationVersions.set(scopeKey, (cachedCommentsMutationVersions.get(scopeKey) || 0) + 1);
+  }
+  for (const key of commentsFreshUntil.keys()) {
+    if (key.startsWith('all:') || key.startsWith(`article:${articleId}:`)) {
+      commentsFreshUntil.delete(key);
+    }
+  }
+}
+
+function updatePublicCommentCache(comment: PieceComment): void {
+  const existing = cachedPublicCommentsByArticle.get(comment.articleId);
+  if (!existing) return;
+  const withoutCurrent = existing.filter(item => item.id !== comment.id);
+  if (comment.status === 'approved') withoutCurrent.unshift(comment);
+  cachedPublicCommentsByArticle.set(
+    comment.articleId,
+    withoutCurrent
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+      .slice(0, MAX_PUBLIC_COMMENTS_RESULTS)
+  );
+}
+
+function normalizePersistedComment(value: unknown, documentId?: string): PieceComment | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Partial<PieceComment>;
+  const id = (documentId || candidate.id || '').trim();
+  const articleId = (candidate.articleId || '').trim();
+  const readerName = (candidate.readerName || '').trim();
+  const content = (candidate.content || '').trim();
+  const createdAt = candidate.createdAt || '';
+  const status = candidate.status;
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(id) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(articleId) ||
+    !readerName || readerName.length > 120 ||
+    !content || content.length > 3_000 ||
+    !Number.isFinite(Date.parse(createdAt)) ||
+    !['approved', 'hidden', 'deleted'].includes(status || '')
+  ) return null;
+  return {
+    id,
+    articleId,
+    ...(typeof candidate.articleTitle === 'string' && candidate.articleTitle.trim()
+      ? { articleTitle: candidate.articleTitle.trim().slice(0, 300) }
+      : {}),
+    readerName,
+    ...(typeof candidate.readerEmail === 'string' && candidate.readerEmail.trim()
+      ? { readerEmail: candidate.readerEmail.trim().toLowerCase().slice(0, 254) }
+      : {}),
+    ...(typeof candidate.readerHash === 'string' && candidate.readerHash.trim()
+      ? { readerHash: candidate.readerHash.trim().slice(0, 128) }
+      : {}),
+    content,
+    createdAt,
+    ...(typeof candidate.updatedAt === 'string' && Number.isFinite(Date.parse(candidate.updatedAt))
+      ? { updatedAt: candidate.updatedAt }
+      : {}),
+    status: status as PieceComment['status'],
+    ...(candidate.isReported === true ? { isReported: true } : {}),
+    ...(typeof candidate.reportedReason === 'string' && candidate.reportedReason.trim()
+      ? { reportedReason: candidate.reportedReason.trim().slice(0, 500) }
+      : {})
+  };
+}
 
 const AUTH_SESSION_CACHE_TTL_MS = 60 * 1000;
 const READER_SESSION_CACHE_TTL_MS = 15 * 1000;
@@ -706,6 +805,13 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
   if (intent.paymentAttemptId !== undefined && !isPaymentAttemptId(intent.paymentAttemptId)) {
     return undefined;
   }
+  if (intent.affiliateAttributionVersion !== undefined && intent.affiliateAttributionVersion !== 2) {
+    return undefined;
+  }
+  if (intent.affiliateAttributionClaimId !== undefined && (
+    typeof intent.affiliateAttributionClaimId !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(intent.affiliateAttributionClaimId)
+  )) return undefined;
   if (intent.affiliateAttributionAt !== undefined && (
     typeof intent.affiliateAttributionAt !== 'string' ||
     !Number.isFinite(Date.parse(intent.affiliateAttributionAt))
@@ -718,6 +824,13 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
     (intent.affiliateAttributionAt && !intent.affiliateAttributionExpiresAt) ||
     (!intent.affiliateAttributionAt && intent.affiliateAttributionExpiresAt) ||
     (intent.affiliateCode && (!intent.affiliateAttributionAt || !intent.affiliateAttributionExpiresAt)) ||
+    (intent.affiliateAttributionVersion === 2 && (
+      !intent.affiliateCode ||
+      !intent.affiliateAttributionClaimId ||
+      !intent.affiliateAttributionAt ||
+      !intent.affiliateAttributionExpiresAt
+    )) ||
+    (intent.affiliateAttributionClaimId && intent.affiliateAttributionVersion !== 2) ||
     (intent.campaignCode && !intent.affiliateCode) ||
     (intent.affiliateAttributionAt && intent.affiliateAttributionExpiresAt &&
       (
@@ -762,6 +875,8 @@ function mpesaIntentsMatch(left: MpesaCallbackIntent, right: MpesaCallbackIntent
     left.type === right.type &&
     left.affiliateCode === right.affiliateCode &&
     left.campaignCode === right.campaignCode &&
+    left.affiliateAttributionVersion === right.affiliateAttributionVersion &&
+    left.affiliateAttributionClaimId === right.affiliateAttributionClaimId &&
     left.affiliateAttributionAt === right.affiliateAttributionAt &&
     left.affiliateAttributionExpiresAt === right.affiliateAttributionExpiresAt &&
     left.userId === right.userId &&
@@ -798,6 +913,8 @@ function transactionFromMpesaIntent(
     createdAt: intent.createdAt,
     affiliateCode: intent.affiliateCode,
     campaignCode: intent.campaignCode,
+    affiliateAttributionVersion: intent.affiliateAttributionVersion,
+    affiliateAttributionClaimId: intent.affiliateAttributionClaimId,
     affiliateAttributionAt: intent.affiliateAttributionAt,
     affiliateAttributionExpiresAt: intent.affiliateAttributionExpiresAt,
     shortcodeUsed: intent.shortcodeUsed,
@@ -806,6 +923,69 @@ function transactionFromMpesaIntent(
     userId: intent.userId,
     userEmail: intent.userEmail
   });
+}
+
+function stripAffiliateAttribution(transaction: PaymentTransaction): PaymentTransaction {
+  const {
+    affiliateCode: _affiliateCode,
+    campaignCode: _campaignCode,
+    affiliateAttributionVersion: _affiliateAttributionVersion,
+    affiliateAttributionClaimId: _affiliateAttributionClaimId,
+    affiliateAttributionAt: _affiliateAttributionAt,
+    affiliateAttributionExpiresAt: _affiliateAttributionExpiresAt,
+    saleChannel: _saleChannel,
+    ...directTransaction
+  } = transaction;
+  return enrichSalesTransaction(directTransaction as PaymentTransaction);
+}
+
+async function consumeTransactionAffiliateAttribution(
+  firestoreTransaction: any,
+  transaction: PaymentTransaction,
+  allowLegacyAttribution = false
+): Promise<PaymentTransaction> {
+  if (!transaction.affiliateCode) return transaction;
+
+  // Transactions created before the v2 rollout remain valid legacy records.
+  // Every new checkout path carries the explicit v2 marker; an incomplete v2
+  // binding fails closed to a direct sale without interrupting the payment.
+  if (
+    transaction.affiliateAttributionVersion === undefined &&
+    transaction.affiliateAttributionClaimId === undefined
+  ) {
+    return allowLegacyAttribution ? transaction : stripAffiliateAttribution(transaction);
+  }
+  if (
+    transaction.affiliateAttributionVersion !== 2 ||
+    !transaction.affiliateAttributionClaimId ||
+    !transaction.affiliateAttributionAt ||
+    !transaction.affiliateAttributionExpiresAt ||
+    (transaction.paymentMethod !== 'mpesa' && transaction.paymentMethod !== 'bank')
+  ) {
+    return stripAffiliateAttribution(transaction);
+  }
+
+  const issuedAt = Date.parse(transaction.affiliateAttributionAt);
+  const expiresAt = Date.parse(transaction.affiliateAttributionExpiresAt);
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) {
+    return stripAffiliateAttribution(transaction);
+  }
+
+  const consumed = await consumeAffiliateAttributionClaimInTransaction(
+    firestoreTransaction,
+    getDb(),
+    transaction.affiliateAttributionClaimId,
+    {
+      checkoutRequestId: transaction.checkoutRequestId,
+      checkoutArticleId: transaction.articleId,
+      affiliateCode: transaction.affiliateCode,
+      campaignCode: transaction.campaignCode,
+      channel: transaction.paymentMethod,
+      issuedAt,
+      expiresAt
+    }
+  );
+  return consumed ? transaction : stripAffiliateAttribution(transaction);
 }
 
 function paymentEntitlementArticleIds(transaction: PaymentTransaction): string[] {
@@ -1924,7 +2104,14 @@ export const store = {
       categories: captureStartupRead(getAllFirestoreDocs<Category>('categories')),
       topics: captureStartupRead(getAllFirestoreDocs<Topic>('topics')),
       likes: captureStartupRead(getAllFirestoreDocs<PieceLike>('likes')),
-      comments: captureStartupRead(getAllFirestoreDocs<PieceComment>('comments'))
+      // Comments are loaded on demand with ordered, bounded queries in
+      // serverless production. Avoid billing a full collection scan on every
+      // cold start merely to render unrelated pages.
+      comments: captureStartupRead(
+        process.env.VERCEL
+          ? Promise.resolve([] as PieceComment[])
+          : getAllFirestoreDocs<PieceComment>('comments')
+      )
     };
 
     // Check if the store has already been initialized previously
@@ -2324,7 +2511,7 @@ export const store = {
       if (fsComments && fsComments.length > 0) {
         cachedComments = fsComments;
         writeJsonFileSync(COMMENTS_FILE, cachedComments);
-      } else if (fs.existsSync(COMMENTS_FILE)) {
+      } else if (!process.env.VERCEL && fs.existsSync(COMMENTS_FILE)) {
         const raw = fs.readFileSync(COMMENTS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
@@ -2952,7 +3139,8 @@ export const store = {
         return undefined;
       }
 
-      const attached = transactionFromMpesaIntent(callbackIntent, checkoutRequestId, merchantRequestId);
+      const candidate = transactionFromMpesaIntent(callbackIntent, checkoutRequestId, merchantRequestId);
+      const attached = await consumeTransactionAffiliateAttribution(firestoreTransaction, candidate, true);
       const attachedAt = new Date().toISOString();
       firestoreTransaction.set(transactionRef, sanitizeForFirestore(attached), { merge: false });
       const attachment = {
@@ -3336,6 +3524,31 @@ export const store = {
       await setFirestoreDoc('transactions', docId, enriched);
     }
     return enriched;
+  },
+
+  async createBankTransactionWithAffiliateClaim(tx: PaymentTransaction): Promise<PaymentTransaction> {
+    const candidate = enrichSalesTransaction(tx);
+    if (candidate.paymentMethod !== 'bank' || !candidate.checkoutRequestId) {
+      throw new Error('A valid bank transaction is required.');
+    }
+
+    const db = getDb();
+    const transactionRef = db.collection('transactions').doc(candidate.checkoutRequestId);
+    const persisted = await db.runTransaction(async firestoreTransaction => {
+      const existingSnapshot = await firestoreTransaction.get(transactionRef);
+      if (existingSnapshot.exists) {
+        throw new Error('A bank payment order with this identifier already exists.');
+      }
+      const secured = await consumeTransactionAffiliateAttribution(firestoreTransaction, candidate);
+      firestoreTransaction.create(transactionRef, sanitizeForFirestore(secured));
+      return secured;
+    });
+
+    // Update process-local mirrors only after the durable atomic commit. A
+    // rejected write must never leave a phantom checkout in this instance.
+    cacheTransaction(persisted);
+    writeJsonFileSync(TRANSACTIONS_FILE, Array.from(cachedTransactions.values()));
+    return persisted;
   },
 
   async confirmTransaction(identifier: string, receiptNumber?: string): Promise<{ success: boolean; transaction?: PaymentTransaction; downloadToken?: string; error?: string }> {
@@ -6966,7 +7179,132 @@ export const store = {
     return [...list].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   },
 
-  addComment(articleId: string, content: string, readerName: string, readerEmail?: string, readerHash?: string): PieceComment {
+  async getFreshComments(
+    articleId?: string,
+    includeHidden = false,
+    options: FreshCommentsOptions = {}
+  ): Promise<PieceComment[]> {
+    const scopeKey = getCommentsScopeKey(articleId, includeHidden);
+    const maxAgeMs = Math.max(0, Math.min(60_000, Math.floor(options.maxAgeMs || 0)));
+    const defaultLimit = articleId ? MAX_PUBLIC_COMMENTS_RESULTS : MAX_ADMIN_COMMENTS_RESULTS;
+    const maxResults = Math.max(1, Math.min(MAX_ADMIN_COMMENTS_RESULTS, Math.floor(options.maxResults || defaultLimit)));
+    const refreshKey = `${scopeKey}:${maxResults}`;
+    const readCached = (): PieceComment[] => {
+      if (articleId && !includeHidden) {
+        return [...(cachedPublicCommentsByArticle.get(articleId) || [])].slice(0, maxResults);
+      }
+      return this.getComments(articleId, includeHidden).slice(0, maxResults);
+    };
+    if (maxAgeMs > 0 && (commentsFreshUntil.get(refreshKey) || 0) > Date.now()) return readCached();
+
+    const existingRefresh = commentsRefreshPromises.get(refreshKey);
+    if (existingRefresh) {
+      await existingRefresh;
+      return readCached();
+    }
+
+    const mutationVersionAtStart = cachedCommentsMutationVersions.get(scopeKey) || 0;
+    const refreshSequence = (commentsRefreshSequences.get(scopeKey) || 0) + 1;
+    commentsRefreshSequences.set(scopeKey, refreshSequence);
+    const refresh = (async (): Promise<PieceComment[]> => {
+      let query: FirebaseFirestore.Query = getDb().collection('comments');
+      if (articleId) query = query.where('articleId', '==', articleId);
+      if (!includeHidden) query = query.where('status', '==', 'approved');
+      const snapshot = await query.orderBy('createdAt', 'desc').limit(maxResults).get();
+      const freshComments = snapshot.docs
+        .map(document => normalizePersistedComment(document.data(), document.id))
+        .filter((comment): comment is PieceComment => Boolean(comment))
+        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+
+      // Never let an older Firestore snapshot erase a local mutation that was
+      // durably committed while this refresh was in flight.
+      const canApply =
+        mutationVersionAtStart === (cachedCommentsMutationVersions.get(scopeKey) || 0) &&
+        refreshSequence === commentsRefreshSequences.get(scopeKey);
+      if (canApply) {
+        if (articleId && !includeHidden) {
+          cachedPublicCommentsByArticle.set(articleId, freshComments);
+        } else if (articleId) {
+          cachedComments = [
+            ...cachedComments.filter(comment => comment.articleId !== articleId),
+            ...freshComments
+          ];
+          writeJsonFileSync(COMMENTS_FILE, cachedComments);
+        } else {
+          cachedComments = freshComments;
+          writeJsonFileSync(COMMENTS_FILE, cachedComments);
+        }
+        commentsFreshUntil.set(refreshKey, Date.now() + maxAgeMs);
+      }
+      return readCached();
+    })();
+    commentsRefreshPromises.set(refreshKey, refresh);
+    try {
+      return await refresh;
+    } finally {
+      if (commentsRefreshPromises.get(refreshKey) === refresh) {
+        commentsRefreshPromises.delete(refreshKey);
+      }
+    }
+  },
+
+  async getFreshCommentsPage(options: {
+    limit?: number;
+    cursor?: CommentPageCursor;
+  } = {}): Promise<{ comments: PieceComment[]; hasMore: boolean; nextCursor: CommentPageCursor | null }> {
+    const limit = Math.max(1, Math.min(100, Math.floor(options.limit || 100)));
+    let query: FirebaseFirestore.Query = getDb()
+      .collection('comments')
+      .orderBy('createdAt', 'desc')
+      .orderBy(FieldPath.documentId(), 'desc');
+    if (options.cursor) {
+      query = query.startAfter(options.cursor.createdAt, options.cursor.id);
+    }
+    const snapshot = await query.limit(limit + 1).get();
+    const normalized = snapshot.docs
+      .map(document => normalizePersistedComment(document.data(), document.id))
+      .filter((comment): comment is PieceComment => Boolean(comment));
+    const hasMore = normalized.length > limit;
+    const comments = normalized.slice(0, limit);
+    const next = comments.at(-1);
+
+    const merged = new Map(cachedComments.map(comment => [comment.id, comment]));
+    for (const comment of comments) merged.set(comment.id, comment);
+    cachedComments = [...merged.values()]
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+    writeJsonFileSync(COMMENTS_FILE, cachedComments);
+
+    return {
+      comments,
+      hasMore,
+      nextCursor: hasMore && next ? { createdAt: next.createdAt, id: next.id } : null
+    };
+  },
+
+  async getFreshReportedComments(maxResults = 100): Promise<PieceComment[]> {
+    const limit = Math.max(1, Math.min(100, Math.floor(maxResults)));
+    const snapshot = await getDb()
+      .collection('comments')
+      .where('isReported', '==', true)
+      .limit(limit)
+      .get();
+    const comments = snapshot.docs
+      .map(document => normalizePersistedComment(document.data(), document.id))
+      .filter((comment): comment is PieceComment => Boolean(comment))
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.updatedAt || left.createdAt);
+        const rightTime = Date.parse(right.updatedAt || right.createdAt);
+        return rightTime - leftTime;
+      });
+    const merged = new Map(cachedComments.map(comment => [comment.id, comment]));
+    for (const comment of comments) merged.set(comment.id, comment);
+    cachedComments = [...merged.values()]
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+    writeJsonFileSync(COMMENTS_FILE, cachedComments);
+    return comments;
+  },
+
+  async addComment(articleId: string, content: string, readerName: string, readerEmail?: string, readerHash?: string): Promise<PieceComment> {
     const cleanContent = (content || '').trim();
     if (!cleanContent) {
       throw new Error("Comment content cannot be empty.");
@@ -6979,31 +7317,84 @@ export const store = {
     if (!art) {
       throw new Error("Piece not found.");
     }
-    if (cachedComments.length >= 10_000) {
-      throw new Error("Comment storage is temporarily at capacity.");
-    }
+    const createdAtMs = Date.now();
+    const effectiveReaderHash = readerHash || `anon_${crypto.randomBytes(18).toString('base64url')}`;
+    const dedupeMaterial = `${articleId}\u0000${effectiveReaderHash}\u0000${cleanContent}`;
+    const lockId = crypto.createHash('sha256').update(dedupeMaterial, 'utf8').digest('hex');
     const comment: PieceComment = {
-      id: `comm_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      id: `comm_${createdAtMs}_${crypto.randomBytes(8).toString('hex')}`,
       articleId,
       articleTitle: art?.title || 'Unknown Monograph',
       readerName: (readerName || '').trim() || 'Anonymous Reader',
       readerEmail: (readerEmail || '').trim() || undefined,
-      readerHash: readerHash || `anon_${Date.now()}`,
+      readerHash: effectiveReaderHash,
       content: cleanContent,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(createdAtMs).toISOString(),
       status: 'approved'
     };
 
-    cachedComments.unshift(comment);
-    writeJsonFileSync(COMMENTS_FILE, cachedComments);
-    setFirestoreDoc('comments', comment.id, comment).catch(() => {});
+    const db = getDb();
+    const transactionResult = await db.runTransaction(async transaction => {
+      const articleRef = db.collection('articles').doc(articleId);
+      const commentRef = db.collection('comments').doc(comment.id);
+      const lockRef = db.collection(COMMENT_SUBMISSION_LOCK_COLLECTION).doc(lockId);
+      const lockSnapshot = await transaction.get(lockRef);
+      const lockValue = lockSnapshot.exists
+        ? lockSnapshot.data() as { commentId?: unknown; lastCreatedAt?: unknown }
+        : undefined;
+      const lockCreatedAt = typeof lockValue?.lastCreatedAt === 'string'
+        ? Date.parse(lockValue.lastCreatedAt)
+        : Number.NaN;
+      const recentCommentId =
+        typeof lockValue?.commentId === 'string' &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{2,159}$/.test(lockValue.commentId) &&
+        Number.isFinite(lockCreatedAt) &&
+        createdAtMs - lockCreatedAt < COMMENT_DEDUPLICATION_WINDOW_MS
+          ? lockValue.commentId
+          : null;
+      const recentCommentSnapshot = recentCommentId
+        ? await transaction.get(db.collection('comments').doc(recentCommentId))
+        : null;
+      const articleSnapshot = await transaction.get(articleRef);
+      if (!articleSnapshot.exists) throw new Error('Piece not found.');
+      if (recentCommentSnapshot?.exists) {
+        const existing = normalizePersistedComment(recentCommentSnapshot.data(), recentCommentSnapshot.id);
+        if (
+          existing &&
+          existing.articleId === articleId &&
+          existing.readerHash === effectiveReaderHash &&
+          existing.content === cleanContent
+        ) {
+          return { comment: existing, created: false };
+        }
+      }
+      transaction.create(commentRef, sanitizeForFirestore(comment));
+      transaction.set(lockRef, {
+        version: 1,
+        commentId: comment.id,
+        lastCreatedAt: comment.createdAt,
+        // Firestore stores Date as Timestamp. The TTL field override removes
+        // expired deduplication locks automatically without retaining reader
+        // submission history indefinitely.
+        expiresAt: new Date(createdAtMs + COMMENT_DEDUPLICATION_WINDOW_MS)
+      }, { merge: false });
+      transaction.set(articleRef, { commentsCount: FieldValue.increment(1) }, { merge: true });
+      return { comment, created: true };
+    });
 
-    // Sync article comments count
-    const approvedCommentsCount = cachedComments.filter(c => c.articleId === articleId && c.status === 'approved').length;
+    if (!transactionResult.created) {
+      const existingIndex = cachedComments.findIndex(item => item.id === transactionResult.comment.id);
+      if (existingIndex < 0) cachedComments.unshift(transactionResult.comment);
+      return transactionResult.comment;
+    }
+
+    cachedComments.unshift(comment);
+    updatePublicCommentCache(comment);
+    bumpCommentsMutationVersion(articleId);
+    writeJsonFileSync(COMMENTS_FILE, cachedComments);
     if (art) {
-      art.commentsCount = approvedCommentsCount;
+      art.commentsCount = Math.max(0, Number(art.commentsCount) || 0) + 1;
       writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      setFirestoreDoc('articles', art.id, art).catch(() => {});
     }
 
     // Track event
@@ -7017,61 +7408,126 @@ export const store = {
     return comment;
   },
 
-  updateCommentStatus(commentId: string, status: 'approved' | 'hidden' | 'deleted'): PieceComment | null {
-    const comment = cachedComments.find(c => c.id === commentId);
-    if (!comment) return null;
+  async updateCommentStatus(commentId: string, status: 'approved' | 'hidden' | 'deleted'): Promise<PieceComment | null> {
+    const db = getDb();
+    const commentRef = db.collection('comments').doc(commentId);
+    const result = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(commentRef);
+      if (!snapshot.exists) return null;
+      const current = normalizePersistedComment(snapshot.data(), snapshot.id);
+      if (!current) throw new Error('Stored comment is invalid.');
+      const articleRef = db.collection('articles').doc(current.articleId);
+      const articleSnapshot = await transaction.get(articleRef);
+      const next: PieceComment = { ...current, status, updatedAt: new Date().toISOString() };
+      transaction.set(commentRef, sanitizeForFirestore(next), { merge: false });
+      const countDelta = Number(status === 'approved') - Number(current.status === 'approved');
+      const storedCount = articleSnapshot.exists
+        ? Math.max(0, Number(articleSnapshot.data()?.commentsCount) || 0)
+        : 0;
+      const nextCount = Math.max(0, storedCount + countDelta);
+      const appliedCountDelta = articleSnapshot.exists ? nextCount - storedCount : 0;
+      if (appliedCountDelta !== 0) {
+        transaction.set(
+          articleRef,
+          { commentsCount: nextCount },
+          { merge: true }
+        );
+      }
+      return { comment: next, countDelta: appliedCountDelta };
+    });
+    if (!result) return null;
+    const { comment: updated, countDelta } = result;
 
-    comment.status = status;
-    comment.updatedAt = new Date().toISOString();
+    const index = cachedComments.findIndex(comment => comment.id === commentId);
+    if (index >= 0) cachedComments[index] = updated;
+    else cachedComments.unshift(updated);
+    updatePublicCommentCache(updated);
+    bumpCommentsMutationVersion(updated.articleId);
     writeJsonFileSync(COMMENTS_FILE, cachedComments);
-    setFirestoreDoc('comments', comment.id, comment).catch(() => {});
-
-    // Update article count
-    const art = cachedArticles.find(a => a.id === comment.articleId);
+    const art = cachedArticles.find(article => article.id === updated.articleId);
     if (art) {
-      art.commentsCount = cachedComments.filter(c => c.articleId === comment.articleId && c.status === 'approved').length;
+      art.commentsCount = Math.max(0, (Number(art.commentsCount) || 0) + countDelta);
       writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      setFirestoreDoc('articles', art.id, art).catch(() => {});
     }
-
-    return comment;
+    return updated;
   },
 
-  reportComment(commentId: string, reason?: string): PieceComment | null {
-    const comment = cachedComments.find(c => c.id === commentId);
-    if (!comment) return null;
-    if (comment.isReported) return comment;
-
-    comment.isReported = true;
-    comment.reportedReason = reason || 'Flagged by reader for review';
-    comment.updatedAt = new Date().toISOString();
+  async reportComment(commentId: string, reason?: string): Promise<PieceComment | null> {
+    const db = getDb();
+    const commentRef = db.collection('comments').doc(commentId);
+    const updated = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(commentRef);
+      if (!snapshot.exists) return null;
+      const current = normalizePersistedComment(snapshot.data(), snapshot.id);
+      if (!current) throw new Error('Stored comment is invalid.');
+      if (current.isReported) return current;
+      const next: PieceComment = {
+        ...current,
+        isReported: true,
+        reportedReason: reason || 'Flagged by reader for review',
+        updatedAt: new Date().toISOString()
+      };
+      transaction.set(commentRef, sanitizeForFirestore(next), { merge: false });
+      return next;
+    });
+    if (!updated) return null;
+    const index = cachedComments.findIndex(comment => comment.id === commentId);
+    if (index >= 0) cachedComments[index] = updated;
+    else cachedComments.unshift(updated);
+    updatePublicCommentCache(updated);
+    bumpCommentsMutationVersion(updated.articleId);
     writeJsonFileSync(COMMENTS_FILE, cachedComments);
-    setFirestoreDoc('comments', comment.id, comment).catch(() => {});
-
-    return comment;
+    return updated;
   },
 
-  deleteComment(commentId: string, readerHash?: string): boolean {
-    const idx = cachedComments.findIndex(c => c.id === commentId);
-    if (idx < 0) return false;
+  async deleteComment(commentId: string, readerHash?: string): Promise<boolean> {
+    const db = getDb();
+    const commentRef = db.collection('comments').doc(commentId);
+    const deleted = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(commentRef);
+      if (!snapshot.exists) return null;
+      const current = normalizePersistedComment(snapshot.data(), snapshot.id);
+      if (!current) throw new Error('Stored comment is invalid.');
+      if (readerHash && current.readerHash !== readerHash) {
+        throw new Error('You can only delete your own comments.');
+      }
+      const articleRef = db.collection('articles').doc(current.articleId);
+      const articleSnapshot = await transaction.get(articleRef);
+      transaction.delete(commentRef);
+      const storedCount = articleSnapshot.exists
+        ? Math.max(0, Number(articleSnapshot.data()?.commentsCount) || 0)
+        : 0;
+      const nextCount = current.status === 'approved' ? Math.max(0, storedCount - 1) : storedCount;
+      const countDelta = articleSnapshot.exists ? nextCount - storedCount : 0;
+      if (current.status === 'approved' && articleSnapshot.exists) {
+        transaction.set(
+          articleRef,
+          { commentsCount: nextCount },
+          { merge: true }
+        );
+      }
+      return { comment: current, countDelta };
+    });
+    if (!deleted) return false;
+    const { comment: deletedComment, countDelta } = deleted;
 
-    // If readerHash provided, check ownership
-    if (readerHash && cachedComments[idx].readerHash !== readerHash) {
-      throw new Error("You can only delete your own comments.");
+    cachedComments = cachedComments.filter(comment => comment.id !== commentId);
+    const publicComments = cachedPublicCommentsByArticle.get(deletedComment.articleId);
+    if (publicComments) {
+      cachedPublicCommentsByArticle.set(
+        deletedComment.articleId,
+        publicComments.filter(comment => comment.id !== commentId)
+      );
     }
-
-    const articleId = cachedComments[idx].articleId;
-    cachedComments.splice(idx, 1);
+    bumpCommentsMutationVersion(deletedComment.articleId);
     writeJsonFileSync(COMMENTS_FILE, cachedComments);
-    deleteFirestoreDoc('comments', commentId).catch(() => {});
-
-    const art = cachedArticles.find(a => a.id === articleId);
+    const art = cachedArticles.find(article => article.id === deletedComment.articleId);
     if (art) {
-      art.commentsCount = cachedComments.filter(c => c.articleId === articleId && c.status === 'approved').length;
+      if (countDelta !== 0) {
+        art.commentsCount = Math.max(0, (Number(art.commentsCount) || 0) + countDelta);
+      }
       writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-      setFirestoreDoc('articles', art.id, art).catch(() => {});
     }
-
     return true;
   },
 

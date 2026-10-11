@@ -62,10 +62,11 @@ describe('affiliate referral tracking', () => {
       code: 'partner_7',
       timestamp: 1_800_000_000_000
     });
-    expect(local.getItem('ink_witness_affiliate_ref')).toBe('partner_7');
-    expect(local.getItem('ink_witness_affiliate_time')).toBe('1800000000000');
-    expect(local.getItem('ink_witness_affiliate_campaign')).toBe('launch_2026');
+    expect(local.getItem('ink_witness_affiliate_ref')).toBeNull();
+    expect(local.getItem('ink_witness_affiliate_time')).toBeNull();
+    expect(local.getItem('ink_witness_affiliate_campaign')).toBeNull();
     expect(session.getItem('ink_witness_affiliate_ref')).toBe('partner_7');
+    expect(session.getItem('ink_witness_affiliate_time')).toBe('1800000000000');
     expect(session.getItem('ink_witness_affiliate_campaign')).toBe('launch_2026');
     expect(getActiveReferral()).toEqual({
       code: 'partner_7',
@@ -94,8 +95,8 @@ describe('affiliate referral tracking', () => {
       code: 'partner_7',
       campaign: 'launch_2026'
     });
-    expect(local.getItem('ink_witness_affiliate_ref')).toBe('partner_7');
-    expect(local.getItem('ink_witness_affiliate_campaign')).toBe('launch_2026');
+    expect(local.getItem('ink_witness_affiliate_ref')).toBeNull();
+    expect(local.getItem('ink_witness_affiliate_campaign')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith('/api/affiliate/click', {
       method: 'POST',
@@ -107,5 +108,19 @@ describe('affiliate referral tracking', () => {
         campaign: 'launch_2026'
       })
     });
+  });
+
+  it('does not revive a legacy referral during a later direct session', () => {
+    local.setItem('ink_witness_affiliate_ref', 'partner_7');
+    local.setItem('ink_witness_affiliate_time', '1799000000000');
+    local.setItem('ink_witness_affiliate_campaign', 'old_campaign');
+    location.search = '';
+
+    expect(initReferralTracking()).toBeNull();
+    expect(getActiveReferral()).toBeNull();
+    expect(local.getItem('ink_witness_affiliate_ref')).toBeNull();
+    expect(local.getItem('ink_witness_affiliate_time')).toBeNull();
+    expect(local.getItem('ink_witness_affiliate_campaign')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -137,6 +137,7 @@ describe('sales ledger privacy projections', () => {
     const safe = toAdminSalesTransaction(transaction({
       paymentCapabilityHash: 'payment-secret-hash',
       callbackCapabilityHash: 'callback-secret-hash',
+      affiliateAttributionClaimId: 'c'.repeat(64),
       downloadToken: 'bearer-reader-token',
       affiliateCode: 'PARTNER1'
     }));
@@ -144,6 +145,7 @@ describe('sales ledger privacy projections', () => {
     expect(safe.saleChannel).toBe('AFFILIATE');
     expect(safe).not.toHaveProperty('paymentCapabilityHash');
     expect(safe).not.toHaveProperty('callbackCapabilityHash');
+    expect(safe).not.toHaveProperty('affiliateAttributionClaimId');
     expect(safe).not.toHaveProperty('downloadToken');
   });
 

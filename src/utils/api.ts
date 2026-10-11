@@ -38,7 +38,7 @@ import {
   ContentBundle,
   PieceReview
 } from '../types.js';
-import { getActiveReferral } from './affiliateReferral.js';
+import { clearReferral, getActiveReferral } from './affiliateReferral.js';
 
 // Local storage key for purchased tokens
 const TOKENS_STORAGE_KEY = 'ink_witness_tokens';
@@ -672,6 +672,7 @@ export const api = {
       })
     });
     const data = await res.json().catch(() => ({}));
+    if (data.affiliateAttributionConsumed === true) clearReferral();
     if (!res.ok || data.success === false || !data.checkoutRequestId) {
       const errorMsg = data.error || data.message || 'Safaricom M-Pesa rejected the payment request. Please verify your phone number.';
       throw new Error(errorMsg);
@@ -712,6 +713,7 @@ export const api = {
       amountKes: number;
     };
     message: string;
+    affiliateAttributionConsumed?: boolean;
   }> {
     const ref = getActiveReferral();
     const payload = {
@@ -724,11 +726,12 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
+    const result = await res.json().catch(() => ({}));
+    if (result.affiliateAttributionConsumed === true) clearReferral();
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to generate bank order');
+      throw new Error(result.error || 'Failed to generate bank order');
     }
-    return res.json();
+    return result;
   },
 
   async submitBankReference(checkoutRequestId: string, customerRef: string, paymentCapability: string, senderPhone?: string): Promise<any> {
@@ -2096,13 +2099,12 @@ export const api = {
     return res.json();
   },
 
-  async submitPieceComment(articleId: string, content: string, readerName: string, readerEmail?: string): Promise<PieceComment> {
-    const readerHash = getAnonymousReaderId();
+  async submitPieceComment(articleId: string, content: string): Promise<PieceComment> {
     const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ content, readerName, readerEmail, readerHash })
+      body: JSON.stringify({ content })
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -2138,9 +2140,16 @@ export const api = {
   },
 
   // Writer Comments Moderation
-  async getAdminComments(): Promise<{ count: number; comments: PieceComment[] }> {
+  async getAdminComments(cursor?: string): Promise<{
+    count: number;
+    comments: PieceComment[];
+    hasMore: boolean;
+    nextCursor: string | null;
+  }> {
     const activeToken = getWriterToken();
-    const res = await fetch('/api/admin/comments', {
+    const query = new URLSearchParams({ limit: '100' });
+    if (cursor) query.set('cursor', cursor);
+    const res = await fetch(`/api/admin/comments?${query.toString()}`, {
       headers: { 'x-admin-token': activeToken || '' }
     });
     if (!res.ok) throw new Error('Failed to fetch comments');

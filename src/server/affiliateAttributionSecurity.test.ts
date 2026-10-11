@@ -14,11 +14,13 @@ describe('signed affiliate payment attribution', () => {
       { ref: 'Partner_7', campaign: 'Launch_2026', articleId: 'piece_42' },
       { now: NOW, signingSecret: SECRET }
     );
+    expect(token).toMatch(/^aff_attr_v2\./);
     expect(verifyAffiliateAttributionCookie(token, 'piece_42', { now: NOW, signingSecret: SECRET }))
       .toEqual({
         ref: 'partner_7',
         campaign: 'launch_2026',
         articleId: 'piece_42',
+        attributionId: expect.any(String),
         issuedAt: NOW,
         expiresAt: NOW + 30 * 24 * 60 * 60 * 1000
       });
@@ -61,6 +63,7 @@ describe('signed affiliate payment attribution', () => {
       ref: 'partner_7',
       campaign: 'launch',
       articleId: 'origin_piece',
+      attributionId: expect.any(String),
       issuedAt: NOW,
       expiresAt: NOW + 30 * 24 * 60 * 60 * 1000
     });
