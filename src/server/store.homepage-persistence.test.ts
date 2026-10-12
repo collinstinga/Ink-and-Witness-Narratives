@@ -346,7 +346,7 @@ describe('homepage configuration persistence', () => {
       homepagePiecesHeading: 'Individual pieces'
     });
     expect(populated.config.sections?.slice(0, 2)).toEqual([
-      { id: 'newsletter', title: 'Reader newsletter', isVisible: true, order: 1 },
+      { id: 'newsletter', title: 'Reader community', isVisible: true, order: 1 },
       { id: 'hero', title: 'Welcome hero', isVisible: false, order: 2 }
     ]);
 
@@ -368,7 +368,7 @@ describe('homepage configuration persistence', () => {
       homepagePiecesHeading: 'Individual pieces'
     });
     expect(reloadedConfig.sections?.slice(0, 2)).toEqual([
-      { id: 'newsletter', title: 'Reader newsletter', isVisible: true, order: 1 },
+      { id: 'newsletter', title: 'Reader community', isVisible: true, order: 1 },
       { id: 'hero', title: 'Welcome hero', isVisible: false, order: 2 }
     ]);
   }, 60_000);

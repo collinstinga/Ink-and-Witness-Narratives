@@ -1,8 +1,19 @@
 import sharp from 'sharp';
+import {
+  MAX_IMAGE_UPLOAD_BYTES,
+  MAX_IMAGE_UPLOAD_LABEL,
+  MAX_STORED_IMAGE_DIMENSION,
+  MAX_STORED_IMAGE_BYTES,
+  MAX_IMAGE_DIMENSION,
+  MAX_IMAGE_PIXELS
+} from '../shared/imageLimits.js';
 
-export const MAX_STORED_IMAGE_BYTES = 700 * 1024;
-export const MAX_IMAGE_DIMENSION = 8_192;
-export const MAX_IMAGE_PIXELS = 32_000_000;
+export {
+  MAX_IMAGE_DIMENSION,
+  MAX_IMAGE_PIXELS,
+  MAX_IMAGE_UPLOAD_BYTES,
+  MAX_STORED_IMAGE_BYTES
+} from '../shared/imageLimits.js';
 
 export type SafeImageMimeType = 'image/jpeg' | 'image/png' | 'image/webp';
 
@@ -150,15 +161,18 @@ function detectImage(buffer: Buffer): { mimeType: SafeImageMimeType; extension: 
   return null;
 }
 
-export function validateImageDataUrl(value: unknown): ValidatedImage {
+export function validateImageDataUrl(
+  value: unknown,
+  maximumBytes: number = MAX_IMAGE_UPLOAD_BYTES
+): ValidatedImage {
   if (typeof value !== 'string') {
     throw new ImageValidationError('Image data must be a JPEG, PNG, or WebP data URL.');
   }
 
   // Reject an oversized encoded value before allocating its decoded buffer.
-  const maximumEncodedLength = Math.ceil(MAX_STORED_IMAGE_BYTES / 3) * 4;
+  const maximumEncodedLength = Math.ceil(maximumBytes / 3) * 4;
   if (value.length > maximumEncodedLength + 64) {
-    throw new ImageValidationError('Image is too large. Please compress it below 700 KB and try again.');
+    throw new ImageValidationError(`Image is too large. Please keep it at or below ${MAX_IMAGE_UPLOAD_LABEL}.`);
   }
 
   const match = DATA_URL_PATTERN.exec(value);
@@ -168,8 +182,8 @@ export function validateImageDataUrl(value: unknown): ValidatedImage {
 
   const declaredMimeType = match[1] as SafeImageMimeType;
   const buffer = Buffer.from(match[2], 'base64');
-  if (buffer.length === 0 || buffer.length > MAX_STORED_IMAGE_BYTES) {
-    throw new ImageValidationError('Image is too large. Please compress it below 700 KB and try again.');
+  if (buffer.length === 0 || buffer.length > maximumBytes) {
+    throw new ImageValidationError(`Image is too large. Please keep it at or below ${MAX_IMAGE_UPLOAD_LABEL}.`);
   }
   if (buffer.toString('base64') !== match[2]) {
     throw new ImageValidationError('Image Base64 encoding is invalid.');
@@ -200,29 +214,86 @@ export function validateImageDataUrl(value: unknown): ValidatedImage {
 }
 
 export async function sanitizeImageDataUrl(value: unknown): Promise<ValidatedImage> {
-  const source = validateImageDataUrl(value);
+  const source = validateImageDataUrl(value, MAX_IMAGE_UPLOAD_BYTES);
 
   try {
-    const decoder = sharp(source.buffer, {
-      failOn: 'warning',
-      limitInputPixels: MAX_IMAGE_PIXELS,
-      sequentialRead: true
-    }).rotate();
+    const createDecoder = (maximumDimension?: number) => {
+      const decoder = sharp(source.buffer, {
+        failOn: 'warning',
+        limitInputPixels: MAX_IMAGE_PIXELS,
+        sequentialRead: true
+      }).rotate();
 
-    let sanitizedBuffer: Buffer;
-    if (source.mimeType === 'image/jpeg') {
-      sanitizedBuffer = await decoder.jpeg({ quality: 90, progressive: true }).toBuffer();
-    } else if (source.mimeType === 'image/png') {
-      sanitizedBuffer = await decoder.png({ compressionLevel: 9 }).toBuffer();
-    } else {
-      sanitizedBuffer = await decoder.webp({ quality: 90 }).toBuffer();
+      return maximumDimension
+        ? decoder.resize({
+            width: maximumDimension,
+            height: maximumDimension,
+            fit: 'inside',
+            withoutEnlargement: true
+          })
+        : decoder;
+    };
+
+    const validateCanonical = (
+      buffer: Buffer,
+      mimeType: SafeImageMimeType
+    ): ValidatedImage | null => {
+      if (buffer.length > MAX_STORED_IMAGE_BYTES) return null;
+      return validateImageDataUrl(
+        `data:${mimeType};base64,${buffer.toString('base64')}`,
+        MAX_STORED_IMAGE_BYTES
+      );
+    };
+
+    // Preserve the original format when it already fits. Sharp strips
+    // EXIF/XMP/comments by default, so the persisted copy cannot carry active
+    // metadata or appended content.
+    if (
+      source.buffer.length <= MAX_STORED_IMAGE_BYTES
+      && Math.max(source.width, source.height) <= MAX_STORED_IMAGE_DIMENSION
+    ) {
+      let initialBuffer: Buffer;
+      if (source.mimeType === 'image/jpeg') {
+        initialBuffer = await createDecoder().jpeg({ quality: 90, progressive: true }).toBuffer();
+      } else if (source.mimeType === 'image/png') {
+        initialBuffer = await createDecoder().png({ compressionLevel: 9 }).toBuffer();
+      } else {
+        initialBuffer = await createDecoder().webp({ quality: 90 }).toBuffer();
+      }
+      const initial = validateCanonical(initialBuffer, source.mimeType);
+      if (initial) return initial;
     }
 
-    // Sharp strips EXIF/XMP/comments by default. Revalidating its output also
-    // applies the persistent byte/dimension limits to the canonical result.
-    return validateImageDataUrl(
-      `data:${source.mimeType};base64,${sanitizedBuffer.toString('base64')}`
-    );
+    // Large source files are accepted up to 5 MB, then progressively optimized
+    // into a web-ready Firestore-safe asset. JPEG covers remain JPEG; an
+    // oversized PNG may become WebP so transparency can be retained efficiently.
+    const sourceMaximumDimension = Math.max(source.width, source.height);
+    const startingDimension = Math.min(sourceMaximumDimension, MAX_STORED_IMAGE_DIMENSION);
+    const attempts = [
+      { scale: 1, quality: 80 },
+      { scale: 0.8, quality: 74 },
+      { scale: 0.65, quality: 68 },
+      { scale: 0.5, quality: 62 },
+      { scale: 0.35, quality: 56 }
+    ].map(attempt => ({
+      maximumDimension: Math.max(640, Math.round(startingDimension * attempt.scale)),
+      quality: attempt.quality
+    }));
+
+    const outputMimeType: SafeImageMimeType = source.mimeType === 'image/jpeg'
+      ? 'image/jpeg'
+      : 'image/webp';
+
+    for (const attempt of attempts) {
+      const decoder = createDecoder(attempt.maximumDimension);
+      const buffer = outputMimeType === 'image/jpeg'
+        ? await decoder.jpeg({ quality: attempt.quality, progressive: true }).toBuffer()
+        : await decoder.webp({ quality: attempt.quality, alphaQuality: attempt.quality }).toBuffer();
+      const canonical = validateCanonical(buffer, outputMimeType);
+      if (canonical) return canonical;
+    }
+
+    throw new ImageValidationError('Image could not be optimized for permanent storage. Please use a less complex image.');
   } catch (error) {
     if (error instanceof ImageValidationError) throw error;
     throw new ImageValidationError('Image could not be decoded safely. Please use a valid JPEG, PNG, or WebP file.');

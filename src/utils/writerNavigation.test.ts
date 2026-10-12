@@ -5,6 +5,7 @@ describe('writer navigation', () => {
   it.each([
     'newsletter',
     'topics',
+    'subscriptions',
     'affiliates',
     'readers',
     'payments'

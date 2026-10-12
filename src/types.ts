@@ -194,6 +194,63 @@ export interface ContentBundle {
   updatedAt: string;
 }
 
+export interface SubscriptionPlan {
+  id: string;
+  name: string;
+  description: string;
+  durationMonths: number;
+  priceKes: number;
+  renewable: boolean;
+  badge?: string;
+  coverImage?: string;
+  coverImageAlt?: string;
+  coverPosition?: CoverPosition;
+  order: number;
+  isPublished: boolean;
+  isFeatured?: boolean;
+  isArchived?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SubscriptionPurchaseSnapshot {
+  version: 1;
+  planId: string;
+  planName: string;
+  durationMonths: number;
+  priceKes: number;
+  renewable: boolean;
+}
+
+export interface ReaderSubscription {
+  id: string;
+  userId: string;
+  userEmail: string;
+  status: 'active' | 'expired' | 'revoked';
+  activePlanId: string;
+  activePlanName: string;
+  renewable: boolean;
+  startedAt: string;
+  expiresAt: string;
+  lastRenewedAt: string;
+  lastCheckoutRequestId: string;
+  renewalCount: number;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+  revokedReason?: string;
+}
+
+export interface ReaderSubscriptionSummary {
+  status: 'active' | 'expired' | 'revoked';
+  planId: string;
+  planName: string;
+  startedAt: string;
+  expiresAt: string;
+  renewable: boolean;
+  lastRenewedAt: string;
+}
+
 export interface PieceReview {
   id: string;
   articleId: string;
@@ -226,6 +283,7 @@ export interface ReaderHomeResponse {
   recommendations: ReaderHomeItem[];
   collections: Array<ContentCollection & { pieces: Article[] }>;
   bundles: Array<ContentBundle & { pieces: Article[] }>;
+  activeSubscription?: ReaderSubscriptionSummary;
 }
 
 export interface PieceLike {
@@ -403,7 +461,7 @@ export interface NewsletterAdminSummary {
   recentCampaigns: NewsletterCampaign[];
 }
 
-export type LibraryAccessSource = 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+export type LibraryAccessSource = 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SUBSCRIPTION' | 'SYSTEM';
 
 export type LibraryArticle = Article & {
   libraryAccessSource?: LibraryAccessSource;
@@ -423,6 +481,7 @@ export interface UserLibraryResponse {
   success: boolean;
   library: UserLibraryEntry[];
   totalCount: number;
+  activeSubscription?: ReaderSubscriptionSummary;
 }
 
 export interface ManualAccessGrant {
@@ -850,10 +909,18 @@ export interface PaymentTransaction {
   merchantRequestId?: string;
   articleId: string;
   articleTitle?: string;
-  purchaseKind?: 'piece' | 'bundle';
+  purchaseKind?: 'piece' | 'bundle' | 'subscription';
   bundleId?: string;
   /** Immutable entitlement snapshot captured before payment initiation. */
   bundlePieceIds?: string[];
+  subscriptionPlanId?: string;
+  /** Immutable plan snapshot captured before the payment provider is contacted. */
+  subscriptionPlanName?: string;
+  subscriptionDurationMonths?: number;
+  subscriptionRenewable?: boolean;
+  subscriptionPlanVersion?: number;
+  subscriptionPeriodStartsAt?: string;
+  subscriptionExpiresAt?: string;
   phoneNumber?: string; // Sanitized or masked
   senderName?: string;
   amount: number; // KES amount charged
@@ -1011,6 +1078,16 @@ export interface HomepageConfig {
   homepageCollectionsSubtitle?: string;
   homepagePiecesHeading?: string;
   homepagePiecesSubtitle?: string;
+  homepageSubscriptionsHeading?: string;
+  homepageSubscriptionsSubtitle?: string;
+  homepageSubscriptionsBadge?: string;
+  communicationHeading?: string;
+  communicationDescription?: string;
+  communicationEmailEnabled?: boolean;
+  communicationWhatsappEnabled?: boolean;
+  communicationWhatsappLabel?: string;
+  communicationWhatsappDescription?: string;
+  communicationWhatsappUrl?: string;
   startHerePieceIds?: string[]; // 3 curated piece IDs
   startHereHeading?: string;
   startHereSubtitle?: string;
@@ -1092,6 +1169,7 @@ export type WriterNavTab =
   | 'homepage'
   | 'topics'
   | 'reader-experience'
+  | 'subscriptions'
   | 'media'
   | 'affiliates'
   | 'payments' 

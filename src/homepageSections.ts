@@ -7,9 +7,14 @@ export const HOMEPAGE_SECTION_DEFINITIONS = [
     description: 'The main introduction, background photo, quote, and opening button.',
   },
   {
+    id: 'subscriptions',
+    title: 'Reader passes',
+    description: 'Time-limited full-catalogue access plans and renewal options.',
+  },
+  {
     id: 'newsletter',
-    title: 'Reader newsletter',
-    description: 'The compact reader-letters subscription banner.',
+    title: 'Reader community',
+    description: 'The compact email and WhatsApp update hub.',
   },
   {
     id: 'bundles',
@@ -63,10 +68,21 @@ export const normalizeHomepageSections = (
       });
   }
 
-  const orderedIds = [
-    ...configured.keys(),
-    ...HOMEPAGE_SECTION_IDS.filter(id => !configured.has(id)),
-  ];
+  const orderedIds: HomepageSectionId[] = configured.size === 0
+    ? [...HOMEPAGE_SECTION_IDS]
+    : [...configured.keys()];
+
+  // Existing production configurations predate Reader Passes. Put the new
+  // high-visibility section directly after the hero instead of silently
+  // appending it below the archive.
+  if (configured.size > 0 && !configured.has('subscriptions')) {
+    const heroIndex = orderedIds.indexOf('hero');
+    orderedIds.splice(heroIndex >= 0 ? heroIndex + 1 : 0, 0, 'subscriptions');
+  }
+
+  for (const id of HOMEPAGE_SECTION_IDS) {
+    if (!orderedIds.includes(id)) orderedIds.push(id);
+  }
 
   return orderedIds.map((id, index) => {
     const definition = HOMEPAGE_SECTION_DEFINITIONS.find(section => section.id === id)!;

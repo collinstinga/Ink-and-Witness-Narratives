@@ -38,6 +38,7 @@ export interface HomepageDiscoveryProps {
   onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: PublicView) => void;
   heroSection?: React.ReactNode;
+  subscriptionsSection?: React.ReactNode;
   newsletterSection?: React.ReactNode;
 }
 
@@ -198,6 +199,7 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   onSelectCategory,
   onNavigate,
   heroSection,
+  subscriptionsSection,
   newsletterSection,
 }) => {
   const model = useMemo(
@@ -467,6 +469,7 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
 
   const sectionNodes: Record<HomepageSectionId, React.ReactNode> = {
     hero: heroSection || null,
+    subscriptions: subscriptionsSection || null,
     newsletter: newsletterSection || null,
     bundles: model.bundles.length > 0 ? (
       <DiscoverySectionFrame>

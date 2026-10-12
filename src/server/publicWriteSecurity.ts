@@ -11,6 +11,7 @@ interface FieldRule {
   allowed?: readonly string[];
   min?: number;
   max?: number;
+  integer?: boolean;
   maxBytes?: number;
   maxItems?: number;
   itemMaxLength?: number;
@@ -131,6 +132,9 @@ function validateJsonBody(
         if (typeof raw !== 'number' || !Number.isFinite(raw)) {
           return res.status(400).json({ success: false, error: `${field} must be a finite number.` });
         }
+        if (rule.integer && !Number.isSafeInteger(raw)) {
+          return res.status(400).json({ success: false, error: `${field} must be a whole number.` });
+        }
         if (rule.min !== undefined && raw < rule.min) {
           return res.status(400).json({ success: false, error: `${field} is below the allowed minimum.` });
         }
@@ -249,6 +253,22 @@ export const publicWriteValidators = {
     maxBytes: 8_192,
     atLeastOneOf: ['phoneNumber', 'phone', 'tel', 'msisdn', 'phone_number', 'senderPhone']
   }),
+
+  subscriptionCheckout: validateJsonBody({
+    planId: {
+      kind: 'string',
+      required: true,
+      minLength: 3,
+      maxLength: 64,
+      pattern: /^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])?$/,
+      normalize: 'trim'
+    },
+    phoneNumber: { ...optionalPhone, required: true },
+    expectedPlanName: { kind: 'string', required: true, minLength: 1, maxLength: 80, normalize: 'trim' },
+    expectedPriceKes: { kind: 'number', required: true, min: 1, max: 1_000_000, integer: true },
+    expectedDurationMonths: { kind: 'number', required: true, min: 1, max: 120, integer: true },
+    expectedRenewable: { kind: 'boolean', required: true }
+  }, { maxBytes: 2_048 }),
 
   bankOrder: validateJsonBody({
     articleId: optionalId,

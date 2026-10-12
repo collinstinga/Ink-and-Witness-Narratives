@@ -21,6 +21,7 @@ import {
   NewsletterCampaignStatus,
   NewsletterSubscriber,
   PaymentTransaction,
+  SubscriptionPlan,
   User,
   UserRecord
 } from "./src/types.js";
@@ -30,6 +31,14 @@ import {
   normalizeHomepageSections
 } from "./src/homepageSections.js";
 import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
+import {
+  SubscriptionPlanConflictError,
+  subscriptionStore
+} from "./src/server/subscriptionStore.js";
+import {
+  SubscriptionValidationError,
+  normalizeWhatsAppChannelUrl
+} from "./src/server/subscriptionSecurity.js";
 import { resolveHomepageCuration } from "./src/server/homepageCuration.js";
 import {
   getDurableTrafficAnalytics,
@@ -658,6 +667,7 @@ function toPublicMpesaIntentStatus(
     currency: intent.currency,
     paymentMethod: 'mpesa',
     type: intent.type,
+    purchaseKind: intent.purchaseKind,
     status: 'PENDING',
     rawStatus: 'PENDING',
     resultDesc: 'Payment is not yet confirmed. Keep this window open and check your M-Pesa messages before retrying.'
@@ -678,13 +688,23 @@ function toPublicPaymentStatus(
     currency: transaction.currency,
     paymentMethod: transaction.paymentMethod,
     type: transaction.type,
+    purchaseKind: transaction.purchaseKind,
     status: isPaid ? 'PAID' : result.status,
     rawStatus: transaction.status,
     resultCode: result.resultCode,
     resultDesc: result.resultDesc,
     mpesaReceiptNumber: isPaid ? (result.mpesaReceiptNumber || transaction.mpesaReceiptNumber) : undefined,
     receiptNumber: isPaid ? transaction.receiptNumber : undefined,
-    downloadToken: isPaid ? (result.downloadToken || transaction.downloadToken) : undefined
+    downloadToken: isPaid ? (result.downloadToken || transaction.downloadToken) : undefined,
+    subscriptionPlanId: transaction.purchaseKind === 'subscription'
+      ? transaction.subscriptionPlanId
+      : undefined,
+    subscriptionPlanName: transaction.purchaseKind === 'subscription'
+      ? transaction.subscriptionPlanName
+      : undefined,
+    subscriptionExpiresAt: isPaid && transaction.purchaseKind === 'subscription'
+      ? transaction.subscriptionExpiresAt
+      : undefined
   };
 }
 
@@ -1002,25 +1022,15 @@ export async function createApp() {
   app.use(cookieParser());
   app.use(requireSameOriginForCookieAuth);
 
-  // Authenticated image uploads need room for Base64 overhead, but are still
-  // capped close to the 700 KB decoded storage limit.
+  // Writer Studio accepts source files up to 5 MB and optimizes oversized
+  // sources in-browser. The 3 MiB transport ceiling expands to about 4 MiB as
+  // Base64, below Vercel's non-configurable 4.5 MB Function payload limit.
   const largeAdminBodyRoutes = [
     '/api/admin/save-permanent-image',
     '/api/admin/upload-image'
   ];
-  app.use(largeAdminBodyRoutes, express.json({ limit: '2mb' }));
-  app.use(largeAdminBodyRoutes, express.urlencoded({ extended: true, limit: '2mb' }));
-  app.use('/api/mpesa/callback', express.json({ limit: '64kb' }));
-  app.use(express.json({
-    limit: '1mb',
-    verify: (req, _res, buffer) => {
-      if (String((req as any).originalUrl || '').startsWith('/api/newsletter/webhooks/resend')) {
-        (req as any).newsletterRawBody = buffer.toString('utf8');
-      }
-    }
-  }));
-  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  const largeAdminBodyRouteSet = new Set(largeAdminBodyRoutes);
+  const handleBodyParsingError = (err: any, _req: Request, res: Response, next: NextFunction) => {
     if (err?.type === 'entity.too.large') {
       return res.status(413).json({ success: false, error: 'Request body is too large.' });
     }
@@ -1028,7 +1038,26 @@ export async function createApp() {
       return res.status(400).json({ success: false, error: 'Request body is not valid JSON.' });
     }
     return next(err);
+  };
+  app.use('/api/mpesa/callback', express.json({ limit: '64kb' }));
+  const standardJsonParser = express.json({
+    limit: '1mb',
+    verify: (req, _res, buffer) => {
+      if (String((req as any).originalUrl || '').startsWith('/api/newsletter/webhooks/resend')) {
+        (req as any).newsletterRawBody = buffer.toString('utf8');
+      }
+    }
   });
+  const standardUrlencodedParser = express.urlencoded({ extended: true, limit: '1mb' });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (largeAdminBodyRouteSet.has(req.path)) return next();
+    return standardJsonParser(req, res, next);
+  });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (largeAdminBodyRouteSet.has(req.path)) return next();
+    return standardUrlencodedParser(req, res, next);
+  });
+  app.use(handleBodyParsingError);
   // Rate limiters for security
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -1223,6 +1252,25 @@ export async function createApp() {
   });
   app.use(loadSessionUser);
 
+  // Authenticate image upload requests before allocating memory for their
+  // larger JSON bodies. Writer clients always send JSON; URL-encoded bodies are
+  // intentionally unsupported for this high-capacity path.
+  const adminImageJsonParser = express.json({ limit: '4250kb' });
+  app.use(
+    largeAdminBodyRoutes,
+    requireAdminAuth,
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!req.is('application/json')) {
+        return res.status(415).json({
+          success: false,
+          error: 'Image uploads must use application/json.'
+        });
+      }
+      return adminImageJsonParser(req, res, next);
+    }
+  );
+  app.use(largeAdminBodyRoutes, handleBodyParsingError);
+
   // Anonymous reading and cookie-session verification do not need a scan of
   // every account. Hydrate the user directory only for the small set of public
   // routes that performs synchronous directory lookups. Authenticated library
@@ -1290,7 +1338,7 @@ export async function createApp() {
       // Always check the shared article version marker. This costs one targeted
       // read on warm instances and scans the catalogue only after an actual
       // writer mutation, preventing an older instance from moving the UI back.
-      const [articles, collections, bundles] = await Promise.all([
+      const [articles, collections, bundles, subscriptionPlans] = await Promise.all([
         store.getFreshArticles(false, true).catch(error => {
           console.warn('[Public Bootstrap] Article freshness check failed; serving last known good catalogue:', error);
           return store.getArticles(false);
@@ -1302,6 +1350,10 @@ export async function createApp() {
         readerExperienceStore.listBundles(false).catch(error => {
           console.warn('[Public Bootstrap] Bundle loading failed; serving the remaining homepage:', error);
           return [] as ContentBundle[];
+        }),
+        subscriptionStore.listPublicPlans().catch(error => {
+          console.warn('[Public Bootstrap] Reader Pass loading failed; serving the remaining homepage:', error);
+          return [];
         }),
         store.refreshPublicMetadata()
       ]);
@@ -1348,7 +1400,8 @@ export async function createApp() {
           ),
           pieceOfTheWeek: homepage.pieceOfTheWeek
             ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
-            : undefined
+            : undefined,
+          subscriptionPlans
         },
         newsletter: {
           enabled: newsletterFeatureEnabled(),
@@ -1394,7 +1447,7 @@ export async function createApp() {
   app.get("/api/homepage", async (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store, max-age=0');
     try {
-      const [homepage, collections, bundles, articles] = await Promise.all([
+      const [homepage, collections, bundles, articles, subscriptionPlans] = await Promise.all([
         store.getFreshHomepageConfig(),
         readerExperienceStore.listCollections(false).catch(error => {
           console.warn('[Homepage] Collection loading failed; serving standalone curation only:', error);
@@ -1404,7 +1457,11 @@ export async function createApp() {
           console.warn('[Homepage] Bundle loading failed; serving the remaining curation only:', error);
           return [] as ContentBundle[];
         }),
-        store.getFreshArticles(false, true)
+        store.getFreshArticles(false, true),
+        subscriptionStore.listPublicPlans().catch(error => {
+          console.warn('[Homepage] Reader Pass loading failed; serving the remaining homepage:', error);
+          return [];
+        })
       ]);
       const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
       const homepageCuration = resolveHomepageCuration(homepage.config, collections, bundles, articles);
@@ -1420,7 +1477,8 @@ export async function createApp() {
         mostSellingPieces: homepage.mostSellingPieces.map(article => toPublicArticleSummary(article, defaultPriceKes)),
         pieceOfTheWeek: homepage.pieceOfTheWeek
           ? toPublicArticleSummary(homepage.pieceOfTheWeek, defaultPriceKes)
-          : undefined
+          : undefined,
+        subscriptionPlans
       });
     } catch {
       res.status(503).json({ error: 'Homepage settings are temporarily unavailable.' });
@@ -1443,6 +1501,17 @@ export async function createApp() {
     legacyHeaders: false,
     validate: { xForwardedForHeader: false, default: false },
     message: { accepted: true }
+  });
+
+  app.get('/api/subscriptions/plans', async (_req: Request, res: Response) => {
+    try {
+      const plans = await subscriptionStore.listPublicPlans();
+      res.setHeader('Cache-Control', 'no-store, max-age=0');
+      return res.json({ plans });
+    } catch (error) {
+      console.error('[Reader Passes] Public plan loading failed.', error);
+      return res.status(503).json({ error: 'Reader Passes are temporarily unavailable.' });
+    }
   });
 
   const passwordResetRequestLimiter = rateLimit({
@@ -2149,6 +2218,109 @@ export async function createApp() {
   // ==========================================
   // AUTHORITATIVE M-PESA DARAJA PRODUCTION FLOW
   // ==========================================
+
+  app.post(
+    '/api/subscriptions/checkout/mpesa',
+    publicWriteLimiter,
+    stkPushLimiter,
+    publicWriteValidators.subscriptionCheckout,
+    requireAuth,
+    async (req: Request, res: Response) => {
+      try {
+        const user = (req as any).user as { id: string; email: string; role: string } | null;
+        if (!user || user.role !== 'client') {
+          return res.status(403).json({
+            success: false,
+            error: 'Sign in with a reader account before purchasing a Reader Pass.'
+          });
+        }
+        const plan = await subscriptionStore.getPlan(String(req.body.planId || ''), false);
+        if (!plan) {
+          return res.status(404).json({
+            success: false,
+            error: 'This Reader Pass is no longer available. Reload the latest plans.'
+          });
+        }
+        const snapshot = subscriptionStore.createPurchaseSnapshot(plan);
+        if (
+          req.body.expectedPlanName !== snapshot.planName
+          || req.body.expectedPriceKes !== snapshot.priceKes
+          || req.body.expectedDurationMonths !== snapshot.durationMonths
+          || req.body.expectedRenewable !== snapshot.renewable
+        ) {
+          return res.status(409).json({
+            success: false,
+            code: 'SUBSCRIPTION_PLAN_CHANGED',
+            error: 'This Reader Pass changed after the page loaded. Reload the latest price and duration before paying.'
+          });
+        }
+        if (!snapshot.renewable) {
+          const activeSubscription = await subscriptionStore.getActiveReaderSubscription(user.id);
+          if (activeSubscription?.activePlanId === snapshot.planId) {
+            return res.status(409).json({
+              success: false,
+              code: 'SUBSCRIPTION_RENEWAL_DISABLED',
+              error: 'This Reader Pass cannot be renewed while the current term is active.'
+            });
+          }
+        }
+        const formattedPhone = formatKenyanPhone(req.body.phoneNumber);
+        const stkResult = await initiateStkPush({
+          phoneNumber: formattedPhone,
+          amount: snapshot.priceKes,
+          accountReference: snapshot.planName,
+          articleId: `subscription:${snapshot.planId}`,
+          articleTitle: snapshot.planName,
+          purchaseKind: 'subscription',
+          subscriptionPlanId: snapshot.planId,
+          subscriptionPlanName: snapshot.planName,
+          subscriptionDurationMonths: snapshot.durationMonths,
+          subscriptionRenewable: snapshot.renewable,
+          subscriptionPlanVersion: snapshot.version,
+          type: 'PURCHASE',
+          currency: 'KES',
+          originalAmount: snapshot.priceKes,
+          exchangeRate: 1,
+          exchangeRateTimestamp: new Date().toISOString(),
+          userId: user.id,
+          userEmail: user.email
+        });
+        if (!stkResult.success || !stkResult.checkoutRequestId || !stkResult.paymentCapability) {
+          return res.status(400).json({
+            success: false,
+            error: stkResult.error || 'Safaricom could not start this Reader Pass payment.'
+          });
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({
+          success: true,
+          message: stkResult.message,
+          checkoutRequestId: stkResult.checkoutRequestId,
+          reconciliationPending: stkResult.reconciliationPending === true,
+          paymentCapability: stkResult.paymentCapability,
+          plan: {
+            id: snapshot.planId,
+            name: snapshot.planName,
+            durationMonths: snapshot.durationMonths,
+            renewable: snapshot.renewable
+          },
+          amount: snapshot.priceKes,
+          currency: 'KES',
+          phoneNumber: formattedPhone,
+          live: true
+        });
+      } catch (error: any) {
+        const status = error instanceof SubscriptionValidationError ? 400 : 500;
+        console.error('[Reader Passes] Checkout could not be initiated.', error);
+        return res.status(status).json({
+          success: false,
+          error: status === 400
+            ? error.message
+            : 'Reader Pass payment could not be prepared safely. Please retry.'
+        });
+      }
+    }
+  );
 
   // Initiate M-Pesa STK Push
   app.post("/api/mpesa/stkpush", publicWriteLimiter, stkPushLimiter, publicWriteValidators.stkPush, async (req: Request, res: Response) => {
@@ -3038,6 +3210,20 @@ export async function createApp() {
     });
   });
 
+  app.get('/api/user/subscription', requireAuth, async (req: Request, res: Response) => {
+    const user = (req as any).user as { id: string; role: string };
+    if (user.role !== 'client') {
+      return res.status(403).json({ error: 'Reader account required.' });
+    }
+    try {
+      const subscription = await subscriptionStore.getReaderSubscriptionSummary(user.id);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ subscription: subscription || null });
+    } catch {
+      return res.status(503).json({ error: 'Reader Pass status is temporarily unavailable.' });
+    }
+  });
+
   // Reader Personal Library (Account-synced permanent web reading access)
   app.get("/api/user/library", async (req: Request, res: Response) => {
     const user = (req as any).user;
@@ -3046,8 +3232,13 @@ export async function createApp() {
     }
 
     let purchases;
+    let activeSubscription;
     try {
-      purchases = await store.getUserPurchases(user.id);
+      const activeSubscriptionPromise = subscriptionStore.getActiveReaderSubscription(user.id);
+      [purchases, activeSubscription] = await Promise.all([
+        store.getUserPurchases(user.id, undefined, activeSubscriptionPromise),
+        activeSubscriptionPromise
+      ]);
     } catch {
       return res.status(503).json({ success: false, error: "Your reader library is temporarily unavailable. Please retry." });
     }
@@ -3072,7 +3263,8 @@ export async function createApp() {
         name: user.name
       },
       library,
-      totalCount: library.length
+      totalCount: library.length,
+      ...(activeSubscription ? { activeSubscription: subscriptionStore.toSummary(activeSubscription) } : {})
     });
   });
 
@@ -3093,15 +3285,22 @@ export async function createApp() {
     const user = (req as any).user as { id: string; email: string; role: string };
     if (user.role !== 'client') return res.status(403).json({ error: 'Reader account required.' });
     try {
-      const [profile, purchases, collections, bundles] = await Promise.all([
+      const activeSubscriptionPromise = subscriptionStore.getActiveReaderSubscription(user.id);
+      const [profile, purchases, collections, bundles, activeSubscription] = await Promise.all([
         readerExperienceStore.getProfile(user.id),
-        store.getUserPurchases(user.id),
+        store.getUserPurchases(user.id, undefined, activeSubscriptionPromise),
         readerExperienceStore.listCollections(false),
-        readerExperienceStore.listBundles(false)
+        readerExperienceStore.listBundles(false),
+        activeSubscriptionPromise
       ]);
       const articles = store.getArticles(false);
       const byId = new Map(articles.map(article => [article.id, article]));
       const purchaseById = new Map(purchases.map(purchase => [purchase.articleId, purchase]));
+      const ownedOutsideSubscription = new Set(
+        purchases
+          .filter(purchase => purchase.accessSource !== 'SUBSCRIPTION')
+          .map(purchase => purchase.articleId)
+      );
       const defaultPrice = store.getMpesaSettings().defaultPriceKes || 1050;
       const summarize = (article: Article, unlocked = false) => toPublicArticleSummary(
         article,
@@ -3138,6 +3337,7 @@ export async function createApp() {
 
       const interestScores = { ...profile.interestScores };
       for (const purchase of purchases) {
+        if (purchase.accessSource === 'SUBSCRIPTION') continue;
         const article = byId.get(purchase.articleId);
         if (!article) continue;
         for (const key of articleInterestKeys(article)) {
@@ -3146,7 +3346,7 @@ export async function createApp() {
       }
       const viewedIds = new Set(profile.recent.map(view => view.articleId));
       const recommendations = articles
-        .filter(article => !purchaseById.has(article.id))
+        .filter(article => !ownedOutsideSubscription.has(article.id))
         .map(article => ({
           article,
           score: articleInterestKeys(article).reduce((sum, key) => sum + (Number(interestScores[key]) || 0), 0)
@@ -3175,7 +3375,8 @@ export async function createApp() {
         collections: collections.map(hydrateGroup).filter(group => group.pieces.length > 0),
         bundles: bundles
           .map(hydrateGroup)
-          .filter(group => group.pieces.length >= 2 && group.pieces.length === group.pieceIds.length)
+          .filter(group => group.pieces.length >= 2 && group.pieces.length === group.pieceIds.length),
+        ...(activeSubscription ? { activeSubscription: subscriptionStore.toSummary(activeSubscription) } : {})
       });
     } catch (error) {
       console.error('[Reader Experience] Personalized home unavailable.', error);
@@ -4774,24 +4975,27 @@ export async function createApp() {
       }
 
       const filePrefix = prefix || (target ? target.replace(/[^a-zA-Z0-9_-]/g, '_') : 'img');
-      const saved = target === 'collection_cover' || target === 'bundle_cover'
+      const saved = target === 'collection_cover' || target === 'bundle_cover' || target === 'subscription_plan_cover'
         ? await store.saveUploadedImage(dataUrl, filePrefix, ['image/jpeg'])
         : await store.saveUploadedImage(dataUrl, filePrefix);
 
       let updatedRecord: any = null;
 
       if (target === 'author_avatar') {
-        updatedRecord = store.updateAuthorPhoto(saved.url);
+        updatedRecord = await store.updateAuthorPhoto(saved.url);
       } else if (target === 'author_cover') {
-        updatedRecord = store.updateAuthorCoverPhoto(saved.url);
+        updatedRecord = await store.updateAuthorCoverPhoto(saved.url);
       } else if (target === 'welcome_background') {
         updatedRecord = await store.updateWelcomeBackground(saved.url);
       } else if (target === 'favicon') {
-        updatedRecord = store.updateWebsiteFavicon(saved.url);
+        updatedRecord = await store.updateWebsiteFavicon(saved.url);
       } else if (target === 'logo') {
-        updatedRecord = store.updateSiteLogo(saved.url);
+        updatedRecord = await store.updateSiteLogo(saved.url);
       } else if (target === 'piece_cover' && articleId) {
-        updatedRecord = store.updatePieceCoverPhoto(articleId, saved.url);
+        updatedRecord = await store.updatePieceCoverPhoto(articleId, saved.url);
+        if (!updatedRecord) {
+          return res.status(404).json({ error: 'The selected piece no longer exists. Reload Writer Studio and try again.' });
+        }
       }
 
       res.json({
@@ -4817,17 +5021,20 @@ export async function createApp() {
       let updatedRecord: any = null;
 
       if (target === 'author_avatar') {
-        updatedRecord = store.removeAuthorPhoto();
+        updatedRecord = await store.removeAuthorPhoto();
       } else if (target === 'author_cover') {
-        updatedRecord = store.removeAuthorCoverPhoto();
+        updatedRecord = await store.removeAuthorCoverPhoto();
       } else if (target === 'welcome_background') {
         updatedRecord = await store.removeWelcomeBackground();
       } else if (target === 'favicon') {
-        updatedRecord = store.removeWebsiteFavicon();
+        updatedRecord = await store.removeWebsiteFavicon();
       } else if (target === 'logo') {
-        updatedRecord = store.removeSiteLogo();
+        updatedRecord = await store.removeSiteLogo();
       } else if (target === 'piece_cover' && articleId) {
-        updatedRecord = store.removePieceCoverPhoto(articleId);
+        updatedRecord = await store.removePieceCoverPhoto(articleId);
+        if (!updatedRecord) {
+          return res.status(404).json({ error: 'The selected piece no longer exists. Reload Writer Studio and try again.' });
+        }
       }
 
       res.json({
@@ -5035,6 +5242,10 @@ export async function createApp() {
         'homepageBundlesHeading', 'homepageBundlesSubtitle',
         'homepageCollectionsHeading', 'homepageCollectionsSubtitle',
         'homepagePiecesHeading', 'homepagePiecesSubtitle',
+        'homepageSubscriptionsHeading', 'homepageSubscriptionsSubtitle', 'homepageSubscriptionsBadge',
+        'communicationHeading', 'communicationDescription',
+        'communicationEmailEnabled', 'communicationWhatsappEnabled',
+        'communicationWhatsappLabel', 'communicationWhatsappDescription', 'communicationWhatsappUrl',
         'theWritingHeading', 'theWritingSubtitle', 'aboutTheWritingHeading',
         'aboutTheWritingStatement', 'aboutTheWritingPurpose', 'aboutTheWritingButtonText',
         'mostSellingPieceIds', 'pieceOfTheWeekId', 'mostSellingMode', 'banners',
@@ -5085,7 +5296,15 @@ export async function createApp() {
         ['homepageCollectionsHeading', 120],
         ['homepageCollectionsSubtitle', 300],
         ['homepagePiecesHeading', 120],
-        ['homepagePiecesSubtitle', 300]
+        ['homepagePiecesSubtitle', 300],
+        ['homepageSubscriptionsHeading', 120],
+        ['homepageSubscriptionsSubtitle', 300],
+        ['homepageSubscriptionsBadge', 80],
+        ['communicationHeading', 120],
+        ['communicationDescription', 300],
+        ['communicationWhatsappLabel', 120],
+        ['communicationWhatsappDescription', 300],
+        ['communicationWhatsappUrl', 300]
       ] as const;
       for (const [field, maximum] of textRules) {
         if (!Object.hasOwn(normalizedConfig, field)) continue;
@@ -5094,6 +5313,21 @@ export async function createApp() {
           return res.status(400).json({ error: `${field} must be ${maximum} characters or fewer.` });
         }
         normalizedConfig[field] = value.trim();
+      }
+
+      for (const field of ['communicationEmailEnabled', 'communicationWhatsappEnabled'] as const) {
+        if (Object.hasOwn(normalizedConfig, field) && typeof normalizedConfig[field] !== 'boolean') {
+          return res.status(400).json({ error: `${field} must be true or false.` });
+        }
+      }
+
+      if (Object.hasOwn(normalizedConfig, 'communicationWhatsappUrl')) {
+        const value = String(normalizedConfig.communicationWhatsappUrl || '');
+        const normalizedUrl = normalizeWhatsAppChannelUrl(value);
+        if (!normalizedUrl) {
+          return res.status(400).json({ error: 'Only an official HTTPS WhatsApp channel URL is allowed.' });
+        }
+        normalizedConfig.communicationWhatsappUrl = normalizedUrl;
       }
 
       if (Object.hasOwn(normalizedConfig, 'sections')) {
@@ -5162,6 +5396,153 @@ export async function createApp() {
       }
       console.error("Save homepage error:", err);
       res.status(500).json({ error: err.message || "Failed to save homepage settings." });
+    }
+  });
+
+  const subscriptionPlanEditableFields = new Set([
+    'name',
+    'description',
+    'priceKes',
+    'durationMonths',
+    'renewable',
+    'isPublished',
+    'order',
+    'badge',
+    'coverImage',
+    'coverImageAlt',
+    'coverPosition'
+  ]);
+
+  const readSubscriptionPlanRequest = (
+    body: unknown,
+    options: { requireExpectedVersion: boolean }
+  ): { plan: Partial<SubscriptionPlan>; expectedUpdatedAt: string | null } => {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new SubscriptionValidationError('SUBSCRIPTION_INVALID_REQUEST', 'A Reader Pass payload is required.');
+    }
+    const payload = body as Record<string, unknown>;
+    if (
+      Object.keys(payload).some(key => key !== 'plan' && key !== 'expectedUpdatedAt')
+      || !payload.plan
+      || typeof payload.plan !== 'object'
+      || Array.isArray(payload.plan)
+    ) {
+      throw new SubscriptionValidationError('SUBSCRIPTION_INVALID_REQUEST', 'Reader Pass fields are invalid.');
+    }
+    const plan = payload.plan as Record<string, unknown>;
+    const unexpected = Object.keys(plan).find(key => !subscriptionPlanEditableFields.has(key));
+    if (unexpected) {
+      throw new SubscriptionValidationError(
+        'SUBSCRIPTION_INVALID_REQUEST',
+        `Unsupported Reader Pass field: ${unexpected}.`
+      );
+    }
+    const expectedUpdatedAt = payload.expectedUpdatedAt;
+    if (
+      !Object.hasOwn(payload, 'expectedUpdatedAt')
+      || (
+        expectedUpdatedAt !== null
+        && (
+          typeof expectedUpdatedAt !== 'string'
+          || expectedUpdatedAt.length > 64
+          || !Number.isFinite(Date.parse(expectedUpdatedAt))
+        )
+      )
+      || (options.requireExpectedVersion && expectedUpdatedAt === null)
+    ) {
+      throw new SubscriptionValidationError(
+        'SUBSCRIPTION_INVALID_REQUEST',
+        'Reload this Reader Pass before saving it.'
+      );
+    }
+    return {
+      plan: plan as Partial<SubscriptionPlan>,
+      expectedUpdatedAt: expectedUpdatedAt as string | null
+    };
+  };
+
+  const sendSubscriptionAdminError = (res: Response, error: unknown) => {
+    if (error instanceof SubscriptionPlanConflictError) {
+      return res.status(409).json({ code: 'SUBSCRIPTION_PLAN_CONFLICT', error: error.message });
+    }
+    if (error instanceof SubscriptionValidationError) {
+      const status = error.code === 'SUBSCRIPTION_PLAN_NOT_FOUND' ? 404 : 400;
+      return res.status(status).json({ code: error.code, error: error.message });
+    }
+    console.error('[Reader Passes] Writer operation failed.', error);
+    return res.status(500).json({ error: 'Reader Pass settings could not be saved.' });
+  };
+
+  app.get('/api/admin/subscriptions/plans', requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const plans = await subscriptionStore.listPlans(true);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ plans });
+    } catch (error) {
+      return sendSubscriptionAdminError(res, error);
+    }
+  });
+
+  app.post('/api/admin/subscriptions/plans', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const { plan, expectedUpdatedAt } = readSubscriptionPlanRequest(req.body, {
+        requireExpectedVersion: false
+      });
+      if (expectedUpdatedAt !== null) {
+        throw new SubscriptionValidationError(
+          'SUBSCRIPTION_INVALID_REQUEST',
+          'A new Reader Pass cannot use an existing version.'
+        );
+      }
+      const saved = await subscriptionStore.savePlan(plan, null);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(201).json({ success: true, plan: saved });
+    } catch (error) {
+      return sendSubscriptionAdminError(res, error);
+    }
+  });
+
+  app.put('/api/admin/subscriptions/plans/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id || '');
+      if (!/^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])?$/.test(id)) {
+        throw new SubscriptionValidationError('SUBSCRIPTION_INVALID_PLAN_ID', 'Reader Pass identifier is invalid.');
+      }
+      const { plan, expectedUpdatedAt } = readSubscriptionPlanRequest(req.body, {
+        requireExpectedVersion: true
+      });
+      const saved = await subscriptionStore.savePlan(
+        { ...plan, id },
+        expectedUpdatedAt
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ success: true, plan: saved });
+    } catch (error) {
+      return sendSubscriptionAdminError(res, error);
+    }
+  });
+
+  app.delete('/api/admin/subscriptions/plans/:id', requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id || '');
+      if (!/^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])?$/.test(id)) {
+        throw new SubscriptionValidationError('SUBSCRIPTION_INVALID_PLAN_ID', 'Reader Pass identifier is invalid.');
+      }
+      const expectedUpdatedAt = req.body?.expectedUpdatedAt;
+      if (
+        typeof expectedUpdatedAt !== 'string'
+        || !Number.isFinite(Date.parse(expectedUpdatedAt))
+      ) {
+        throw new SubscriptionValidationError(
+          'SUBSCRIPTION_INVALID_REQUEST',
+          'Reload this Reader Pass before archiving it.'
+        );
+      }
+      const plan = await subscriptionStore.archivePlan(id, expectedUpdatedAt);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ success: true, plan });
+    } catch (error) {
+      return sendSubscriptionAdminError(res, error);
     }
   });
 

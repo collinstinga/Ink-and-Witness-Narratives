@@ -6,6 +6,7 @@ const DIRECT_WRITER_TABS = new Set<WriterNavTab>([
   'categories',
   'topics',
   'reader-experience',
+  'subscriptions',
   'media',
   'analytics',
   'readers',

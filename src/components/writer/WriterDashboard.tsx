@@ -26,7 +26,8 @@ import {
   Share2,
   CheckCircle2,
   Save,
-  Mail
+  Mail,
+  CalendarRange
 } from 'lucide-react';
 import { 
   Article,
@@ -58,6 +59,7 @@ import { TopicManagementTab } from './TopicManagementTab.js';
 import { AffiliatesAdminTab } from './AffiliatesAdminTab.js';
 import { WriterNewsletter } from './WriterNewsletter.js';
 import { WriterReaderExperience } from './WriterReaderExperience.js';
+import { WriterSubscriptions } from './WriterSubscriptions.js';
 
 interface WriterDashboardProps {
   onClose: () => void;
@@ -685,6 +687,25 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
             </span>
           </button>
 
+          {/* Reader Pass Subscription Plans */}
+          <button
+            id="nav-tab-subscriptions"
+            onClick={() => handleTabChange('subscriptions')}
+            className={`w-full px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
+              currentTab === 'subscriptions'
+                ? 'bg-violet-950/80 text-violet-200 border border-violet-800/80 shadow-sm'
+                : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60'
+            }`}
+          >
+            <div className="flex items-center gap-2.5">
+              <CalendarRange className="w-4 h-4 text-violet-400" />
+              <span>Reader Passes</span>
+            </div>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800">
+              Plans
+            </span>
+          </button>
+
           {/* Media & Photos */}
           <button
             id="nav-tab-media"
@@ -942,6 +963,10 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
           {currentTab === 'reader-experience' && (
             <WriterReaderExperience articles={pieces} />
+          )}
+
+          {currentTab === 'subscriptions' && (
+            <WriterSubscriptions />
           )}
 
           {currentTab === 'media' && (

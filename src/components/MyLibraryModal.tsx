@@ -9,13 +9,16 @@ import {
   Clock3,
   Sparkles,
   Layers3,
-  PackageOpen
+  PackageOpen,
+  CalendarDays,
+  RefreshCw
 } from 'lucide-react';
 import { Article, ContentBundle, LibraryArticle, ReaderHomeItem, ReaderHomeResponse } from '../types.js';
 import { api, clearStoredTokens } from '../utils/api.js';
 
 function getAccessLabel(source: LibraryArticle['libraryAccessSource']): string {
   if (source === 'MANUAL_GRANT') return 'Writer-granted & Active';
+  if (source === 'SUBSCRIPTION') return 'Reader Pass & Active';
   if (source === 'SYSTEM') return 'Account-provided & Active';
   return 'Purchased & Active';
 }
@@ -27,6 +30,7 @@ interface MyLibraryModalProps {
   onReadArticle: (article: Article) => void;
   onExploreCatalog: () => void;
   onPurchaseBundle?: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  onRenewSubscription?: (planId: string) => void | Promise<void>;
   isLoading?: boolean;
   error?: string;
 }
@@ -38,6 +42,7 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
   onReadArticle,
   onExploreCatalog,
   onPurchaseBundle,
+  onRenewSubscription,
   isLoading = false,
   error = ''
 }) => {
@@ -166,6 +171,40 @@ export const MyLibraryModal: React.FC<MyLibraryModalProps> = ({
         <div className="p-6 sm:p-7 space-y-4 max-h-[75vh] overflow-y-auto">
           {homeLoading && !readerHome && (
             <p className="text-center text-xs text-sky-300" role="status">Preparing your personalized reader home…</p>
+          )}
+
+          {readerHome?.activeSubscription && (
+            <section
+              className="rounded-2xl border border-emerald-800/60 bg-gradient-to-br from-emerald-950/45 via-slate-950/80 to-sky-950/35 p-4 sm:p-5"
+              aria-labelledby="active-reader-pass-title"
+            >
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.24em] text-emerald-400">Active Reader Pass</p>
+                  <h4 id="active-reader-pass-title" className="mt-1 font-display text-xl font-bold text-white">
+                    {readerHome.activeSubscription.planName}
+                  </h4>
+                  <p className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                    <CalendarDays className="h-4 w-4 text-sky-400" aria-hidden="true" />
+                    Full catalogue access until{' '}
+                    {new Date(readerHome.activeSubscription.expiresAt).toLocaleDateString('en-KE', { dateStyle: 'long' })}
+                  </p>
+                </div>
+                {readerHome.activeSubscription.renewable && onRenewSubscription ? (
+                  <button
+                    type="button"
+                    onClick={() => void onRenewSubscription(readerHome.activeSubscription!.planId)}
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-xs font-bold text-emerald-950 transition hover:bg-emerald-400"
+                  >
+                    <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                    Renew pass
+                  </button>
+                ) : null}
+              </div>
+              <p className="mt-3 text-[11px] leading-relaxed text-slate-400">
+                A renewal adds the plan duration after your current expiry, so remaining paid time is preserved.
+              </p>
+            </section>
           )}
 
           {readerHome && readerHome.continueReading.length > 0 && (

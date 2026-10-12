@@ -2,7 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookMarked, Check, Eye, EyeOff, ImagePlus, Layers3, Loader2, PackageOpen, RefreshCw, Save, Star, Trash2, X } from 'lucide-react';
 import { Article, ContentBundle, ContentCollection, PieceReview } from '../../types.js';
 import { api } from '../../utils/api.js';
-import { CONTENT_COVER_UPLOAD_ACCEPT, getContentCoverValidationError } from '../../utils/imageUploadPolicy.js';
+import {
+  CONTENT_COVER_UPLOAD_ACCEPT,
+  getContentCoverValidationError,
+  prepareImageFileForUpload,
+} from '../../utils/imageUploadPolicy.js';
 
 type EditorKind = 'collection' | 'bundle';
 
@@ -30,18 +34,6 @@ const emptyEditor = (): EditorState => ({
   coverPositionX: 50,
   coverPositionY: 50
 });
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') resolve(reader.result);
-      else reject(new Error('The selected JPEG could not be read.'));
-    };
-    reader.onerror = () => reject(new Error('The selected JPEG could not be read.'));
-    reader.readAsDataURL(file);
-  });
-}
 
 export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   const [collections, setCollections] = useState<ContentCollection[]>([]);
@@ -151,7 +143,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
     setNotice('');
     setError('');
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      const dataUrl = await prepareImageFileForUpload(file);
       const target = uploadKind === 'collection' ? 'collection_cover' : 'bundle_cover';
       const result = await api.uploadImage(
         dataUrl,
@@ -277,7 +269,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
             <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 sm:col-span-2">
               <div>
                 <p className="text-xs font-semibold text-slate-300">{editorKind === 'collection' ? 'Collection' : 'Bundle'} cover photo</p>
-                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Upload a JPEG up to 700 KB. The photo is attached permanently when you save the {editorKind}.</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Upload a JPEG up to 5 MB. The photo is attached permanently when you save the {editorKind}.</p>
               </div>
               <input
                 ref={coverInputRef}

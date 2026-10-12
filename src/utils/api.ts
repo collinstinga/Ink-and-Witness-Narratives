@@ -36,7 +36,9 @@ import {
   ReaderReactionType,
   ContentCollection,
   ContentBundle,
-  PieceReview
+  PieceReview,
+  ReaderSubscriptionSummary,
+  SubscriptionPlan
 } from '../types.js';
 import { clearReferral, getActiveReferral } from './affiliateReferral.js';
 
@@ -293,6 +295,7 @@ interface PublicBootstrapResponse {
     pieces: Article[];
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
+    subscriptionPlans: SubscriptionPlan[];
   };
   newsletter: {
     enabled: boolean;
@@ -734,6 +737,52 @@ export const api = {
     return result;
   },
 
+  async getSubscriptionPlans(): Promise<SubscriptionPlan[]> {
+    return (await getPublicBootstrap()).homepage.subscriptionPlans || [];
+  },
+
+  async getReaderSubscription(): Promise<ReaderSubscriptionSummary | null> {
+    const result = await safeFetchJson<{ subscription: ReaderSubscriptionSummary | null }>(
+      '/api/user/subscription',
+      { cache: 'no-store' },
+      'Reader Pass status could not be loaded.'
+    );
+    return result.subscription;
+  },
+
+  async initiateSubscriptionCheckout(plan: SubscriptionPlan, phoneNumber: string) {
+    return safeFetchJson<{
+      success: true;
+      checkoutRequestId: string;
+      paymentCapability: string;
+      reconciliationPending?: boolean;
+      amount: number;
+      currency: 'KES';
+      plan: {
+        id: string;
+        name: string;
+        durationMonths: number;
+        renewable: boolean;
+      };
+      message?: string;
+    }>(
+      '/api/subscriptions/checkout/mpesa',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planId: plan.id,
+          phoneNumber,
+          expectedPlanName: plan.name,
+          expectedPriceKes: plan.priceKes,
+          expectedDurationMonths: plan.durationMonths,
+          expectedRenewable: plan.renewable
+        })
+      },
+      'Reader Pass payment could not be started.'
+    );
+  },
+
   async submitBankReference(checkoutRequestId: string, customerRef: string, paymentCapability: string, senderPhone?: string): Promise<any> {
     const res = await fetch('/api/payments/bank-submit-ref', {
       method: 'POST',
@@ -1115,6 +1164,54 @@ export const api = {
     return safeFetchJson(`/api/admin/bundles/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
+  async getAdminSubscriptionPlans(): Promise<{ plans: SubscriptionPlan[] }> {
+    return safeFetchJson(
+      '/api/admin/subscriptions/plans',
+      { cache: 'no-store' },
+      'Reader Pass settings could not be loaded.'
+    );
+  },
+
+  async saveSubscriptionPlan(
+    plan: Partial<SubscriptionPlan>,
+    expectedUpdatedAt: string | null
+  ): Promise<{ success: true; plan: SubscriptionPlan }> {
+    const isExisting = Boolean(plan.id);
+    const url = isExisting
+      ? `/api/admin/subscriptions/plans/${encodeURIComponent(plan.id as string)}`
+      : '/api/admin/subscriptions/plans';
+    const {
+      id: _id,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      ...editable
+    } = plan;
+    return safeFetchJson(
+      url,
+      {
+        method: isExisting ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan: editable, expectedUpdatedAt })
+      },
+      'Reader Pass could not be saved.'
+    );
+  },
+
+  async archiveSubscriptionPlan(
+    id: string,
+    expectedUpdatedAt: string
+  ): Promise<{ success: true; plan: SubscriptionPlan }> {
+    return safeFetchJson(
+      `/api/admin/subscriptions/plans/${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedUpdatedAt })
+      },
+      'Reader Pass could not be archived.'
+    );
+  },
+
   async moderatePieceReview(id: string, input: { status?: PieceReview['status']; featured?: boolean }): Promise<{
     success: true;
     review: PieceReview;
@@ -1413,7 +1510,7 @@ export const api = {
 
   async uploadImage(
     dataUrl: string, 
-    target?: 'author_avatar' | 'author_cover' | 'welcome_background' | 'favicon' | 'logo' | 'piece_cover' | 'collection_cover' | 'bundle_cover',
+    target?: 'author_avatar' | 'author_cover' | 'welcome_background' | 'favicon' | 'logo' | 'piece_cover' | 'collection_cover' | 'bundle_cover' | 'subscription_plan_cover',
     articleId?: string,
     prefix?: string
   ): Promise<{ success: boolean; url: string; record?: any; message?: string }> {
@@ -1442,7 +1539,6 @@ export const api = {
     imageUrl: string,
     articleId?: string,
     extraData?: {
-      dataUrl?: string;
       cropSettings?: any;
       originalUrl?: string;
     }
@@ -1458,7 +1554,6 @@ export const api = {
         target,
         imageUrl,
         articleId,
-        dataUrl: extraData?.dataUrl,
         cropSettings: extraData?.cropSettings,
         originalUrl: extraData?.originalUrl
       })
@@ -1614,6 +1709,7 @@ export const api = {
     pieces: Article[];
     mostSellingPieces: Article[];
     pieceOfTheWeek?: Article;
+    subscriptionPlans: SubscriptionPlan[];
   }> {
     return (await getPublicBootstrap()).homepage;
   },

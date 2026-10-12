@@ -297,9 +297,14 @@ export interface InitiateStkPushParams {
   accountReference?: string;
   articleId?: string;
   articleTitle?: string;
-  purchaseKind?: 'piece' | 'bundle';
+  purchaseKind?: 'piece' | 'bundle' | 'subscription';
   bundleId?: string;
   bundlePieceIds?: string[];
+  subscriptionPlanId?: string;
+  subscriptionPlanName?: string;
+  subscriptionDurationMonths?: number;
+  subscriptionRenewable?: boolean;
+  subscriptionPlanVersion?: number;
   isTip?: boolean;
   type?: 'PURCHASE' | 'TIP';
   currency?: string;
@@ -344,6 +349,11 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     purchaseKind = 'piece',
     bundleId,
     bundlePieceIds,
+    subscriptionPlanId,
+    subscriptionPlanName,
+    subscriptionDurationMonths,
+    subscriptionRenewable,
+    subscriptionPlanVersion,
     isTip = false,
     type: requestedType,
     currency = 'KES',
@@ -457,6 +467,11 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     purchaseKind,
     bundleId: purchaseKind === 'bundle' ? bundleId : undefined,
     bundlePieceIds: purchaseKind === 'bundle' ? bundlePieceIds : undefined,
+    subscriptionPlanId: purchaseKind === 'subscription' ? subscriptionPlanId : undefined,
+    subscriptionPlanName: purchaseKind === 'subscription' ? subscriptionPlanName : undefined,
+    subscriptionDurationMonths: purchaseKind === 'subscription' ? subscriptionDurationMonths : undefined,
+    subscriptionRenewable: purchaseKind === 'subscription' ? subscriptionRenewable : undefined,
+    subscriptionPlanVersion: purchaseKind === 'subscription' ? subscriptionPlanVersion : undefined,
     phoneNumber: formattedPhone,
     amount: cleanAmount,
     currency: normalizedCurrency,

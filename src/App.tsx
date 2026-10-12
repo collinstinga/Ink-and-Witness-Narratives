@@ -9,7 +9,7 @@ import {
   ArrowRight,
   LifeBuoy
 } from 'lucide-react';
-import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle, ContentBundle } from './types.js';
+import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle, ContentBundle, PaymentTransaction, SubscriptionPlan } from './types.js';
 import { api, getStoredTokens } from './utils/api.js';
 import { applyFavicon } from './utils/favicon.js';
 import { resolveDirectWriterTab } from './utils/writerNavigation.js';
@@ -22,6 +22,7 @@ import { HowToPayView } from './components/views/HowToPayView.js';
 
 import { ArticleReaderModal } from './components/ArticleReaderModal.js';
 import { MpesaCheckoutModal } from './components/MpesaCheckoutModal.js';
+import { SubscriptionCheckoutModal } from './components/SubscriptionCheckoutModal.js';
 import { MyLibraryModal } from './components/MyLibraryModal.js';
 import { TipAuthorModal } from './components/TipAuthorModal.js';
 import { SupportModal } from './components/SupportModal.js';
@@ -148,6 +149,8 @@ export default function App() {
   const [activeReaderArticle, setActiveReaderArticle] = useState<Article | null>(null);
   const [activeCheckoutArticle, setActiveCheckoutArticle] = useState<Article | null>(null);
   const [pendingBundleCheckoutArticle, setPendingBundleCheckoutArticle] = useState<Article | null>(null);
+  const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<SubscriptionPlan | null>(null);
+  const [pendingSubscriptionPlan, setPendingSubscriptionPlan] = useState<SubscriptionPlan | null>(null);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [isTipOpen, setIsTipOpen] = useState(false);
   const [tipTargetArticle, setTipTargetArticle] = useState<Article | null>(null);
@@ -791,7 +794,13 @@ export default function App() {
     setAccountLibraryError('');
     setIsSignInOpen(false);
     if (user.role === 'admin') {
+      setPendingSubscriptionPlan(null);
       navigate({ isWriterStudioOpen: true, isSignInOpen: false }, 'push');
+    } else if (pendingSubscriptionPlan) {
+      const plan = pendingSubscriptionPlan;
+      setPendingSubscriptionPlan(null);
+      navigate({ isLibraryOpen: false, isSignInOpen: false }, 'push');
+      setActiveSubscriptionPlan(plan);
     } else if (pendingBundleCheckoutArticle) {
       const checkoutArticle = pendingBundleCheckoutArticle;
       setPendingBundleCheckoutArticle(null);
@@ -808,6 +817,8 @@ export default function App() {
     accountLibraryRequestIdRef.current += 1;
     setAccountLibraryLoading(false);
     setPendingBundleCheckoutArticle(null);
+    setPendingSubscriptionPlan(null);
+    setActiveSubscriptionPlan(null);
     try {
       await api.authLogout();
     } catch {}
@@ -949,6 +960,32 @@ export default function App() {
     setActiveCheckoutArticle(checkoutArticle);
   };
 
+  const handlePurchaseSubscription = (plan: SubscriptionPlan) => {
+    if (!currentUser || currentUser.role !== 'client') {
+      setPendingSubscriptionPlan(plan);
+      setIsLibraryOpen(false);
+      setIsSignInOpen(true);
+      return;
+    }
+    setIsLibraryOpen(false);
+    setActiveSubscriptionPlan(plan);
+  };
+
+  const handleSubscriptionPaymentSuccess = async (_transaction: PaymentTransaction) => {
+    await refreshAccountLibrary(currentUserRef.current);
+    setIsLibraryOpen(true);
+  };
+
+  const handleRenewSubscription = async (planId: string) => {
+    try {
+      const plans = await api.getSubscriptionPlans();
+      const plan = plans.find(candidate => candidate.id === planId && candidate.isPublished !== false);
+      if (plan) handlePurchaseSubscription(plan);
+    } catch {
+      // The library remains open; the homepage can be used when plans are temporarily unavailable.
+    }
+  };
+
   // Sync document title with active article or view
   useEffect(() => {
     if (activeReaderArticle) {
@@ -1024,6 +1061,7 @@ export default function App() {
             onReadArticle={handleOpenReader}
             onUnlockArticle={handleUnlockRequest}
             onPurchaseBundle={handlePurchaseBundle}
+            onPurchaseSubscription={handlePurchaseSubscription}
             onSelectCategory={handleSelectCategory}
             onNavigate={handleNavigateView}
             onOpenTip={handleOpenTip}
@@ -1263,6 +1301,13 @@ export default function App() {
         onOpenSupport={handleOpenSupport}
       />
 
+      <SubscriptionCheckoutModal
+        plan={activeSubscriptionPlan}
+        isOpen={Boolean(activeSubscriptionPlan)}
+        onClose={() => setActiveSubscriptionPlan(null)}
+        onPaymentSuccess={handleSubscriptionPaymentSuccess}
+      />
+
       {/* 3. My Library Modal */}
       <MyLibraryModal
         isOpen={isLibraryOpen}
@@ -1272,6 +1317,7 @@ export default function App() {
         error={accountLibraryError}
         onReadArticle={handleOpenReader}
         onPurchaseBundle={handlePurchaseBundle}
+        onRenewSubscription={handleRenewSubscription}
         onExploreCatalog={() => {
           handleCloseLibrary();
           handleNavigateView('all-pieces');
@@ -1313,6 +1359,7 @@ export default function App() {
         isOpen={isSignInOpen}
         onClose={() => {
           setPendingBundleCheckoutArticle(null);
+          setPendingSubscriptionPlan(null);
           setIsSignInOpen(false);
           if (window.location.hash.includes('sign-in') || window.location.hash.includes('signin') || window.location.hash.includes('login')) {
             navigate({ isSignInOpen: false }, 'replace');

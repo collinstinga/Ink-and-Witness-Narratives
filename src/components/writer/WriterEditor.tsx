@@ -51,7 +51,12 @@ import {
   Topic
 } from '../../types.js';
 import { api } from '../../utils/api.js';
-import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
+import {
+  IMAGE_UPLOAD_ACCEPT,
+  getImageUploadValidationError,
+  prepareImageDataUrlForUpload,
+  prepareImageFileForUpload,
+} from '../../utils/imageUploadPolicy.js';
 import { ImageCropModal, CropSettings } from './ImageCropModal.js';
 import { CategoryManagerModal } from './CategoryManagerModal.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
@@ -94,6 +99,18 @@ const POPULAR_TAGS = [
   "Heartbreak",
   "Kenyan Life"
 ];
+
+function isEmbeddedImage(value: string | undefined | null): value is string {
+  return typeof value === 'string' && /^data:image\/(?:jpeg|png|webp);base64,/i.test(value);
+}
+
+async function persistEmbeddedImage(value: string, prefix: string): Promise<string> {
+  if (!isEmbeddedImage(value)) return value;
+  const transportDataUrl = await prepareImageDataUrlForUpload(value);
+  const uploaded = await api.uploadImage(transportDataUrl, 'piece_cover', undefined, prefix);
+  if (!uploaded.url) throw new Error('The image could not be converted to a permanent asset.');
+  return uploaded.url;
+}
 
 export const WriterEditor: React.FC<WriterEditorProps> = ({
   initialArticle,
@@ -142,6 +159,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [coverImageCrop, setCoverImageCrop] = useState<CropSettings | undefined>(initialArticle?.coverImageCrop as CropSettings | undefined);
   const [showCropModal, setShowCropModal] = useState(false);
   const [cropModalImageUrl, setCropModalImageUrl] = useState('');
+  const [pendingCoverOriginalDataUrl, setPendingCoverOriginalDataUrl] = useState<string | null>(null);
   const coverImageFileInputRef = useRef<HTMLInputElement>(null);
   const [tags, setTags] = useState<string[]>(initialArticle?.tags || ['Monograph', 'Strategy']);
   const [customTagInput, setCustomTagInput] = useState('');
@@ -337,7 +355,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
   // Background Autosave every 20 seconds if dirty and article ID exists
   useEffect(() => {
-    if (!currentArticleId || !isDirty || saving || autosaving) return;
+    if (!currentArticleId || !isDirty || saving || autosaving || isEmbeddedImage(coverImage)) return;
 
     const timer = setTimeout(async () => {
       if (!isDirty || !title.trim() || !content.trim() || manualSaveInProgressRef.current || autosaveInFlightRef.current) return;
@@ -518,7 +536,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   };
 
   // Inline Image Upload Handler
-  const handleImageFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -529,40 +547,30 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       return;
     }
 
-    const reader = new FileReader();
     setUploadingImage(true);
     setError(null);
 
-    reader.onload = async (event) => {
-      const dataUrl = event.target?.result as string;
-      if (!dataUrl) {
-        setUploadingImage(false);
-        return;
-      }
+    try {
+      const dataUrl = await prepareImageFileForUpload(file);
+      const res = await api.uploadImage(dataUrl, 'piece_cover', undefined, 'piece_inline');
+      if (!res.url) throw new Error('The uploaded image did not return a permanent URL.');
 
-      try {
-        const res = await api.uploadImage(dataUrl, 'piece_cover', currentArticleId || undefined);
-        const imageUrl = res.url || dataUrl;
-        
-        // Insert markdown image at cursor
-        insertAtCursor(`\n\n![${file.name.replace(/\.[^/.]+$/, '')}](${imageUrl})\n\n`);
-        setSaveSuccessMsg('Image uploaded and inserted into piece!');
-        setTimeout(() => setSaveSuccessMsg(null), 3000);
-      } catch (err: any) {
-        setError(err.message || 'Failed to upload image.');
-      } finally {
-        setUploadingImage(false);
-        if (imageUploadInputRef.current) {
-          imageUploadInputRef.current.value = '';
-        }
+      // Insert only the persistent URL so article documents never contain a large Data URL.
+      insertAtCursor(`\n\n![${file.name.replace(/\.[^/.]+$/, '')}](${res.url})\n\n`);
+      setSaveSuccessMsg('Image uploaded and inserted into piece!');
+      setTimeout(() => setSaveSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to upload image.');
+    } finally {
+      setUploadingImage(false);
+      if (imageUploadInputRef.current) {
+        imageUploadInputRef.current.value = '';
       }
-    };
-
-    reader.readAsDataURL(file);
+    }
   };
 
   // Cover Image File Selection & Cropping
-  const handleCoverFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCoverFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -573,20 +581,23 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      if (dataUrl) {
-        setCropModalImageUrl(dataUrl);
-        setCoverImageOriginal(dataUrl);
-        setShowCropModal(true);
-      }
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    setUploadingImage(true);
+    setError(null);
+    try {
+      const dataUrl = await prepareImageFileForUpload(file);
+      setPendingCoverOriginalDataUrl(dataUrl);
+      setCropModalImageUrl(dataUrl);
+      setShowCropModal(true);
+    } catch (err: any) {
+      setError(err.message || 'Failed to prepare the cover image.');
+    } finally {
+      setUploadingImage(false);
+      e.target.value = '';
+    }
   };
 
   const handleOpenCropModal = () => {
+    setPendingCoverOriginalDataUrl(null);
     setCropModalImageUrl(coverImageOriginal || coverImage);
     setShowCropModal(true);
   };
@@ -597,25 +608,34 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     originalUrl?: string;
   }) => {
     try {
-      // Upload cropped image to backend storage
-      const res = await api.uploadImage(result.croppedDataUrl, 'piece_cover', currentArticleId || undefined);
-      const finalUrl = res.url || result.croppedDataUrl;
-      
-      setCoverImage(finalUrl);
-      if (result.originalUrl) {
-        setCoverImageOriginal(result.originalUrl);
-      }
+      const croppedDataUrl = await prepareImageDataUrlForUpload(result.croppedDataUrl);
+      const originalCandidate = pendingCoverOriginalDataUrl || result.originalUrl || coverImageOriginal;
+      const [croppedUpload, originalUpload] = await Promise.all([
+        api.uploadImage(croppedDataUrl, 'piece_cover', undefined, 'piece_cover_cropped'),
+        isEmbeddedImage(originalCandidate)
+          ? api.uploadImage(
+              await prepareImageDataUrlForUpload(originalCandidate),
+              'piece_cover',
+              undefined,
+              'piece_cover_original'
+            )
+          : Promise.resolve(null),
+      ]);
+      if (!croppedUpload.url) throw new Error('The cropped cover did not return a permanent URL.');
+
+      setCoverImage(croppedUpload.url);
+      setCoverImageOriginal(
+        originalUpload?.url
+          || (!isEmbeddedImage(originalCandidate) ? originalCandidate : undefined)
+          || croppedUpload.url
+      );
       setCoverImageCrop(result.cropSettings);
+      setPendingCoverOriginalDataUrl(null);
       setIsDirty(true);
       setSaveSuccessMsg('Cover crop & framing applied successfully!');
       setTimeout(() => setSaveSuccessMsg(null), 3000);
     } catch (err: any) {
-      setCoverImage(result.croppedDataUrl);
-      if (result.originalUrl) {
-        setCoverImageOriginal(result.originalUrl);
-      }
-      setCoverImageCrop(result.cropSettings);
-      setIsDirty(true);
+      setError(err.message || 'Failed to upload the cropped cover image.');
     }
   };
 
@@ -624,7 +644,16 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     try {
       setSavingPermanentCover(true);
       setError(null);
-      await api.savePermanentImage(coverImage, 'piece_cover', currentArticleId || undefined);
+      const persistentCover = await persistEmbeddedImage(coverImage, 'piece_cover');
+      const persistentOriginal = coverImageOriginal === coverImage
+        ? persistentCover
+        : await persistEmbeddedImage(coverImageOriginal, 'piece_cover_original');
+      await api.savePermanentImage('piece_cover', persistentCover, currentArticleId || undefined, {
+        cropSettings: coverImageCrop,
+        originalUrl: persistentOriginal,
+      });
+      setCoverImage(persistentCover);
+      setCoverImageOriginal(persistentOriginal);
       setPermanentCoverSaved(true);
       setSaveSuccessMsg('Cover photo saved permanently to database & storage!');
       setTimeout(() => {
@@ -702,6 +731,12 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
     try {
       const finalStatus = targetStatus || status;
+      const persistentCover = await persistEmbeddedImage(coverImage, 'piece_cover');
+      const persistentOriginal = coverImageOriginal === coverImage
+        ? persistentCover
+        : await persistEmbeddedImage(coverImageOriginal, 'piece_cover_original');
+      if (persistentCover !== coverImage) setCoverImage(persistentCover);
+      if (persistentOriginal !== coverImageOriginal) setCoverImageOriginal(persistentOriginal);
       let finalTags = [...tags];
       if (customTagInput.trim()) {
         const extra = customTagInput.trim().replace(/^#/, '');
@@ -727,8 +762,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         currencyOverrides,
         readTimeMinutes,
         showReadTime,
-        coverImage,
-        coverImageOriginal,
+        coverImage: persistentCover,
+        coverImageOriginal: persistentOriginal,
         coverImageCrop: coverImageCrop ? {
           aspectRatio: coverImageCrop.aspectRatio,
           zoom: coverImageCrop.zoom,
@@ -1661,7 +1696,6 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                 </div>
               )}
             </div>
-
             {/* Featured piece toggle */}
             <div className="pt-3 border-t border-slate-800 flex items-center justify-between">
               <div>
@@ -1914,6 +1948,9 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                 </span>
               )}
             </div>
+            <p className="text-[11px] text-slate-500">
+              Upload a JPEG, PNG, or WebP cover up to 5 MB. Large sources are optimized automatically before saving.
+            </p>
 
             {/* Hidden File Input for Cover Upload */}
             <input
@@ -2240,7 +2277,10 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         initialCropSettings={coverImageCrop}
         title="Featured Piece Cover Framing & Crop"
         onSave={handleCropSaved}
-        onClose={() => setShowCropModal(false)}
+        onClose={() => {
+          setShowCropModal(false);
+          setPendingCoverOriginalDataUrl(null);
+        }}
       />
 
       {/* Category Manager Modal */}

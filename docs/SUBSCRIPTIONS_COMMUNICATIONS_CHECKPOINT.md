@@ -1,116 +1,68 @@
-# Subscriptions and Communications Checkpoint
+# Subscriptions, Communications, and 5 MB Media Checkpoint
 
-Checkpoint date: 2026-10-11 (Africa/Nairobi)
+Checkpoint date: 2026-10-12 (Africa/Nairobi)
 
-## Resume point
+## Current release state
 
 - Working branch: `feature/subscriptions-communications-tree`
-- Baseline commit: `6f6099f`
-- Production implementation status: discovery and architecture complete; no feature code, database records, images, or production settings have been changed.
-- Production deployment status: not deployed.
-- Safe next action: implement the additive schema and stores described below, then test locally before any preview or production deployment.
+- Production baseline: `6f6099f`
+- Architecture checkpoint: `482fa4b`
+- Implementation: complete locally; production candidate and promotion are still pending.
+- Safe next action: commit the verified tree, deploy with `--prod --skip-domain`, verify the candidate, and only then promote it.
 
-## Confirmed product interpretation
+## Completed implementation
 
-Subscriptions are account-bound, time-limited access to the full published catalogue. They do not replace or shorten existing piece purchases, bundle purchases, or manual grants. When a subscription expires, only subscription-derived access expires.
+- Four editable Reader Pass defaults: 3 months/KSh 500, 6 months/KSh 1,000, 9 months/KSh 1,500, and 12 months/KSh 2,000.
+- Writer Studio controls plan name, description, price, duration, renewal availability, publication state, order, badge, JPEG cover, and cover focal point.
+- Plans appear in a configurable homepage section directly below the hero by default.
+- Checkout requires an authenticated reader and rechecks the displayed name, price, duration, and renewal state against the fresh server plan before contacting Daraja.
+- Payment records carry an immutable server-side subscription snapshot. Confirmed settlement atomically writes the payment, receipt claim, account-bound entitlement, and idempotent activation record.
+- Renewal starts from the later of the current expiry or settlement time and uses exact UTC calendar months. A callback replay cannot extend access twice.
+- Active passes unlock the complete published catalogue without creating transferable bearer tokens or fake per-piece purchases. Existing purchases, bundles, and manual grants remain independent.
+- Library and personalized-home routes share one subscription read per request, expose only an active pass as `activeSubscription`, and continue recommending unread catalogue items to subscribers.
+- Public plan loading uses one canonical catalogue document rather than reading every plan on every homepage load. First deployment seeds only missing defaults and the catalogue; writer saves update the individual plan and catalogue atomically.
+- A compact communication hub preserves confirmed email subscriptions and adds the requested WhatsApp channel: `https://whatsapp.com/channel/0029Vb8zwQA0gcfBDoRCWM3z`.
+- Writer controls cover communication copy, branch visibility, labels, WhatsApp URL validation, and homepage section ordering.
+- Four original text-free Reader Pass artworks are stored under `public/assets/subscriptions/`.
 
-The four editable default plans are:
+## Media policy and persistence hardening
 
-1. The First Chapter — 3 months — KSh 500
-2. The Long Read — 6 months — KSh 1,000
-3. The Deep Archive — 9 months — KSh 1,500
-4. The Full Witness — 12 months — KSh 2,000
+- Writer Studio accepts genuine JPEG, PNG, and WebP source images up to 5 MiB; collection, bundle, and Reader Pass covers remain JPEG-only.
+- The browser inspects decoded dimensions and normalizes large sources before upload. The Base64 request stays below Vercel's fixed 4.5 MB Function body limit.
+- The server authenticates the writer before enabling the larger image parser, validates magic bytes and dimensions, strips metadata, caps the canonical long edge at 2400 px, and stores at most 700 KiB of binary image data per Firestore asset document.
+- Branding and piece-cover APIs now await authoritative Firestore writes and cache-invalidation markers. They return an error instead of claiming success when persistence fails or the selected piece no longer exists.
+- Legacy embedded Data URLs are decoded and dimension-checked before reuse, then converted to permanent cloud assets.
 
-All plan fields remain editable in Writer Studio: name, description, duration, price, features, image, focal position, visibility, featured state, display order, and whether reader-initiated renewal is enabled. Defaults must only seed missing records and must never overwrite writer edits.
+## Additive production writes
 
-“Renewable” means a reader can renew through a new authorized payment. It does not mean an automatic debit. M-Pesa STK Push does not provide a standing recurring-payment mandate, so the application must not simulate one using a stored phone number.
+The first successful plan read creates missing records only; it does not overwrite writer data:
 
-## Payment and entitlement design
+- `subscription_plans/{planId}` for any missing default plans;
+- `site_configs/subscription_plan_catalog` as the one-read public/admin catalogue;
+- later purchases create `reader_subscriptions/{hashedUserId}` and `subscription_activations/{checkoutRequestId}` only after confirmed payment.
 
-- Extend the existing server-authoritative M-Pesa flow; do not add a parallel payment path.
-- Require an authenticated reader account before starting a subscription checkout.
-- Add `subscription` to the payment purchase-kind union and snapshot the immutable plan ID, name, price, and duration before contacting Daraja.
-- Ignore client-supplied subscription prices and durations.
-- Store one deterministic, account-bound subscription entitlement rather than creating one license per article or a transferable `articleId: all` bearer token.
-- On successful settlement, atomically write:
-  - the confirmed payment transaction;
-  - the provider receipt claim;
-  - the account subscription entitlement;
-  - an immutable activation/renewal audit record.
-- Renewal base: the later of the current expiry and settlement time. Add the purchased number of exact UTC calendar months to that base.
-- Duplicate callbacks must not extend a subscription twice.
-- Active subscriptions unlock every currently published paid piece, including pieces published after activation.
-- Existing purchases, bundles, manual grants, and their current behavior remain unchanged.
-- Initially keep subscription sales direct and do not consume a piece-affiliate referral claim; subscription commission policy has not been requested or defined.
+Rollback may leave these dormant additive documents in Firestore. Older application code ignores them, so they do not need destructive cleanup.
 
-## Storage and APIs
+## Verification recorded so far
 
-Use additive Firestore collections:
+- Focused Reader Pass, communications, image, request-boundary, and persistence suite: 98/98 passed across 9 files.
+- TypeScript: passed (`tsc --noEmit`).
+- Full suite: 650/650 passed across 71 files with controlled single-worker concurrency.
+- Production client/server build: passed (Vite 1994 modules; esbuild server bundle 881.8 KiB). Only the existing CSS `::highlight` compatibility advisory and large-chunk advisory remain.
+- Diff integrity: passed (`git diff --check`; line-ending notices only).
+- Secret-pattern scan: no new credential-bearing file was found. The only match is the already tracked Firebase browser configuration, whose API key is intentionally public client configuration; private service credentials remain environment-only.
+- Production candidate, custom domain, and Writer Studio verification: pending.
 
-- `subscription_plans`
-- `reader_subscriptions`
-- `subscription_activations`
+## Production release gate
 
-Planned public/account endpoints:
+1. Run full tests with controlled concurrency, TypeScript, production client/server builds, `git diff --check`, and a secret-pattern scan.
+2. Commit and push the feature checkpoint before touching production.
+3. Deploy an exact committed production candidate using `vercel deploy --prod --skip-domain`.
+4. Verify health, homepage bootstrap, four public plans, generated artwork, anonymous/authenticated boundaries, and response caching headers. Do not trigger a real M-Pesa charge during synthetic verification.
+5. Promote the exact candidate only after it is healthy.
+6. Verify the apex and `www` custom domains, Writer Studio loading, and recent production error logs.
+7. Fast-forward the verified commit to `main`; never force-push. If Git integration creates another deployment, verify that final active deployment too.
 
-- published plans in `/api/public/bootstrap`;
-- authenticated subscription status;
-- authenticated M-Pesa subscription checkout.
+## Safe resume point
 
-Planned Writer Studio endpoints:
-
-- list plans and subscription summaries;
-- create/update/archive plans with optimistic concurrency;
-- audited subscription revocation if required.
-
-Plan deletion must be a soft archive so transaction history is never orphaned.
-
-## Homepage and Writer Studio
-
-- Add a `subscriptions` homepage section directly below the hero by default.
-- Reuse the existing section visibility/order controls so the writer can hide or reposition it.
-- Add responsive plan cards with artwork, plan name, price, duration, features, renewal state, and a clear subscribe/renew action.
-- Include plan records in the coherent public bootstrap payload to avoid another homepage loading waterfall.
-- Reuse the existing permanent image-upload path and image focal-position controls for plan covers.
-- Generate four original, text-free literary cover artworks. Names and prices remain HTML text for accessibility and editing.
-
-## Communications tree
-
-Create one compact “Stay in the loop” homepage area with two explicit branches:
-
-1. Email — preserve the existing consent, confirmation, unsubscribe, and Notify Me flows.
-2. WhatsApp — link to the public Ink & Witness channel:
-   `https://whatsapp.com/channel/0029Vb8zwQA0gcfBDoRCWM3z`
-
-Writer controls should include section copy, email visibility, WhatsApp visibility, WhatsApp label/description, validated channel URL, and display order. The public WhatsApp link must open safely with `noopener noreferrer`.
-
-The channel URL supports follower acquisition only. Automated WhatsApp posting must not be claimed or implemented without a compatible WhatsApp Business/provider API and credentials.
-
-## Required verification before deployment
-
-- Default plans seed only when missing; edits persist and stale versions fail with a conflict.
-- Unpublished/archived plans disappear publicly.
-- Anonymous checkout fails before any provider request.
-- Server price/duration snapshot wins over browser data.
-- First activation, early renewal, expired renewal, and concurrent renewal behave correctly.
-- A replayed callback is idempotent.
-- Failed settlement leaves neither confirmed payment nor entitlement.
-- Active/expired/revoked access is enforced across full article content, library, reader home, progress, bookmarks, highlights, reactions, reviews, and comments.
-- Cross-account subscription use fails closed.
-- Existing permanent and piece-specific access still works after subscription expiry.
-- No subscription settlement creates fake article licenses or increments fake article counters.
-- Public responses expose no capability hashes or internal entitlement identifiers.
-- Homepage remains fast, mobile responsive, non-stale, and accessible.
-- Existing piece, bundle, tip, bank, newsletter, affiliate, and manual-grant tests remain green.
-
-## Deployment gate
-
-Do not mutate production collections during development. After tests and review:
-
-1. Commit feature work on this branch.
-2. Deploy a production-equivalent candidate with `vercel deploy --prod --skip-domain`.
-3. Verify the exact candidate URL end to end.
-4. Promote only after successful verification.
-5. Verify the custom domain and Writer Studio.
-6. Merge/push to `main` only when the promoted deployment and repository state match.
-
+If work stops before release, resume from this branch without reimplementing completed features. Start with `git status --short`, `git log -1`, and the final release gate above. Do not manually create or delete subscription records, do not initiate a real payment for a smoke test, and do not expose Vercel, Firebase, Resend, or Daraja secrets in logs or documentation.

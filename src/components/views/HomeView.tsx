@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowRight, Feather, Sparkles } from 'lucide-react';
-import { Article, AuthorProfile, Category, ContentBundle, ContentCollection, HomepageConfig } from '../../types.js';
+import { Article, AuthorProfile, Category, ContentBundle, ContentCollection, HomepageConfig, SubscriptionPlan } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { HomepageDiscovery } from '../HomepageDiscovery.js';
 import type { HomepageBundle } from '../HomepageBundles.js';
-import { NewsletterSignup } from '../NewsletterSignup.js';
+import { HomepageReaderPasses } from '../HomepageReaderPasses.js';
+import { ReaderCommunityHub } from '../ReaderCommunityHub.js';
 
 interface HomeViewProps {
   author: AuthorProfile | null;
@@ -14,6 +15,7 @@ interface HomeViewProps {
   onReadArticle: (article: Article) => void;
   onUnlockArticle: (article: Article) => void;
   onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  onPurchaseSubscription: (plan: SubscriptionPlan) => void;
   onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: 'home' | 'all-pieces' | 'about' | 'how-to-pay' | 'support') => void;
   onOpenTip: () => void;
@@ -100,6 +102,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onReadArticle,
   onUnlockArticle,
   onPurchaseBundle,
+  onPurchaseSubscription,
   onSelectCategory,
   onNavigate,
 }) => {
@@ -107,6 +110,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const [homepageBundles, setHomepageBundles] = useState<HomepageBundle[]>([]);
   const [homepageCollections, setHomepageCollections] = useState<ContentCollection[] | null>(null);
   const [homepagePieces, setHomepagePieces] = useState<Article[] | null>(null);
+  const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
 
   useEffect(() => {
     let requestSequence = 0;
@@ -121,6 +125,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
           setHomepageBundles(data.bundles || []);
           setHomepageCollections(data.collections || []);
           setHomepagePieces(data.pieces || []);
+          setSubscriptionPlans(data.subscriptionPlans || []);
         }
       } catch (error) {
         if (!disposed && requestId === requestSequence) {
@@ -128,6 +133,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
           setHomepageCollections([]);
           setHomepageBundles([]);
           setHomepagePieces(null);
+          setSubscriptionPlans([]);
         }
       }
     };
@@ -167,7 +173,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const heroBadge = homepageConfig?.heroBadge || 'Ink & Witness Narratives';
 
   const scrollToDiscovery = () => {
-    const target = document.getElementById('home-reading-bundles')
+    const target = document.getElementById('home-reader-passes')
+      || document.getElementById('home-reading-bundles')
       || document.getElementById('home-library-guide')
       || document.getElementById('home-curated-collections')
       || document.getElementById('home-individual-pieces');
@@ -224,10 +231,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
             onExplore={scrollToDiscovery}
           />
         )}
+        subscriptionsSection={(
+          <HomepageReaderPasses
+            plans={subscriptionPlans}
+            config={homepageConfig}
+            onChoosePlan={onPurchaseSubscription}
+          />
+        )}
         newsletterSection={(
-          <div className="border-y border-slate-800/70 bg-slate-950/30">
-            <NewsletterSignup variant="compact" />
-          </div>
+          <ReaderCommunityHub config={homepageConfig} />
         )}
       />
     </div>

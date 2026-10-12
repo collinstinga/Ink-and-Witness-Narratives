@@ -92,6 +92,7 @@ vi.mock('./affiliateStore.js', () => ({
 }));
 
 import { setFirestoreDoc } from './db.js';
+import { addUtcCalendarMonths, getReaderSubscriptionId } from './subscriptionSecurity.js';
 
 function pendingTransaction(id: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -129,6 +130,23 @@ function pendingBankTransaction(id: string, overrides: Record<string, unknown> =
   });
 }
 
+function pendingSubscriptionTransaction(id: string, overrides: Record<string, unknown> = {}) {
+  return pendingTransaction(id, {
+    articleId: 'subscription:first-chapter-3-months',
+    articleTitle: 'The First Chapter',
+    purchaseKind: 'subscription',
+    subscriptionPlanId: 'first-chapter-3-months',
+    subscriptionPlanName: 'The First Chapter',
+    subscriptionDurationMonths: 3,
+    subscriptionRenewable: true,
+    subscriptionPlanVersion: 1,
+    amount: 500,
+    userId: 'reader_subscription',
+    userEmail: 'reader.subscription@example.com',
+    ...overrides,
+  });
+}
+
 describe('atomic M-Pesa settlement', () => {
   let store: typeof import('./store.js').store;
 
@@ -143,10 +161,10 @@ describe('atomic M-Pesa settlement', () => {
     vi.mocked(setFirestoreDoc).mockClear();
   });
 
-  const settlement = (id: string, receiptNumber = 'SIA1234567') => ({
+  const settlement = (id: string, receiptNumber = 'SIA1234567', amount = 300) => ({
     merchantRequestId: `merchant_${id}`,
     receiptNumber,
-    amount: 300,
+    amount,
     phoneNumber: '254712345678',
     resultDesc: 'Success',
     transactionTimestamp: '20260905130500',
@@ -210,6 +228,175 @@ describe('atomic M-Pesa settlement', () => {
         accessSource: 'MPESA_PURCHASE'
       })
     ]));
+  });
+
+  it('activates one account-bound Reader Pass without creating any per-piece license', async () => {
+    const checkoutId = 'checkout_subscription';
+    firestoreMock.documents.set(
+      `transactions/${checkoutId}`,
+      pendingSubscriptionTransaction(checkoutId)
+    );
+
+    const first = await store.settleMpesaTransaction(
+      checkoutId,
+      settlement(checkoutId, 'SIASUBPASS1', 500)
+    );
+    const retry = await store.settleMpesaTransaction(
+      checkoutId,
+      settlement(checkoutId, 'SIASUBPASS1', 500)
+    );
+
+    expect(first.outcome).toBe('committed');
+    expect(first.downloadToken).toBeUndefined();
+    expect(retry.outcome).toBe('duplicate');
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('reader_licenses/')
+    )).toHaveLength(0);
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('subscription_activations/')
+    )).toEqual([`subscription_activations/${checkoutId}`]);
+
+    const transaction = firestoreMock.documents.get(`transactions/${checkoutId}`);
+    const subscriptionId = getReaderSubscriptionId('reader_subscription');
+    const subscription = firestoreMock.documents.get(`reader_subscriptions/${subscriptionId}`);
+    expect(transaction).toMatchObject({
+      status: 'CONFIRMED',
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionPeriodStartsAt: transaction.settledAt,
+      subscriptionExpiresAt: addUtcCalendarMonths(transaction.settledAt, 3),
+    });
+    expect(subscription).toMatchObject({
+      id: subscriptionId,
+      userId: 'reader_subscription',
+      userEmail: 'reader.subscription@example.com',
+      status: 'active',
+      activePlanId: 'first-chapter-3-months',
+      expiresAt: transaction.subscriptionExpiresAt,
+      lastCheckoutRequestId: checkoutId,
+      renewalCount: 0,
+    });
+  });
+
+  it('extends an active Reader Pass from its current calendar expiry', async () => {
+    const checkoutId = 'checkout_subscription_renewal';
+    const subscriptionId = getReaderSubscriptionId('reader_subscription');
+    firestoreMock.documents.set(`reader_subscriptions/${subscriptionId}`, {
+      id: subscriptionId,
+      userId: 'reader_subscription',
+      userEmail: 'reader.subscription@example.com',
+      status: 'active',
+      activePlanId: 'first-chapter-3-months',
+      activePlanName: 'The First Chapter',
+      renewable: true,
+      startedAt: '2098-01-15T08:30:00.000Z',
+      expiresAt: '2099-01-31T08:30:00.000Z',
+      lastRenewedAt: '2098-10-31T08:30:00.000Z',
+      lastCheckoutRequestId: 'checkout_previous_subscription',
+      renewalCount: 2,
+      createdAt: '2098-01-15T08:30:00.000Z',
+      updatedAt: '2098-10-31T08:30:00.000Z',
+    });
+    firestoreMock.documents.set(
+      `transactions/${checkoutId}`,
+      pendingSubscriptionTransaction(checkoutId)
+    );
+
+    const result = await store.settleMpesaTransaction(
+      checkoutId,
+      settlement(checkoutId, 'SIARENEW01', 500)
+    );
+
+    expect(result.outcome).toBe('committed');
+    expect(firestoreMock.documents.get(`reader_subscriptions/${subscriptionId}`)).toMatchObject({
+      startedAt: '2098-01-15T08:30:00.000Z',
+      expiresAt: '2099-04-30T08:30:00.000Z',
+      lastCheckoutRequestId: checkoutId,
+      renewalCount: 3,
+    });
+    expect(firestoreMock.documents.get(`transactions/${checkoutId}`)).toMatchObject({
+      subscriptionPeriodStartsAt: '2099-01-31T08:30:00.000Z',
+      subscriptionExpiresAt: '2099-04-30T08:30:00.000Z',
+    });
+  });
+
+  it('fails closed when an activation record conflicts or its snapshot version is unsupported', async () => {
+    const subscriptionId = getReaderSubscriptionId('reader_subscription');
+    const existingSubscription = {
+      id: subscriptionId,
+      userId: 'reader_subscription',
+      userEmail: 'reader.subscription@example.com',
+      status: 'active',
+      activePlanId: 'first-chapter-3-months',
+      activePlanName: 'The First Chapter',
+      renewable: true,
+      startedAt: '2098-01-15T08:30:00.000Z',
+      expiresAt: '2099-01-31T08:30:00.000Z',
+      lastRenewedAt: '2098-10-31T08:30:00.000Z',
+      lastCheckoutRequestId: 'checkout_previous_subscription',
+      renewalCount: 1,
+      createdAt: '2098-01-15T08:30:00.000Z',
+      updatedAt: '2098-10-31T08:30:00.000Z',
+    };
+    firestoreMock.documents.set(`reader_subscriptions/${subscriptionId}`, existingSubscription);
+
+    const conflictId = 'checkout_subscription_conflict';
+    firestoreMock.documents.set(
+      `transactions/${conflictId}`,
+      pendingSubscriptionTransaction(conflictId)
+    );
+    firestoreMock.documents.set(`subscription_activations/${conflictId}`, {
+      checkoutRequestId: conflictId,
+      receiptNumber: 'DIFFERENT01',
+      userId: 'reader_subscription',
+      periodStartsAt: '2099-01-31T08:30:00.000Z',
+      expiresAt: '2099-04-30T08:30:00.000Z',
+    });
+
+    await expect(store.settleMpesaTransaction(
+      conflictId,
+      settlement(conflictId, 'SIACONFLICT', 500)
+    )).rejects.toMatchObject({ code: 'SUBSCRIPTION_ACTIVATION_CONFLICT' });
+    expect(firestoreMock.documents.get(`transactions/${conflictId}`).status).toBe('PENDING');
+
+    const unsupportedId = 'checkout_subscription_v2';
+    firestoreMock.documents.set(
+      `transactions/${unsupportedId}`,
+      pendingSubscriptionTransaction(unsupportedId, { subscriptionPlanVersion: 2 })
+    );
+    await expect(store.settleMpesaTransaction(
+      unsupportedId,
+      settlement(unsupportedId, 'SIAVERSION2', 500)
+    )).rejects.toMatchObject({ code: 'SUBSCRIPTION_INVALID_PURCHASE_SNAPSHOT' });
+    expect(firestoreMock.documents.get(`transactions/${unsupportedId}`).status).toBe('PENDING');
+  });
+
+  it.each([
+    ['tip-shaped', { type: 'TIP' }, 'SUBSCRIPTION_INVALID_PAYMENT'],
+    ['wrong-plan-key', { articleId: 'subscription:another-plan' }, 'SUBSCRIPTION_INVALID_PAYMENT'],
+    ['account-conflict', {
+      buyer: {
+        userId: 'different_reader',
+        email: 'reader.subscription@example.com',
+        phoneNumber: '254712345678',
+      },
+    }, 'SUBSCRIPTION_ACCOUNT_CONFLICT'],
+  ])('rejects a %s Reader Pass transaction before granting access', async (suffix, overrides, code) => {
+    const checkoutId = `checkout_subscription_${suffix}`;
+    firestoreMock.documents.set(
+      `transactions/${checkoutId}`,
+      pendingSubscriptionTransaction(checkoutId, overrides)
+    );
+
+    await expect(store.settleMpesaTransaction(
+      checkoutId,
+      settlement(checkoutId, `SIA${String(suffix).replace(/[^A-Z0-9]/gi, '').slice(0, 8)}`, 500)
+    )).rejects.toMatchObject({ code });
+
+    expect(firestoreMock.documents.get(`transactions/${checkoutId}`).status).toBe('PENDING');
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('subscription_activations/')
+    )).toBe(false);
   });
 
   it('rejects a malformed bundle snapshot without settling payment or granting partial access', async () => {

@@ -24,7 +24,11 @@ import {
 import { Article, ContentBundle, ContentCollection, HomepageConfig, WelcomeBackgroundSettings } from '../../types.js';
 import { HOMEPAGE_SECTION_DEFINITIONS, normalizeHomepageSections } from '../../homepageSections.js';
 import { api } from '../../utils/api.js';
-import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
+import {
+  IMAGE_UPLOAD_ACCEPT,
+  getImageUploadValidationError,
+  prepareImageFileForUpload,
+} from '../../utils/imageUploadPolicy.js';
 import { SaveStatusBar } from '../common/SaveStatusBar.js';
 
 interface HomepageManagerProps {
@@ -77,6 +81,16 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
     homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
     homepagePiecesHeading: 'Individual Pieces',
     homepagePiecesSubtitle: 'Selected standalone writing from the archive.',
+    homepageSubscriptionsHeading: 'Reader Passes',
+    homepageSubscriptionsSubtitle: 'Choose a season of uninterrupted access to every published piece.',
+    homepageSubscriptionsBadge: 'Full catalogue access',
+    communicationHeading: 'Stay in the loop',
+    communicationDescription: 'Choose private email letters, the public WhatsApp channel, or both.',
+    communicationEmailEnabled: true,
+    communicationWhatsappEnabled: true,
+    communicationWhatsappLabel: 'Follow the WhatsApp channel',
+    communicationWhatsappDescription: 'New releases and important Ink & Witness updates in WhatsApp.',
+    communicationWhatsappUrl: 'https://whatsapp.com/channel/0029Vb8zwQA0gcfBDoRCWM3z',
     mostSellingPieceIds: ['art-01', 'art-1786653937804', 'art-02'],
     pieceOfTheWeekId: 'art-01',
     mostSellingMode: 'auto',
@@ -230,6 +244,16 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
           homepageCollectionsSubtitle: data.config.homepageCollectionsSubtitle ?? 'Read by mood, theme, or the thread that calls to you.',
           homepagePiecesHeading: data.config.homepagePiecesHeading ?? 'Individual Pieces',
           homepagePiecesSubtitle: data.config.homepagePiecesSubtitle ?? 'Selected standalone writing from the archive.',
+          homepageSubscriptionsHeading: data.config.homepageSubscriptionsHeading ?? 'Reader Passes',
+          homepageSubscriptionsSubtitle: data.config.homepageSubscriptionsSubtitle ?? 'Choose a season of uninterrupted access to every published piece.',
+          homepageSubscriptionsBadge: data.config.homepageSubscriptionsBadge ?? 'Full catalogue access',
+          communicationHeading: data.config.communicationHeading ?? 'Stay in the loop',
+          communicationDescription: data.config.communicationDescription ?? 'Choose private email letters, the public WhatsApp channel, or both.',
+          communicationEmailEnabled: data.config.communicationEmailEnabled !== false,
+          communicationWhatsappEnabled: data.config.communicationWhatsappEnabled !== false,
+          communicationWhatsappLabel: data.config.communicationWhatsappLabel ?? 'Follow the WhatsApp channel',
+          communicationWhatsappDescription: data.config.communicationWhatsappDescription ?? 'New releases and important Ink & Witness updates in WhatsApp.',
+          communicationWhatsappUrl: data.config.communicationWhatsappUrl ?? 'https://whatsapp.com/channel/0029Vb8zwQA0gcfBDoRCWM3z',
           mostSellingPieceIds: Array.isArray(data.config.mostSellingPieceIds) ? data.config.mostSellingPieceIds : [],
           pieceOfTheWeekId: data.config.pieceOfTheWeekId ?? '',
           mostSellingMode: data.config.mostSellingMode ?? 'auto',
@@ -367,45 +391,28 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
       return;
     }
 
-    const reader = new FileReader();
     setUploadingImage(true);
     setError(null);
 
-    reader.onload = async (event) => {
-      const dataUrl = event.target?.result as string;
-      if (!dataUrl) {
-        setError('Failed to read image file.');
-        setUploadingImage(false);
-        return;
+    try {
+      const dataUrl = await prepareImageFileForUpload(file);
+      const res = await api.uploadImage(dataUrl, 'welcome_background');
+      if (res.success && res.url) {
+        setConfig(prev => ({
+          ...prev,
+          welcomeBackground: {
+            ...prev.welcomeBackground,
+            imageUrl: res.url
+          }
+        }));
       }
-
-      try {
-        const res = await api.uploadImage(dataUrl, 'welcome_background');
-        if (res.success && res.url) {
-          setConfig(prev => ({
-            ...prev,
-            welcomeBackground: {
-              ...prev.welcomeBackground,
-              imageUrl: res.url
-            }
-          }));
-        }
-      } catch (err: any) {
-        console.error('Upload error:', err);
-        setError(err.message || 'Failed to upload background photo.');
-      } finally {
-        setUploadingImage(false);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-      }
-    };
-
-    reader.onerror = () => {
-      setError('Error reading image file.');
+    } catch (err: any) {
+      console.error('Upload error:', err);
+      setError(err.message || 'Failed to upload background photo.');
+    } finally {
       setUploadingImage(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
-    };
-
-    reader.readAsDataURL(file);
+    }
   };
 
   const handleRemoveImage = async () => {
@@ -433,7 +440,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
     try {
       setSavingPermanent(true);
       setError(null);
-      await api.savePermanentImage(config.welcomeBackground.imageUrl, 'welcome_background');
+      await api.savePermanentImage('welcome_background', config.welcomeBackground.imageUrl);
       setPermanentSaved(true);
       setTimeout(() => setPermanentSaved(false), 4000);
     } catch (err: any) {
@@ -772,6 +779,9 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
             </h3>
             <p className="text-xs text-slate-400 mt-1 font-sans">
               Photo covers the hero area behind “INK &amp; WITNESS”. Use controls below to adjust fit, position, zoom, and overlay strength.
+            </p>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Upload a JPEG, PNG, or WebP source image up to 5 MB.
             </p>
           </div>
 
@@ -1381,6 +1391,135 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
                 />
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+      )}
+
+      {(activeSubTab === 'overview' || activeSubTab === 'sections') && (
+      <section id="section-reader-passes-community-copy" className="space-y-6 rounded-3xl border border-slate-800 bg-slate-900/60 p-6 sm:p-8">
+        <div>
+          <div className="mb-1 flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-sky-400">
+            <Sparkles className="h-4 w-4" />
+            <span>Reader passes &amp; community</span>
+          </div>
+          <h3 className="font-display text-xl font-bold text-white">Homepage wording and communication branches</h3>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-400">
+            These fields control the public headings and the compact email/WhatsApp update hub. Plan prices, durations, images, and publishing live in the Reader Passes workspace.
+          </p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Reader passes heading</span>
+            <input
+              type="text"
+              maxLength={120}
+              value={config.homepageSubscriptionsHeading || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageSubscriptionsHeading: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Small badge</span>
+            <input
+              type="text"
+              maxLength={80}
+              value={config.homepageSubscriptionsBadge || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageSubscriptionsBadge: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300 sm:col-span-2">
+            <span className="font-mono">Reader passes description</span>
+            <input
+              type="text"
+              maxLength={300}
+              value={config.homepageSubscriptionsSubtitle || ''}
+              onChange={event => setConfig(previous => ({ ...previous, homepageSubscriptionsSubtitle: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-sky-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Community heading</span>
+            <input
+              type="text"
+              maxLength={120}
+              value={config.communicationHeading || ''}
+              onChange={event => setConfig(previous => ({ ...previous, communicationHeading: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500"
+            />
+          </label>
+          <label className="space-y-1.5 text-xs text-slate-300">
+            <span className="font-mono">Community description</span>
+            <input
+              type="text"
+              maxLength={300}
+              value={config.communicationDescription || ''}
+              onChange={event => setConfig(previous => ({ ...previous, communicationDescription: event.target.value }))}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500"
+            />
+          </label>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <label className="flex items-start gap-3 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-xs text-slate-300">
+            <input
+              type="checkbox"
+              checked={config.communicationEmailEnabled !== false}
+              onChange={event => setConfig(previous => ({ ...previous, communicationEmailEnabled: event.target.checked }))}
+              className="mt-0.5 h-4 w-4 accent-sky-500"
+            />
+            <span>
+              <strong className="block text-slate-100">Show Email Reader Letters</strong>
+              <span className="mt-1 block leading-relaxed text-slate-500">Keeps the existing double opt-in email form available in the community hub.</span>
+            </span>
+          </label>
+
+          <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-950 p-4">
+            <label className="flex items-start gap-3 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={config.communicationWhatsappEnabled !== false}
+                onChange={event => setConfig(previous => ({ ...previous, communicationWhatsappEnabled: event.target.checked }))}
+                className="mt-0.5 h-4 w-4 accent-emerald-500"
+              />
+              <span>
+                <strong className="block text-slate-100">Show WhatsApp Channel</strong>
+                <span className="mt-1 block leading-relaxed text-slate-500">Readers follow the public channel; posts are still controlled from WhatsApp.</span>
+              </span>
+            </label>
+            <label className="block space-y-1.5 text-xs text-slate-300">
+              <span className="font-mono">Button label</span>
+              <input
+                type="text"
+                maxLength={120}
+                value={config.communicationWhatsappLabel || ''}
+                onChange={event => setConfig(previous => ({ ...previous, communicationWhatsappLabel: event.target.value }))}
+                className="w-full rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-white outline-none focus:border-emerald-500"
+              />
+            </label>
+            <label className="block space-y-1.5 text-xs text-slate-300">
+              <span className="font-mono">Short description</span>
+              <input
+                type="text"
+                maxLength={300}
+                value={config.communicationWhatsappDescription || ''}
+                onChange={event => setConfig(previous => ({ ...previous, communicationWhatsappDescription: event.target.value }))}
+                className="w-full rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-white outline-none focus:border-emerald-500"
+              />
+            </label>
+            <label className="block space-y-1.5 text-xs text-slate-300">
+              <span className="font-mono">Official WhatsApp Channel URL</span>
+              <input
+                type="url"
+                maxLength={300}
+                value={config.communicationWhatsappUrl || ''}
+                onChange={event => setConfig(previous => ({ ...previous, communicationWhatsappUrl: event.target.value }))}
+                placeholder="https://whatsapp.com/channel/..."
+                className="w-full rounded-xl border border-slate-700 bg-[#080d17] px-3 py-2 text-sm text-white outline-none focus:border-emerald-500"
+              />
+            </label>
           </div>
         </div>
       </section>

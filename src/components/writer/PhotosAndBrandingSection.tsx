@@ -21,7 +21,12 @@ import {
 import { Article, AuthorProfile } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { applyFavicon } from '../../utils/favicon.js';
-import { IMAGE_UPLOAD_ACCEPT, getImageUploadValidationError } from '../../utils/imageUploadPolicy.js';
+import {
+  IMAGE_UPLOAD_ACCEPT,
+  getImageUploadValidationError,
+  prepareImageDataUrlForUpload,
+  prepareImageFileForUpload,
+} from '../../utils/imageUploadPolicy.js';
 import { ImageCropModal, CropSettings } from './ImageCropModal.js';
 
 interface PhotosAndBrandingSectionProps {
@@ -32,6 +37,18 @@ interface PhotosAndBrandingSectionProps {
 }
 
 type UploadTarget = 'author_avatar' | 'author_cover' | 'welcome_background' | 'favicon' | 'logo' | 'piece_cover';
+
+function isEmbeddedImage(value: string | undefined): value is string {
+  return typeof value === 'string' && /^data:image\/(?:jpeg|png|webp);base64,/i.test(value);
+}
+
+async function persistEmbeddedOriginal(value: string): Promise<string> {
+  if (!isEmbeddedImage(value)) return value;
+  const transportDataUrl = await prepareImageDataUrlForUpload(value);
+  const uploaded = await api.uploadImage(transportDataUrl, 'piece_cover', undefined, 'piece_cover_original');
+  if (!uploaded.url) throw new Error('The original cover could not be converted to a permanent asset.');
+  return uploaded.url;
+}
 
 export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> = ({
   author,
@@ -108,6 +125,11 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
     setErrorMessage(null);
 
     try {
+      if (isEmbeddedImage(extraData.originalUrl)) {
+        extraData.originalUrl = extraData.originalUrl === imageUrl
+          ? undefined
+          : await persistEmbeddedOriginal(extraData.originalUrl);
+      }
       const res = await api.savePermanentImage(target, imageUrl, articleId, extraData);
       if (res.success) {
         setPermanentSuccessTarget(target);
@@ -154,6 +176,7 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
             p.id === articleId ? {
               ...p,
               coverImage: res.url,
+              coverImageOriginal: extraData.originalUrl || res.url,
               coverImageSavedPermanently: true,
               coverImageSavedAt: res.savedAt
             } : p
@@ -173,7 +196,7 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
   };
 
   // Generic File Reader and Uploader
-  const handleFileSelected = (
+  const handleFileSelected = async (
     e: React.ChangeEvent<HTMLInputElement>,
     target: UploadTarget,
     articleId?: string
@@ -188,63 +211,44 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
       return;
     }
 
-    const reader = new FileReader();
     setUploadingTarget(target);
     setErrorMessage(null);
 
-    reader.onload = async (event) => {
-      const dataUrl = event.target?.result as string;
-      if (!dataUrl) {
-        showError(target, 'Failed to read image file.');
-        setUploadingTarget(null);
-        return;
-      }
+    try {
+      const dataUrl = await prepareImageFileForUpload(file);
+      const res = await api.uploadImage(dataUrl, target, articleId);
+      if (res.success) {
+        showSuccess(target, 'Uploaded & saved to storage. Click "Save Permanently" to lock into database.');
 
-      try {
-        const res = await api.uploadImage(dataUrl, target, articleId);
-        if (res.success) {
-          showSuccess(target, 'Uploaded & saved to storage. Click "Save Permanently" to lock into database.');
-
-          if (target === 'author_avatar') {
-            const updated = { ...author, avatarUrl: res.url, avatarSavedPermanently: true, avatarSavedAt: new Date().toISOString() };
-            onAuthorUpdated(updated);
-          } else if (target === 'author_cover') {
-            const updated = { ...author, coverPhotoUrl: res.url, coverPhotoSavedPermanently: true, coverPhotoSavedAt: new Date().toISOString() };
-            onAuthorUpdated(updated);
-          } else if (target === 'welcome_background') {
-            const updated = { ...author, welcomeBackgroundUrl: res.url, welcomeBackgroundSavedPermanently: true, welcomeBackgroundSavedAt: new Date().toISOString() };
-            onAuthorUpdated(updated);
-          } else if (target === 'favicon') {
-            const updated = { ...author, faviconUrl: res.url, faviconSavedPermanently: true, faviconSavedAt: new Date().toISOString() };
-            onAuthorUpdated(updated);
-            applyFavicon(res.url);
-          } else if (target === 'logo') {
-            const updated = { ...author, logoUrl: res.url, logoSavedPermanently: true, logoSavedAt: new Date().toISOString() };
-            onAuthorUpdated(updated);
-          } else if (target === 'piece_cover' && articleId) {
-            if (onPiecesUpdated) {
-              const updatedPieces = pieces.map(p => 
-                p.id === articleId ? { ...p, coverImage: res.url, coverImageSavedPermanently: true, coverImageSavedAt: new Date().toISOString() } : p
-              );
-              onPiecesUpdated(updatedPieces);
-            }
-          }
+        if (target === 'author_avatar') {
+          const updated = { ...author, avatarUrl: res.url, avatarSavedPermanently: true, avatarSavedAt: new Date().toISOString() };
+          onAuthorUpdated(updated);
+        } else if (target === 'author_cover') {
+          const updated = { ...author, coverPhotoUrl: res.url, coverPhotoSavedPermanently: true, coverPhotoSavedAt: new Date().toISOString() };
+          onAuthorUpdated(updated);
+        } else if (target === 'welcome_background') {
+          const updated = { ...author, welcomeBackgroundUrl: res.url, welcomeBackgroundSavedPermanently: true, welcomeBackgroundSavedAt: new Date().toISOString() };
+          onAuthorUpdated(updated);
+        } else if (target === 'favicon') {
+          const updated = { ...author, faviconUrl: res.url, faviconSavedPermanently: true, faviconSavedAt: new Date().toISOString() };
+          onAuthorUpdated(updated);
+          applyFavicon(res.url);
+        } else if (target === 'logo') {
+          const updated = { ...author, logoUrl: res.url, logoSavedPermanently: true, logoSavedAt: new Date().toISOString() };
+          onAuthorUpdated(updated);
+        } else if (target === 'piece_cover' && articleId && onPiecesUpdated) {
+          const updatedPieces = pieces.map(p =>
+            p.id === articleId ? { ...p, coverImage: res.url, coverImageSavedPermanently: true, coverImageSavedAt: new Date().toISOString() } : p
+          );
+          onPiecesUpdated(updatedPieces);
         }
-      } catch (err: any) {
-        showError(target, err.message || 'Upload failed. Please try again.');
-      } finally {
-        setUploadingTarget(null);
-        e.target.value = '';
       }
-    };
-
-    reader.onerror = () => {
-      showError(target, 'Error reading file.');
+    } catch (err: any) {
+      showError(target, err.message || 'Upload failed. Please try again.');
+    } finally {
       setUploadingTarget(null);
       e.target.value = '';
-    };
-
-    reader.readAsDataURL(file);
+    }
   };
 
   // Remove handler
@@ -327,6 +331,9 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
           </div>
           <p className="text-xs text-slate-400 mt-1">
             Manage your welcome screen background, author photo, author cover photo, website icon, site logo, and monograph covers with guaranteed permanent database saving.
+          </p>
+          <p className="mt-1 text-[11px] text-slate-500">
+            JPEG, PNG, and WebP source images are accepted up to 5 MB and optimized safely during upload.
           </p>
         </div>
       </div>
@@ -1182,10 +1189,13 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
           const { target, articleId, originalUrl } = cropTargetInfo;
           setUploadingTarget(target);
           try {
-            const apiRes = await api.savePermanentImage(target, res.croppedDataUrl, articleId, {
-              dataUrl: res.croppedDataUrl,
+            const [transportDataUrl, persistentOriginalUrl] = await Promise.all([
+              prepareImageDataUrlForUpload(res.croppedDataUrl),
+              originalUrl ? persistEmbeddedOriginal(originalUrl) : Promise.resolve(undefined),
+            ]);
+            const apiRes = await api.savePermanentImage(target, transportDataUrl, articleId, {
               cropSettings: res.cropSettings,
-              originalUrl: originalUrl || res.croppedDataUrl
+              originalUrl: persistentOriginalUrl
             });
             if (target === 'author_avatar') {
               onAuthorUpdated({ ...author, avatarUrl: apiRes.url, avatarSavedPermanently: true, avatarSavedAt: apiRes.savedAt });
@@ -1197,7 +1207,10 @@ export const PhotosAndBrandingSection: React.FC<PhotosAndBrandingSectionProps> =
               const updated = pieces.map(p => p.id === articleId ? {
                 ...p,
                 coverImage: apiRes.url,
-                coverImageOriginal: originalUrl || p.coverImageOriginal || p.coverImage,
+                coverImageOriginal: persistentOriginalUrl
+                  || (!isEmbeddedImage(p.coverImageOriginal) ? p.coverImageOriginal : undefined)
+                  || (!isEmbeddedImage(p.coverImage) ? p.coverImage : undefined)
+                  || apiRes.url,
                 coverImageCrop: res.cropSettings,
                 coverImageSavedPermanently: true,
                 coverImageSavedAt: apiRes.savedAt

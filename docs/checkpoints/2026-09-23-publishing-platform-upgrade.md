@@ -154,7 +154,7 @@ Status: complete, deployed, and verified on the production custom domain.
 - Categories are navigation shelves rather than repeated piece grids. Their saved name, description, enabled state, and order remain controlled through Writer Studio.
 - Collections remain editorial browsing groups and do not change piece ownership or price. Bundles remain paid products with a writer-defined KES price; confirmed bundle settlement still grants every snapshotted piece permanently to the authenticated reader account.
 - The writer can select and order up to six homepage bundles, select and order up to six collections, select up to eight remaining standalone pieces, and edit all public section headings/descriptions.
-- Bundle and collection cover uploads share a JPEG-only, 700 KB browser policy and a server-side decoded-image/MIME enforcement path. Both persist through the existing authenticated cloud asset endpoint.
+- At this historical checkpoint, bundle and collection cover uploads shared a JPEG-only, 700 KB browser policy. This was superseded on 2026-10-12: Writer Studio now accepts source files up to 5 MiB, prepares a transport-safe request, and persists a server-canonical asset of at most 700 KiB through the authenticated cloud endpoint.
 - Homepage responses expose only public article summaries. They omit full bodies and inline original images, reject stale/unpublished bundle members, and avoid rendering bundle/collection members again as standalone cards.
 - An unauthenticated bundle buyer is asked to sign in; after reader authentication, the intended bundle checkout resumes automatically. Payment confirmation remains the only automatic paid-access grant.
 

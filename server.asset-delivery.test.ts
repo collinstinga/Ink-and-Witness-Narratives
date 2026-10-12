@@ -1,6 +1,7 @@
 import http, { Server } from 'http';
 import { AddressInfo } from 'net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MAX_IMAGE_TRANSPORT_BYTES } from './src/shared/imageLimits.js';
 
 vi.hoisted(() => {
   process.env.VERCEL = '1';
@@ -13,6 +14,13 @@ const storeMocks = vi.hoisted(() => {
     getUploadedAsset: vi.fn(async () => ({
       dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlGQAAAAASUVORK5CYII='
     })),
+    saveUploadedImage: vi.fn(async () => ({
+      success: true,
+      url: '/api/assets/test-image_jpg',
+      filename: 'test-image.jpg'
+    })),
+    updateAuthorPhoto: vi.fn(async () => ({ avatarUrl: '/api/assets/test-image_jpg' })),
+    updatePieceCoverPhoto: vi.fn(async () => undefined),
     getAuthSession: vi.fn(),
     getArticles: vi.fn(() => []),
     getAllUsers: vi.fn(() => []),
@@ -168,5 +176,114 @@ describe('persistent asset delivery', () => {
       error: 'Account services are temporarily unavailable. Please retry.'
     });
     errorSpy.mockRestore();
+  });
+
+  it('authenticates image routes before attempting to parse their larger JSON bodies', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/upload-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{malformed-json'
+    });
+
+    expect(response.status).toBe(401);
+    expect(storeMocks.saveUploadedImage).not.toHaveBeenCalled();
+  });
+
+  it('authenticates the permanent-image route before parsing its larger JSON body', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/save-permanent-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{malformed-json'
+    });
+
+    expect(response.status).toBe(401);
+  });
+
+  it('does not report a successful assignment when durable image metadata persistence fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    storeMocks.getAuthSession.mockResolvedValueOnce({
+      userId: 'writer-1',
+      email: 'writer@example.test',
+      role: 'admin',
+      name: 'Writer',
+      expiresAt: Date.now() + 60_000
+    });
+    storeMocks.updateAuthorPhoto.mockRejectedValueOnce(new Error('Firestore unavailable'));
+
+    const response = await fetch(`${baseUrl}/api/admin/upload-image`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_session=image-upload-session',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        target: 'author_avatar',
+        dataUrl: 'data:image/jpeg;base64,QUJD'
+      })
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Failed to upload image.' });
+    errorSpy.mockRestore();
+  });
+
+  it('fails closed when a cover is assigned to a missing piece', async () => {
+    storeMocks.getAuthSession.mockResolvedValueOnce({
+      userId: 'writer-1',
+      email: 'writer@example.test',
+      role: 'admin',
+      name: 'Writer',
+      expiresAt: Date.now() + 60_000
+    });
+
+    const response = await fetch(`${baseUrl}/api/admin/upload-image`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_session=image-upload-session',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        target: 'piece_cover',
+        articleId: 'missing-piece',
+        dataUrl: 'data:image/jpeg;base64,QUJD'
+      })
+    });
+
+    expect(response.status).toBe(404);
+  });
+
+  it('accepts a production-safe Base64 transport for a 5 MB writer source after client optimization', async () => {
+    storeMocks.getAuthSession.mockResolvedValueOnce({
+      userId: 'writer-1',
+      email: 'writer@example.test',
+      role: 'admin',
+      name: 'Writer',
+      expiresAt: Date.now() + 60_000
+    });
+    const encodedSource = 'A'.repeat(Math.ceil(MAX_IMAGE_TRANSPORT_BYTES / 3) * 4);
+    const body = JSON.stringify({
+      target: 'piece_cover',
+      dataUrl: `data:image/jpeg;base64,${encodedSource}`
+    });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(1 * 1024 * 1024);
+    expect(Buffer.byteLength(body)).toBeLessThan(4.5 * 1024 * 1024);
+
+    const response = await fetch(`${baseUrl}/api/admin/upload-image`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_session=image-upload-session',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body
+    });
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.saveUploadedImage).toHaveBeenCalledTimes(1);
   });
 });

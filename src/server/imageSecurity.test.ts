@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import {
   ImageValidationError,
+  MAX_IMAGE_UPLOAD_BYTES,
   MAX_STORED_IMAGE_BYTES,
   sanitizeImageDataUrl,
   validateImageDataUrl
@@ -84,8 +85,41 @@ describe('image upload validation', () => {
   });
 
   it('rejects encoded payloads before decoding when they exceed the byte cap', () => {
-    const oversized = `data:image/png;base64,${'A'.repeat(Math.ceil((MAX_STORED_IMAGE_BYTES + 1) / 3) * 4)}`;
+    const oversized = `data:image/png;base64,${'A'.repeat(Math.ceil((MAX_IMAGE_UPLOAD_BYTES + 1) / 3) * 4)}`;
     expect(() => validateImageDataUrl(oversized)).toThrow('too large');
+  });
+
+  it('accepts genuine source images above the stored-asset cap and optimizes them for persistence', async () => {
+    const width = 900;
+    const height = 900;
+    const pixels = Buffer.allocUnsafe(width * height * 3);
+    for (let index = 0; index < pixels.length; index += 1) {
+      pixels[index] = (index * 31 + Math.floor(index / 97) * 17) % 256;
+    }
+    const source = await sharp(pixels, { raw: { width, height, channels: 3 } })
+      .jpeg({ quality: 100, chromaSubsampling: '4:4:4' })
+      .toBuffer();
+
+    expect(source.length).toBeGreaterThan(MAX_STORED_IMAGE_BYTES);
+    expect(source.length).toBeLessThanOrEqual(MAX_IMAGE_UPLOAD_BYTES);
+    expect(validateImageDataUrl(asDataUrl('image/jpeg', source)).buffer.length).toBe(source.length);
+
+    const sanitized = await sanitizeImageDataUrl(asDataUrl('image/jpeg', source));
+    expect(sanitized.mimeType).toBe('image/jpeg');
+    expect(sanitized.buffer.length).toBeLessThanOrEqual(MAX_STORED_IMAGE_BYTES);
+    await expect(sharp(sanitized.buffer).metadata()).resolves.toMatchObject({ format: 'jpeg' });
+  });
+
+  it('downscales highly compressed images to a mobile-safe canonical long edge', async () => {
+    const source = await sharp({
+      create: { width: 3000, height: 200, channels: 3, background: '#0f172a' }
+    }).jpeg({ quality: 80 }).toBuffer();
+    expect(source.length).toBeLessThan(MAX_STORED_IMAGE_BYTES);
+
+    const sanitized = await sanitizeImageDataUrl(asDataUrl('image/jpeg', source));
+
+    expect(sanitized.width).toBe(2400);
+    expect(sanitized.height).toBe(160);
   });
 
   it('rejects excessive width, height, and total pixels', () => {

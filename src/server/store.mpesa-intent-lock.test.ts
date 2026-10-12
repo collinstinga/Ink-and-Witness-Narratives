@@ -260,6 +260,67 @@ describe('M-Pesa request locks and intent attachment', () => {
       .resolves.toMatchObject({ checkoutRequestId: 'ws_CO_123456789' });
   });
 
+  it('preserves the immutable Reader Pass snapshot and account binding when attaching checkout', async () => {
+    const prepared = intent('a', 'b', {
+      articleId: 'subscription:first-chapter-3-months',
+      articleTitle: 'The First Chapter',
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionPlanName: 'The First Chapter',
+      subscriptionDurationMonths: 3,
+      subscriptionRenewable: true,
+      subscriptionPlanVersion: 1,
+      amount: 500,
+      originalAmount: 500,
+      userId: 'reader_subscription',
+      userEmail: 'reader.subscription@example.com',
+    });
+    await store.saveMpesaCallbackIntent(prepared);
+
+    const result = await store.attachMpesaCallbackIntent(
+      prepared.callbackCapabilityHash,
+      'ws_CO_subscription_123',
+      'merchant_subscription_123'
+    );
+
+    expect(result).toMatchObject({
+      articleId: 'subscription:first-chapter-3-months',
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionPlanName: 'The First Chapter',
+      subscriptionDurationMonths: 3,
+      subscriptionRenewable: true,
+      subscriptionPlanVersion: 1,
+      amount: 500,
+      userId: 'reader_subscription',
+      userEmail: 'reader.subscription@example.com',
+      status: 'PENDING',
+    });
+  });
+
+  it('rejects a Reader Pass intent with an unsupported commercial snapshot version', async () => {
+    const prepared = intent('a', 'b', {
+      articleId: 'subscription:first-chapter-3-months',
+      articleTitle: 'The First Chapter',
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionPlanName: 'The First Chapter',
+      subscriptionDurationMonths: 3,
+      subscriptionRenewable: true,
+      subscriptionPlanVersion: 2,
+      amount: 500,
+      originalAmount: 500,
+      userId: 'reader_subscription',
+      userEmail: 'reader.subscription@example.com',
+    });
+
+    await expect(store.saveMpesaCallbackIntent(prepared))
+      .rejects.toThrow('secure payment intent is invalid');
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('mpesa_callback_intents/') || key.startsWith('mpesa_payment_intents/')
+    )).toBe(false);
+  });
+
   it('atomically consumes a matching v2 affiliate claim when attaching the checkout', async () => {
     const issuedAt = Date.now() - 1_000;
     const expiresAt = Date.now() + 60 * 60 * 1000;

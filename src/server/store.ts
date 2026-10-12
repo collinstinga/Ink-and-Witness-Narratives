@@ -8,8 +8,14 @@ import { normalizeHomepageSections } from '../homepageSections.js';
 import { affiliateStore } from './affiliateStore.js';
 import { consumeAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import { hashPassword, generateSecureToken } from './auth.js';
-import { ImageValidationError, sanitizeImageDataUrl, type SafeImageMimeType } from './imageSecurity.js';
+import {
+  ImageValidationError,
+  sanitizeImageDataUrl,
+  validateImageDataUrl,
+  type SafeImageMimeType
+} from './imageSecurity.js';
 import { isPaymentAttemptId } from './paymentSecurity.js';
+import { subscriptionStore } from './subscriptionStore.js';
 import { enrichSalesTransaction, isSettledTransactionStatus } from './salesLedger.js';
 import {
   MANUAL_ACCESS_ENTITLEMENT_COLLECTION,
@@ -80,6 +86,7 @@ import {
   DetailedAnalytics,
   ArticleAnalyticsItem,
   ReaderLicense,
+  ReaderSubscription,
   AnalyticsTimePeriod,
   InteractionEvent,
   TimeSeriesPoint,
@@ -95,6 +102,7 @@ import {
   PieceLike,
   PieceComment,
   PriceHistoryEntry,
+  LibraryAccessSource,
   User,
   UserRecord,
   AuthSession,
@@ -164,9 +172,14 @@ export type MpesaCallbackIntent = {
   requestLockId: string;
   articleId: string;
   articleTitle: string;
-  purchaseKind?: 'piece' | 'bundle';
+  purchaseKind?: 'piece' | 'bundle' | 'subscription';
   bundleId?: string;
   bundlePieceIds?: string[];
+  subscriptionPlanId?: string;
+  subscriptionPlanName?: string;
+  subscriptionDurationMonths?: number;
+  subscriptionRenewable?: boolean;
+  subscriptionPlanVersion?: number;
   phoneNumber: string;
   amount: number;
   currency: string;
@@ -332,6 +345,16 @@ let cachedHomepageConfig: HomepageConfig = {
   homepageCollectionsSubtitle: 'Read by mood, theme, or the thread that calls to you.',
   homepagePiecesHeading: 'Individual Pieces',
   homepagePiecesSubtitle: 'Selected standalone writing from the archive.',
+  homepageSubscriptionsHeading: 'Reader Passes',
+  homepageSubscriptionsSubtitle: 'Choose a season of uninterrupted access to every published piece.',
+  homepageSubscriptionsBadge: 'Full catalogue access',
+  communicationHeading: 'Stay in the loop',
+  communicationDescription: 'Choose private email letters, the public WhatsApp channel, or both.',
+  communicationEmailEnabled: true,
+  communicationWhatsappEnabled: true,
+  communicationWhatsappLabel: 'Follow the WhatsApp channel',
+  communicationWhatsappDescription: 'New releases and important Ink & Witness updates in WhatsApp.',
+  communicationWhatsappUrl: 'https://whatsapp.com/channel/0029Vb8zwQA0gcfBDoRCWM3z',
   sections: normalizeHomepageSections(undefined),
   startHerePieceIds: ['art-01', 'art-02', 'art-03'],
   startHereHeading: 'START HERE',
@@ -791,6 +814,37 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
   ) {
     return undefined;
   }
+  if (
+    intent.purchaseKind !== undefined
+    && intent.purchaseKind !== 'piece'
+    && intent.purchaseKind !== 'bundle'
+    && intent.purchaseKind !== 'subscription'
+  ) return undefined;
+  if (intent.purchaseKind === 'subscription') {
+    if (
+      typeof intent.subscriptionPlanId !== 'string'
+      || !/^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])?$/.test(intent.subscriptionPlanId)
+      || typeof intent.subscriptionPlanName !== 'string'
+      || intent.subscriptionPlanName.length < 1
+      || intent.subscriptionPlanName.length > 80
+      || typeof intent.subscriptionDurationMonths !== 'number'
+      || !Number.isSafeInteger(intent.subscriptionDurationMonths)
+      || intent.subscriptionDurationMonths < 1
+      || intent.subscriptionDurationMonths > 120
+      || typeof intent.subscriptionRenewable !== 'boolean'
+      || intent.subscriptionPlanVersion !== 1
+      || !intent.userId
+      || !intent.userEmail
+    ) return undefined;
+  } else if (
+    intent.subscriptionPlanId !== undefined
+    || intent.subscriptionPlanName !== undefined
+    || intent.subscriptionDurationMonths !== undefined
+    || intent.subscriptionRenewable !== undefined
+    || intent.subscriptionPlanVersion !== undefined
+  ) {
+    return undefined;
+  }
   const createdAtMs = Date.parse(intent.createdAt);
   const expiresAtMs = Date.parse(intent.expiresAt);
   if (
@@ -866,6 +920,11 @@ function mpesaIntentsMatch(left: MpesaCallbackIntent, right: MpesaCallbackIntent
     left.purchaseKind === right.purchaseKind &&
     left.bundleId === right.bundleId &&
     JSON.stringify(left.bundlePieceIds || []) === JSON.stringify(right.bundlePieceIds || []) &&
+    left.subscriptionPlanId === right.subscriptionPlanId &&
+    left.subscriptionPlanName === right.subscriptionPlanName &&
+    left.subscriptionDurationMonths === right.subscriptionDurationMonths &&
+    left.subscriptionRenewable === right.subscriptionRenewable &&
+    left.subscriptionPlanVersion === right.subscriptionPlanVersion &&
     left.phoneNumber === right.phoneNumber &&
     left.amount === right.amount &&
     left.currency === right.currency &&
@@ -901,6 +960,11 @@ function transactionFromMpesaIntent(
     purchaseKind: intent.purchaseKind,
     bundleId: intent.bundleId,
     bundlePieceIds: intent.bundlePieceIds,
+    subscriptionPlanId: intent.subscriptionPlanId,
+    subscriptionPlanName: intent.subscriptionPlanName,
+    subscriptionDurationMonths: intent.subscriptionDurationMonths,
+    subscriptionRenewable: intent.subscriptionRenewable,
+    subscriptionPlanVersion: intent.subscriptionPlanVersion,
     phoneNumber: intent.phoneNumber,
     amount: intent.amount,
     currency: intent.currency,
@@ -989,6 +1053,7 @@ async function consumeTransactionAffiliateAttribution(
 }
 
 function paymentEntitlementArticleIds(transaction: PaymentTransaction): string[] {
+  if (transaction.purchaseKind === 'subscription') return [];
   if (transaction.purchaseKind === 'bundle') {
     return [...new Set((transaction.bundlePieceIds || []).filter(id =>
       typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)
@@ -3286,6 +3351,14 @@ export const store = {
       if (current.purchaseKind === 'bundle' && entitlementArticleIds.length < 2) {
         return { outcome: 'rejected' as const, error: 'The bundle entitlement snapshot failed validation.' };
       }
+      const subscriptionSettlement = current.purchaseKind === 'subscription'
+        ? await subscriptionStore.applySettlementInTransaction(
+            firestoreTransaction,
+            current,
+            cleanReceipt,
+            now
+          )
+        : undefined;
       const expiresAt = current.purchaseKind === 'bundle'
         ? 253402300799999
         : Date.now() + 60 * 24 * 60 * 60 * 1000;
@@ -3327,7 +3400,11 @@ export const store = {
         completedAt: now,
         updatedAt: now,
         settledAt: current.settledAt || now,
-        downloadToken
+        downloadToken,
+        ...(subscriptionSettlement ? {
+          subscriptionPeriodStartsAt: subscriptionSettlement.periodStartsAt,
+          subscriptionExpiresAt: subscriptionSettlement.expiresAt
+        } : {})
       });
 
       firestoreTransaction.set(transactionRef, sanitizeForFirestore(settled), { merge: true });
@@ -3611,8 +3688,16 @@ export const store = {
       if (current.purchaseKind === 'bundle' && entitlementArticleIds.length < 2) {
         return { error: 'The bundle entitlement snapshot failed validation.' };
       }
-      const licenseCreated = grantsAccess && !current.downloadToken;
       const now = new Date().toISOString();
+      const subscriptionSettlement = current.purchaseKind === 'subscription'
+        ? await subscriptionStore.applySettlementInTransaction(
+            firestoreTransaction,
+            current,
+            canonicalReceipt,
+            now
+          )
+        : undefined;
+      const licenseCreated = grantsAccess && current.purchaseKind !== 'subscription' && !current.downloadToken;
       const expiresAt = current.purchaseKind === 'bundle'
         ? 253402300799999
         : Date.now() + 60 * 24 * 60 * 60 * 1000;
@@ -3646,7 +3731,11 @@ export const store = {
         completedAt: current.completedAt || now,
         settledAt: current.settledAt || current.confirmedAt || now,
         updatedAt: now,
-        ...(downloadToken ? { downloadToken } : {})
+        ...(downloadToken ? { downloadToken } : {}),
+        ...(subscriptionSettlement ? {
+          subscriptionPeriodStartsAt: subscriptionSettlement.periodStartsAt,
+          subscriptionExpiresAt: subscriptionSettlement.expiresAt
+        } : {})
       });
 
       firestoreTransaction.set(transactionRef, sanitizeForFirestore(settled), { merge: true });
@@ -3838,14 +3927,18 @@ export const store = {
     return record;
   },
 
-  async getUserPurchases(userIdOrEmail: string, phone?: string): Promise<Array<{
+  async getUserPurchases(
+    userIdOrEmail: string,
+    phone?: string,
+    preloadedActiveSubscription?: Promise<ReaderSubscription | null>
+  ): Promise<Array<{
     articleId: string;
     token?: string;
     receipt?: string;
     createdAt: string;
     expiresAt: number;
     articleTitle: string;
-    accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+    accessSource: LibraryAccessSource;
   }>> {
     await hydrateUsersOnce();
     const user = this.getUserById(userIdOrEmail) || this.getUserByEmail(userIdOrEmail);
@@ -3859,8 +3952,15 @@ export const store = {
           .limit(MAX_MANUAL_ACCESS_ADMIN_RESULTS)
           .get()
       : Promise.resolve(null);
+    const activeSubscriptionPromise = user
+      ? preloadedActiveSubscription || subscriptionStore.getActiveReaderSubscription(user.id)
+      : Promise.resolve(null);
     if (user) {
-      await Promise.all([loadReaderLicensesForUser(user), manualEntitlementsPromise]);
+      await Promise.all([
+        loadReaderLicensesForUser(user),
+        manualEntitlementsPromise,
+        activeSubscriptionPromise
+      ]);
     }
 
     const results: Array<{
@@ -3870,7 +3970,7 @@ export const store = {
       createdAt: string;
       expiresAt: number;
       articleTitle: string;
-      accessSource: 'MPESA_PURCHASE' | 'MANUAL_GRANT' | 'SYSTEM';
+      accessSource: LibraryAccessSource;
     }> = [];
     const seenArticles = new Set<string>();
 
@@ -3927,6 +4027,23 @@ export const store = {
       }
     }
 
+    const activeSubscription = await activeSubscriptionPromise;
+    if (activeSubscription) {
+      const subscriptionExpiry = Date.parse(activeSubscription.expiresAt);
+      for (const article of publishedArticles) {
+        if (seenArticles.has(article.id)) continue;
+        seenArticles.add(article.id);
+        results.push({
+          articleId: article.id,
+          receipt: 'READER PASS',
+          createdAt: activeSubscription.startedAt,
+          expiresAt: subscriptionExpiry,
+          articleTitle: article.title,
+          accessSource: 'SUBSCRIPTION'
+        });
+      }
+    }
+
     return results.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   },
 
@@ -3940,6 +4057,10 @@ export const store = {
           return true;
         }
       }
+    }
+
+    if (await subscriptionStore.hasActiveSubscription(user.id)) {
+      return true;
     }
 
     const entitlementArticles = articleId === 'all' ? ['all'] : [articleId, 'all'];
@@ -4931,10 +5052,13 @@ export const store = {
   ): Promise<{ success: boolean; url: string; filename: string }> {
     ensureDataDir();
 
-    const image = await sanitizeImageDataUrl(base64DataUrl);
-    if (allowedMimeTypes && !allowedMimeTypes.includes(image.mimeType)) {
-      throw new ImageValidationError('This cover photo must be a genuine JPEG file.');
+    if (allowedMimeTypes) {
+      const source = validateImageDataUrl(base64DataUrl);
+      if (!allowedMimeTypes.includes(source.mimeType)) {
+        throw new ImageValidationError('This cover photo must be a genuine JPEG file.');
+      }
     }
+    const image = await sanitizeImageDataUrl(base64DataUrl);
     const safePrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'img';
 
     const randomStr = crypto.randomBytes(6).toString('hex');
@@ -5001,63 +5125,40 @@ export const store = {
         homepage: cachedHomepageConfig
       };
     } else if (params.target === 'author_avatar') {
-      cachedAuthor.avatarUrl = finalUrl;
-      cachedAuthor.avatarSavedPermanently = true;
-      cachedAuthor.avatarSavedAt = nowIso;
-
-      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-      await Promise.all([
-        setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {}),
-        setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {})
-      ]);
-      updatedRecord = this.getAuthorProfile();
+      updatedRecord = await this.saveAuthorProfile({
+        avatarUrl: finalUrl,
+        avatarSavedPermanently: true,
+        avatarSavedAt: nowIso
+      });
     } else if (params.target === 'author_cover') {
-      cachedAuthor.coverPhotoUrl = finalUrl;
-      cachedAuthor.coverPhotoSavedPermanently = true;
-      cachedAuthor.coverPhotoSavedAt = nowIso;
-
-      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-      await Promise.all([
-        setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {}),
-        setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {})
-      ]);
-      updatedRecord = this.getAuthorProfile();
+      updatedRecord = await this.saveAuthorProfile({
+        coverPhotoUrl: finalUrl,
+        coverPhotoSavedPermanently: true,
+        coverPhotoSavedAt: nowIso
+      });
     } else if (params.target === 'favicon') {
-      cachedAuthor.faviconUrl = finalUrl;
-      cachedAuthor.faviconSavedPermanently = true;
-      cachedAuthor.faviconSavedAt = nowIso;
-
-      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-      await Promise.all([
-        setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {}),
-        setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {})
-      ]);
-      updatedRecord = this.getAuthorProfile();
+      updatedRecord = await this.saveAuthorProfile({
+        faviconUrl: finalUrl,
+        faviconSavedPermanently: true,
+        faviconSavedAt: nowIso
+      });
     } else if (params.target === 'logo') {
-      cachedAuthor.logoUrl = finalUrl;
-      cachedAuthor.logoSavedPermanently = true;
-      cachedAuthor.logoSavedAt = nowIso;
-
-      writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-      await Promise.all([
-        setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {}),
-        setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {})
-      ]);
-      updatedRecord = this.getAuthorProfile();
+      updatedRecord = await this.saveAuthorProfile({
+        logoUrl: finalUrl,
+        logoSavedPermanently: true,
+        logoSavedAt: nowIso
+      });
     } else if (params.target === 'piece_cover' && params.articleId) {
       const article = cachedArticles.find(a => a.id === params.articleId);
-      if (article) {
-        article.coverImage = finalUrl;
-        if (params.originalUrl) article.coverImageOriginal = params.originalUrl;
-        if (params.cropSettings) article.coverImageCrop = params.cropSettings;
-        article.coverImageSavedPermanently = true;
-        article.coverImageSavedAt = nowIso;
-        article.updatedAt = nowIso;
-
-        writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-        await setFirestoreDoc('articles', article.id, article).catch(() => {});
-        updatedRecord = article;
-      }
+      if (!article) throw new Error('The selected piece no longer exists. Reload Writer Studio and try again.');
+      updatedRecord = await this.saveArticle({
+        ...article,
+        coverImage: finalUrl,
+        ...(params.originalUrl ? { coverImageOriginal: params.originalUrl } : {}),
+        ...(params.cropSettings ? { coverImageCrop: params.cropSettings } : {}),
+        coverImageSavedPermanently: true,
+        coverImageSavedAt: nowIso
+      });
     }
 
     return {
@@ -5070,67 +5171,89 @@ export const store = {
     };
   },
 
-  updatePieceCoverPhoto(pieceId: string, coverImageUrl: string): Article | undefined {
+  async updatePieceCoverPhoto(pieceId: string, coverImageUrl: string): Promise<Article | undefined> {
     const article = cachedArticles.find(a => a.id === pieceId);
     if (!article) return undefined;
-    article.coverImage = coverImageUrl;
-    article.coverImageSavedPermanently = true;
-    article.coverImageSavedAt = new Date().toISOString();
-    article.updatedAt = new Date().toISOString();
-    writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-    setFirestoreDoc('articles', article.id, article).catch(() => {});
-    return article;
+    return this.saveArticle({
+      ...article,
+      coverImage: coverImageUrl,
+      coverImageSavedPermanently: true,
+      coverImageSavedAt: new Date().toISOString()
+    });
   },
 
-  removePieceCoverPhoto(pieceId: string): Article | undefined {
+  async removePieceCoverPhoto(pieceId: string): Promise<Article | undefined> {
     const article = cachedArticles.find(a => a.id === pieceId);
     if (!article) return undefined;
-    delete article.coverImage;
-    delete article.coverImageCrop;
-    delete article.coverImageOriginal;
-    article.coverImageSavedPermanently = false;
-    article.updatedAt = new Date().toISOString();
+    const now = new Date().toISOString();
+    const nextArticle: Article = {
+      ...article,
+      coverImageSavedPermanently: false,
+      updatedAt: now
+    };
+    delete nextArticle.coverImage;
+    delete nextArticle.coverImageCrop;
+    delete nextArticle.coverImageOriginal;
+
+    const catalogVersion = crypto.randomUUID();
+    try {
+      const db = getDb();
+      const batch = db.batch();
+      batch.update(db.collection('articles').doc(article.id), {
+        coverImage: FieldValue.delete(),
+        coverImageCrop: FieldValue.delete(),
+        coverImageOriginal: FieldValue.delete(),
+        coverImageSavedPermanently: false,
+        updatedAt: now
+      });
+      batch.set(db.collection('site_configs').doc('article_catalog'), {
+        version: catalogVersion,
+        updatedAt: now
+      }, { merge: true });
+      await batch.commit();
+    } catch (error) {
+      if (process.env.VERCEL) throw error;
+      console.warn('[Data Store] Firestore cover removal unavailable; using local JSON fallback:', error);
+    }
+
+    const index = cachedArticles.findIndex(candidate => candidate.id === article.id);
+    if (index >= 0) cachedArticles[index] = nextArticle;
     writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-    setFirestoreDoc('articles', article.id, article).catch(() => {});
-    return article;
+    cachedArticleCatalogVersion = catalogVersion;
+    cachedArticleCatalogCheckedAt = Date.now();
+    return nextArticle;
   },
 
-  updateAuthorPhoto(avatarUrl: string): AuthorProfile {
-    cachedAuthor.avatarUrl = avatarUrl;
-    cachedAuthor.avatarSavedPermanently = true;
-    cachedAuthor.avatarSavedAt = new Date().toISOString();
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async updateAuthorPhoto(avatarUrl: string): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      avatarUrl,
+      avatarSavedPermanently: true,
+      avatarSavedAt: new Date().toISOString()
+    });
   },
 
-  removeAuthorPhoto(): AuthorProfile {
-    delete cachedAuthor.avatarUrl;
-    cachedAuthor.avatarSavedPermanently = false;
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async removeAuthorPhoto(): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      avatarUrl: undefined,
+      avatarSavedPermanently: false,
+      avatarSavedAt: undefined
+    });
   },
 
-  updateAuthorCoverPhoto(coverPhotoUrl: string): AuthorProfile {
-    cachedAuthor.coverPhotoUrl = coverPhotoUrl;
-    cachedAuthor.coverPhotoSavedPermanently = true;
-    cachedAuthor.coverPhotoSavedAt = new Date().toISOString();
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async updateAuthorCoverPhoto(coverPhotoUrl: string): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      coverPhotoUrl,
+      coverPhotoSavedPermanently: true,
+      coverPhotoSavedAt: new Date().toISOString()
+    });
   },
 
-  removeAuthorCoverPhoto(): AuthorProfile {
-    delete cachedAuthor.coverPhotoUrl;
-    cachedAuthor.coverPhotoSavedPermanently = false;
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async removeAuthorCoverPhoto(): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      coverPhotoUrl: undefined,
+      coverPhotoSavedPermanently: false,
+      coverPhotoSavedAt: undefined
+    });
   },
 
   async updateWelcomeBackground(welcomeBackgroundUrl: string): Promise<AuthorProfile> {
@@ -5141,42 +5264,36 @@ export const store = {
     return persistWelcomeBackgroundChange(null);
   },
 
-  updateWebsiteFavicon(faviconUrl: string): AuthorProfile {
-    cachedAuthor.faviconUrl = faviconUrl;
-    cachedAuthor.faviconSavedPermanently = true;
-    cachedAuthor.faviconSavedAt = new Date().toISOString();
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async updateWebsiteFavicon(faviconUrl: string): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      faviconUrl,
+      faviconSavedPermanently: true,
+      faviconSavedAt: new Date().toISOString()
+    });
   },
 
-  removeWebsiteFavicon(): AuthorProfile {
-    delete cachedAuthor.faviconUrl;
-    cachedAuthor.faviconSavedPermanently = false;
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async removeWebsiteFavicon(): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      faviconUrl: undefined,
+      faviconSavedPermanently: false,
+      faviconSavedAt: undefined
+    });
   },
 
-  updateSiteLogo(logoUrl: string): AuthorProfile {
-    cachedAuthor.logoUrl = logoUrl;
-    cachedAuthor.logoSavedPermanently = true;
-    cachedAuthor.logoSavedAt = new Date().toISOString();
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async updateSiteLogo(logoUrl: string): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      logoUrl,
+      logoSavedPermanently: true,
+      logoSavedAt: new Date().toISOString()
+    });
   },
 
-  removeSiteLogo(): AuthorProfile {
-    delete cachedAuthor.logoUrl;
-    cachedAuthor.logoSavedPermanently = false;
-    writeJsonFileSync(AUTHOR_FILE, cachedAuthor);
-    setFirestoreDoc('site_configs', 'author', cachedAuthor).catch(() => {});
-    setFirestoreDoc('site_configs', 'author_profile', cachedAuthor).catch(() => {});
-    return this.getAuthorProfile();
+  async removeSiteLogo(): Promise<AuthorProfile> {
+    return this.saveAuthorProfile({
+      logoUrl: undefined,
+      logoSavedPermanently: false,
+      logoSavedAt: undefined
+    });
   },
 
   // RECORD INTERACTION EVENT
@@ -5219,7 +5336,8 @@ export const store = {
       ...stored,
       welcomeBackground: stored.welcomeBackground
         ? { ...stored.welcomeBackground }
-        : { ...cachedHomepageConfig.welcomeBackground }
+        : { ...cachedHomepageConfig.welcomeBackground },
+      sections: normalizeHomepageSections(stored.sections)
     };
     // Curated piece publish state is part of the public homepage decision.
     // Resolve only selected IDs (never the full catalogue) from Firestore so
@@ -5419,6 +5537,16 @@ export const store = {
         homepageCollectionsSubtitle: partial.homepageCollectionsSubtitle !== undefined ? partial.homepageCollectionsSubtitle : baseHomepage.homepageCollectionsSubtitle,
         homepagePiecesHeading: partial.homepagePiecesHeading !== undefined ? partial.homepagePiecesHeading : baseHomepage.homepagePiecesHeading,
         homepagePiecesSubtitle: partial.homepagePiecesSubtitle !== undefined ? partial.homepagePiecesSubtitle : baseHomepage.homepagePiecesSubtitle,
+        homepageSubscriptionsHeading: partial.homepageSubscriptionsHeading !== undefined ? partial.homepageSubscriptionsHeading : baseHomepage.homepageSubscriptionsHeading,
+        homepageSubscriptionsSubtitle: partial.homepageSubscriptionsSubtitle !== undefined ? partial.homepageSubscriptionsSubtitle : baseHomepage.homepageSubscriptionsSubtitle,
+        homepageSubscriptionsBadge: partial.homepageSubscriptionsBadge !== undefined ? partial.homepageSubscriptionsBadge : baseHomepage.homepageSubscriptionsBadge,
+        communicationHeading: partial.communicationHeading !== undefined ? partial.communicationHeading : baseHomepage.communicationHeading,
+        communicationDescription: partial.communicationDescription !== undefined ? partial.communicationDescription : baseHomepage.communicationDescription,
+        communicationEmailEnabled: partial.communicationEmailEnabled !== undefined ? partial.communicationEmailEnabled : baseHomepage.communicationEmailEnabled,
+        communicationWhatsappEnabled: partial.communicationWhatsappEnabled !== undefined ? partial.communicationWhatsappEnabled : baseHomepage.communicationWhatsappEnabled,
+        communicationWhatsappLabel: partial.communicationWhatsappLabel !== undefined ? partial.communicationWhatsappLabel : baseHomepage.communicationWhatsappLabel,
+        communicationWhatsappDescription: partial.communicationWhatsappDescription !== undefined ? partial.communicationWhatsappDescription : baseHomepage.communicationWhatsappDescription,
+        communicationWhatsappUrl: partial.communicationWhatsappUrl !== undefined ? partial.communicationWhatsappUrl : baseHomepage.communicationWhatsappUrl,
         banners: partial.banners !== undefined ? partial.banners : (baseHomepage.banners || []),
         sections: normalizeHomepageSections(
           partial.sections !== undefined ? partial.sections : baseHomepage.sections
