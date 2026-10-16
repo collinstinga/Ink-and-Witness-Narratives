@@ -15,7 +15,7 @@ import { applyFavicon } from './utils/favicon.js';
 import { resolveDirectWriterTab } from './utils/writerNavigation.js';
 
 import { Navbar, PublicViewType } from './components/Navbar.js';
-import { HomeView } from './components/views/HomeView.js';
+import { HomeView, parseHomepageDeepLink, type HomepageDeepLink } from './components/views/HomeView.js';
 import { AllPiecesView } from './components/views/AllPiecesView.js';
 import { AboutAuthorView } from './components/views/AboutAuthorView.js';
 import { HowToPayView } from './components/views/HowToPayView.js';
@@ -123,6 +123,7 @@ export interface NavState {
   writerPieceId?: string | null;
   scrollY?: number;
   readerScrollTop?: number;
+  homepageDeepLink?: HomepageDeepLink | null;
 }
 
 export default function App() {
@@ -155,6 +156,7 @@ export default function App() {
   const [isTipOpen, setIsTipOpen] = useState(false);
   const [tipTargetArticle, setTipTargetArticle] = useState<Article | null>(null);
   const [isSupportOpen, setIsSupportOpen] = useState(false);
+  const [homepageDeepLink, setHomepageDeepLink] = useState<HomepageDeepLink | null>(null);
 
   // Unlocked Tokens map (cached locally)
   const [unlockedTokens, setUnlockedTokens] = useState<Record<string, any>>({});
@@ -269,6 +271,7 @@ export default function App() {
     const [hashPath, hashQuery] = hashWithoutPound.split('?');
     const hashParams = new URLSearchParams(hashQuery || '');
     const searchParams = new URLSearchParams(window.location.search || '');
+    let homepageDeepLink = parseHomepageDeepLink(hashParams, searchParams);
 
     let view: PublicViewType = 'home';
     let articleSlugOrId: string | null = null;
@@ -366,6 +369,18 @@ export default function App() {
       checkoutArticleId = articleSlugOrId;
     }
 
+    if (
+      view !== 'home'
+      || articleSlugOrId
+      || isLibraryOpen
+      || isTipOpen
+      || isWriterStudioOpen
+      || isAffiliatePortalOpen
+      || isSignInOpen
+    ) {
+      homepageDeepLink = null;
+    }
+
     return {
       view,
       articleSlugOrId,
@@ -383,7 +398,8 @@ export default function App() {
       isSignInOpen,
       writerTab,
       writerSubTab,
-      writerPieceId
+      writerPieceId,
+      homepageDeepLink,
     };
   };
 
@@ -429,6 +445,12 @@ export default function App() {
     }
     if (state.view === 'about') return '#about';
     if (state.view === 'how-to-pay') return '#how-to-pay';
+    if (state.homepageDeepLink) {
+      const params = new URLSearchParams({
+        [state.homepageDeepLink.kind]: state.homepageDeepLink.id,
+      });
+      return `#home?${params.toString()}`;
+    }
     return '#home';
   };
 
@@ -485,6 +507,7 @@ export default function App() {
     setIsAffiliatePortalOpen(Boolean(state.isAffiliatePortalOpen));
     setIsSignInOpen(Boolean(state.isSignInOpen));
     setCurrentLockedTab(state.lockedTab || 'preview');
+    setHomepageDeepLink(state.view === 'home' ? state.homepageDeepLink || null : null);
 
     if (state.articleSlugOrId) {
       loadArticleForReader(state.articleSlugOrId, undefined, (loaded) => {
@@ -552,6 +575,7 @@ export default function App() {
       isWriterStudioOpen: patch.isWriterStudioOpen !== undefined ? patch.isWriterStudioOpen : false,
       isAffiliatePortalOpen: patch.isAffiliatePortalOpen !== undefined ? patch.isAffiliatePortalOpen : false,
       isSignInOpen: patch.isSignInOpen !== undefined ? patch.isSignInOpen : false,
+      homepageDeepLink: patch.homepageDeepLink !== undefined ? patch.homepageDeepLink : null,
       scrollY: patch.scrollY !== undefined ? patch.scrollY : (mode === 'push' && patch.view && patch.view !== currentState.view ? 0 : currentState.scrollY),
       readerScrollTop: patch.readerScrollTop !== undefined ? patch.readerScrollTop : (patch.isCheckoutOpen ? currentReaderScroll : 0)
     };
@@ -942,6 +966,14 @@ export default function App() {
     }
   };
 
+  const handleHomepageDeepLinkHandled = () => {
+    setHomepageDeepLink(null);
+    const currentState = window.history.state as NavState | null;
+    if (!currentState?.homepageDeepLink) return;
+    const nextState: NavState = { ...currentState, homepageDeepLink: null };
+    window.history.replaceState(nextState, '', navStateToHash(nextState));
+  };
+
   const handleSessionResolved = React.useCallback((user: User) => {
     authSessionRequestIdRef.current += 1;
     currentUserRef.current = user;
@@ -1065,6 +1097,8 @@ export default function App() {
             onSelectCategory={handleSelectCategory}
             onNavigate={handleNavigateView}
             onOpenTip={handleOpenTip}
+            deepLink={homepageDeepLink}
+            onDeepLinkHandled={handleHomepageDeepLinkHandled}
           />
         )}
 
@@ -1349,6 +1383,7 @@ export default function App() {
               isOpen
               onClose={handleCloseAffiliates}
               articles={articles}
+              onReadArticle={handleOpenReader}
             />
           </React.Suspense>
         </DeferredFeatureBoundary>

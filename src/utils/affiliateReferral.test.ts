@@ -110,6 +110,24 @@ describe('affiliate referral tracking', () => {
     });
   });
 
+  it.each([
+    ['collection', 'grief-and-grace', 'collection:grief-and-grace'],
+    ['bundle', 'starter-bundle', 'bundle:starter-bundle'],
+    ['subscription', 'reader-pass-3', 'subscription:reader-pass-3'],
+  ])('matches redirect deduplication for a %s destination', (queryKey, id, expectedTarget) => {
+    location.search = `?ref=Partner_7&${queryKey}=${id}&c=launch_2026`;
+
+    initReferralTracking();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toEqual({
+      ref: 'partner_7',
+      articleId: expectedTarget,
+      campaign: 'launch_2026',
+    });
+  });
+
   it('does not revive a legacy referral during a later direct session', () => {
     local.setItem('ink_witness_affiliate_ref', 'partner_7');
     local.setItem('ink_witness_affiliate_time', '1799000000000');

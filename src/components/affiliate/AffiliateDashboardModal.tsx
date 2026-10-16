@@ -42,11 +42,23 @@ import {
   AffiliateSaleCommission, 
   AffiliatePayoutRequest, 
   Article,
-  AffiliateCampaign
+  AffiliateCampaign,
+  ContentBundle,
+  ContentCollection,
+  SubscriptionPlan
 } from '../../types.js';
 import { api, clearAffiliateToken } from '../../utils/api.js';
+import {
+  createAffiliateReferralUrl,
+  HOME_AFFILIATE_REFERRAL_DESTINATION,
+  normalizeAffiliateCampaign,
+  parseAffiliateReferralDestination,
+  serializeAffiliateReferralDestination,
+  type AffiliateReferralDestination,
+} from '../../utils/affiliateReferralDestination.js';
 import { playCoinDropSound } from '../../utils/coinSound.js';
 import { AffiliateTermsViewer } from './AffiliateTermsViewer.js';
+import { LiteraryCircleLibrary } from './LiteraryCircleLibrary.js';
 import { LiteraryCircleMembershipOverview } from './LiteraryCircleMembershipOverview.js';
 import {
   LiteraryCircleOnboardingPanel,
@@ -59,6 +71,7 @@ interface AffiliateDashboardModalProps {
   isOpen: boolean;
   onClose: () => void;
   articles: Article[];
+  onReadArticle: (article: Article) => void;
   onLogout: () => void;
 }
 
@@ -68,6 +81,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   isOpen,
   onClose,
   articles,
+  onReadArticle,
   onLogout
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
@@ -83,7 +97,18 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   const [termsSuccess, setTermsSuccess] = useState('');
 
   // Link Builder state
-  const [selectedPieceId, setSelectedPieceId] = useState<string>('');
+  const [selectedReferralDestination, setSelectedReferralDestination] = useState<AffiliateReferralDestination>(
+    HOME_AFFILIATE_REFERRAL_DESTINATION,
+  );
+  const [referralCollections, setReferralCollections] = useState<ContentCollection[]>([]);
+  const [referralBundles, setReferralBundles] = useState<ContentBundle[]>([]);
+  const [referralSubscriptionPlans, setReferralSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
+  const [referralCatalogueLoading, setReferralCatalogueLoading] = useState(false);
+  const [referralCatalogueError, setReferralCatalogueError] = useState('');
+  const [literaryCircleArticles, setLiteraryCircleArticles] = useState<Article[]>([]);
+  const [literaryCircleLibraryLoading, setLiteraryCircleLibraryLoading] = useState(false);
+  const [literaryCircleLibraryError, setLiteraryCircleLibraryError] = useState('');
+  const [literaryCircleLibraryReloadKey, setLiteraryCircleLibraryReloadKey] = useState(0);
   const [campaignTag, setCampaignTag] = useState<string>('');
   const [copiedLink, setCopiedLink] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
@@ -295,6 +320,91 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let cancelled = false;
+    setReferralCatalogueLoading(true);
+    setReferralCatalogueError('');
+
+    void Promise.allSettled([
+      api.getDiscoveryCollections(),
+      api.getSubscriptionPlans(),
+    ]).then(([discoveryResult, plansResult]) => {
+      if (cancelled) return;
+
+      if (discoveryResult.status === 'fulfilled') {
+        setReferralCollections(discoveryResult.value.collections.filter((collection) => collection.isPublished));
+        setReferralBundles(discoveryResult.value.bundles.filter((bundle) => bundle.isPublished));
+      } else {
+        setReferralCollections([]);
+        setReferralBundles([]);
+      }
+
+      if (plansResult.status === 'fulfilled') {
+        setReferralSubscriptionPlans(
+          plansResult.value.filter((plan) => plan.isPublished && !plan.isArchived),
+        );
+      } else {
+        setReferralSubscriptionPlans([]);
+      }
+
+      if (discoveryResult.status === 'rejected' || plansResult.status === 'rejected') {
+        setReferralCatalogueError(
+          'Some extended destinations could not be loaded. Homepage and published-piece links remain available.',
+        );
+      }
+      setReferralCatalogueLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    const complimentaryAccessActive = Boolean(
+      data?.literaryCircle?.enabled
+      && data.literaryCircle.complimentaryAccessStatus === 'active'
+    );
+    if (!isOpen || !complimentaryAccessActive) {
+      setLiteraryCircleArticles([]);
+      setLiteraryCircleLibraryLoading(false);
+      setLiteraryCircleLibraryError('');
+      return;
+    }
+
+    let cancelled = false;
+    setLiteraryCircleLibraryLoading(true);
+    setLiteraryCircleLibraryError('');
+
+    void api.getAffiliateLiteraryCircleLibrary()
+      .then((result) => {
+        if (!cancelled) setLiteraryCircleArticles(result.articles || []);
+      })
+      .catch((libraryError: unknown) => {
+        if (cancelled) return;
+        setLiteraryCircleArticles([]);
+        setLiteraryCircleLibraryError(
+          libraryError instanceof Error
+            ? libraryError.message
+            : 'The complimentary library could not be loaded. Your dashboard remains available.'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLiteraryCircleLibraryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    data?.literaryCircle?.complimentaryAccessStatus,
+    data?.literaryCircle?.enabled,
+    isOpen,
+    literaryCircleLibraryReloadKey,
+  ]);
+
   if (!isOpen) return null;
 
   const affiliate = data?.affiliate;
@@ -304,26 +414,27 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   const minThreshold = data?.minPayoutThresholdKes || data?.settings?.minPayoutThresholdKes || 1000;
   const canRequestPayout = availableBalance >= minThreshold;
 
-  // Generate Referral Link in format: https://YOUR-DOMAIN/r/AFFILIATECODE?article=ARTICLE_ID&c=CAMPAIGN_CODE
+  const linkableArticles = articles.filter(
+    (article) => !article.status || article.status === 'published'
+  );
+
+  // Generate a signed-attribution landing link for the selected public destination.
   const getBaseOrigin = () => {
     if (typeof window !== 'undefined') return window.location.origin;
-    return 'https://inkandwitness.com';
+    return 'https://inkandwitness-narratives.co.ke';
   };
 
-  const generateReferralUrl = (pieceId?: string, campaign?: string) => {
-    const origin = getBaseOrigin();
-    const params = new URLSearchParams();
-    if (pieceId && pieceId.trim()) {
-      params.set('article', pieceId.trim());
-    }
-    if (campaign && campaign.trim()) {
-      params.set('c', campaign.trim().toLowerCase());
-    }
-    const qs = params.toString();
-    return `${origin}/r/${encodeURIComponent(affiliateCode)}${qs ? `?${qs}` : ''}`;
-  };
+  const generateReferralUrl = (
+    destination: AffiliateReferralDestination = HOME_AFFILIATE_REFERRAL_DESTINATION,
+    campaign?: string,
+  ) => createAffiliateReferralUrl({
+    origin: getBaseOrigin(),
+    affiliateCode,
+    destination,
+    campaign,
+  });
 
-  const currentGeneratedLink = generateReferralUrl(selectedPieceId, campaignTag);
+  const currentGeneratedLink = generateReferralUrl(selectedReferralDestination, campaignTag);
 
   const handleCopyLink = (urlToCopy: string) => {
     navigator.clipboard.writeText(urlToCopy);
@@ -779,6 +890,36 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         onOpenCatalogue={handleOpenComplimentaryCatalogue}
                         onOpenLinkBuilder={() => setActiveTab('links')}
                       />
+                      {data.literaryCircle.complimentaryAccessStatus === 'active' && (
+                        <>
+                          {literaryCircleLibraryLoading ? (
+                            <div
+                              role="status"
+                              className="flex min-h-36 items-center justify-center gap-2 rounded-2xl border border-emerald-300/20 bg-emerald-950/10 text-sm text-emerald-200"
+                            >
+                              <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                              Loading your complimentary library…
+                            </div>
+                          ) : literaryCircleLibraryError ? (
+                            <div className="rounded-2xl border border-amber-400/30 bg-amber-950/20 p-4 text-sm text-amber-100">
+                              <p>{literaryCircleLibraryError}</p>
+                              <button
+                                type="button"
+                                onClick={() => setLiteraryCircleLibraryReloadKey((key) => key + 1)}
+                                className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-amber-300/30 bg-amber-400/10 px-3 py-2 font-mono text-xs font-bold text-amber-100 transition hover:bg-amber-400/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                              >
+                                <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
+                                Retry library
+                              </button>
+                            </div>
+                          ) : (
+                            <LiteraryCircleLibrary
+                              articles={literaryCircleArticles}
+                              onOpenArticle={onReadArticle}
+                            />
+                          )}
+                        </>
+                      )}
                     </>
                   )}
 
@@ -1004,39 +1145,97 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         Custom Link &amp; Campaign Generator
                       </h3>
                       <p className="text-xs text-slate-400 font-sans mt-0.5">
-                        Create targeted links for specific monographs, Twitter threads, WhatsApp broadcasts, or email newsletters.
+                        Create targeted links to the homepage, a piece, collection, bundle, or Reader Pass for social and email campaigns.
                       </p>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       {/* Destination Picker */}
                       <div>
-                        <label className="block text-xs font-mono text-slate-300 mb-1.5">
+                        <label htmlFor="affiliate-referral-destination" className="block text-xs font-mono text-slate-300 mb-1.5">
                           1. Choose Destination Page
                         </label>
                         <select
-                          value={selectedPieceId}
-                          onChange={(e) => setSelectedPieceId(e.target.value)}
+                          id="affiliate-referral-destination"
+                          value={serializeAffiliateReferralDestination(selectedReferralDestination)}
+                          onChange={(e) => setSelectedReferralDestination(parseAffiliateReferralDestination(e.target.value))}
                           className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-cyan-500 font-sans"
                         >
-                          <option value="">Full Homepage &amp; Catalogue (Default)</option>
-                          {articles.map((art) => (
-                            <option key={art.id} value={art.id}>
-                              {art.title} (KES {art.priceKes || 300})
-                            </option>
-                          ))}
+                          <option value={serializeAffiliateReferralDestination(HOME_AFFILIATE_REFERRAL_DESTINATION)}>
+                            Full Homepage &amp; Catalogue (Default)
+                          </option>
+                          {linkableArticles.length > 0 ? (
+                            <optgroup label="Individual pieces">
+                              {linkableArticles.map((article) => (
+                                <option
+                                  key={article.id}
+                                  value={serializeAffiliateReferralDestination({ type: 'piece', id: article.id })}
+                                >
+                                  {article.title} (KES {article.priceKes || 300})
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : null}
+                          {referralCollections.length > 0 ? (
+                            <optgroup label="Collections">
+                              {referralCollections.map((collection) => (
+                                <option
+                                  key={collection.id}
+                                  value={serializeAffiliateReferralDestination({ type: 'collection', id: collection.id })}
+                                >
+                                  {collection.name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : null}
+                          {referralBundles.length > 0 ? (
+                            <optgroup label="Bundles">
+                              {referralBundles.map((bundle) => (
+                                <option
+                                  key={bundle.id}
+                                  value={serializeAffiliateReferralDestination({ type: 'bundle', id: bundle.id })}
+                                >
+                                  {bundle.name} (KES {bundle.priceKes.toLocaleString()})
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : null}
+                          {referralSubscriptionPlans.length > 0 ? (
+                            <optgroup label="Reader Passes">
+                              {referralSubscriptionPlans.map((plan) => (
+                                <option
+                                  key={plan.id}
+                                  value={serializeAffiliateReferralDestination({ type: 'subscription', id: plan.id })}
+                                >
+                                  {plan.name} ({plan.durationMonths} months · KES {plan.priceKes.toLocaleString()})
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : null}
                         </select>
+                        <div className="mt-1 min-h-4" aria-live="polite">
+                          {referralCatalogueLoading ? (
+                            <p className="text-[10px] text-slate-500 font-mono">
+                              Loading collections, bundles, and Reader Passes…
+                            </p>
+                          ) : referralCatalogueError ? (
+                            <p className="text-[10px] text-amber-400 font-mono">
+                              {referralCatalogueError}
+                            </p>
+                          ) : null}
+                        </div>
                       </div>
 
                       {/* Campaign Tag */}
                       <div>
-                        <label className="block text-xs font-mono text-slate-300 mb-1.5">
+                        <label htmlFor="affiliate-referral-campaign" className="block text-xs font-mono text-slate-300 mb-1.5">
                           2. Optional Campaign Tag
                         </label>
                         <input
+                          id="affiliate-referral-campaign"
                           type="text"
                           value={campaignTag}
-                          onChange={(e) => setCampaignTag(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
+                          onChange={(e) => setCampaignTag(normalizeAffiliateCampaign(e.target.value))}
                           placeholder="e.g. twitter_thread, bookclub, whatsapp"
                           className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-2.5 text-xs text-cyan-300 font-mono placeholder-slate-500 focus:outline-none focus:border-cyan-500"
                         />
@@ -1064,10 +1263,13 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                           type="text"
                           readOnly
                           value={currentGeneratedLink}
+                          aria-label="Generated affiliate referral link"
                           className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-xs font-mono text-cyan-300 select-all focus:outline-none"
                         />
                         <button
+                          type="button"
                           onClick={() => handleCopyLink(currentGeneratedLink)}
+                          aria-label={copiedLink ? 'Affiliate referral link copied' : 'Copy affiliate referral link'}
                           className="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shrink-0"
                         >
                           {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
@@ -1139,7 +1341,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {data.campaigns.map((c) => {
-                          const campaignLink = generateReferralUrl(undefined, c.code);
+                          const campaignLink = generateReferralUrl(HOME_AFFILIATE_REFERRAL_DESTINATION, c.code);
                           return (
                             <div key={c.id || c.code} className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
                               <div className="flex items-start justify-between gap-2">
@@ -1187,8 +1389,8 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                       High-Performing Monograph Direct Links
                     </h4>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {articles.slice(0, 6).map((art) => {
-                        const directUrl = generateReferralUrl(art.id);
+                      {linkableArticles.slice(0, 6).map((art) => {
+                        const directUrl = generateReferralUrl({ type: 'piece', id: art.id });
                         return (
                           <div key={art.id} className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3">
                             <div className="min-w-0">

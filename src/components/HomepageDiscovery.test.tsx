@@ -4,7 +4,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { Article, ContentCollection } from '../types.js';
 import type { HomepageBundle } from './HomepageBundles.js';
-import { buildHomepageDiscoveryModel, HomepageDiscovery } from './HomepageDiscovery.js';
+import {
+  buildHomepageDiscoveryModel,
+  HomepageDiscovery,
+  resolveHomepageCollectionDeepLink,
+} from './HomepageDiscovery.js';
 
 const piece = (id: string, overrides: Partial<Article> = {}): Article => ({
   id,
@@ -59,6 +63,14 @@ const bundle = (id: string, pieces: Article[]): HomepageBundle => ({
 });
 
 describe('HomepageDiscovery', () => {
+  it('resolves a collection referral destination by stable id or public slug', () => {
+    const target = collection('one', ['piece-one']);
+    const view = { collection: target, pieces: [piece('one')] };
+    expect(resolveHomepageCollectionDeepLink([view], target.id)).toBe(view);
+    expect(resolveHomepageCollectionDeepLink([view], target.slug)).toBe(view);
+    expect(resolveHomepageCollectionDeepLink([view], 'missing')).toBeNull();
+  });
+
   it('preserves curation order while removing duplicates and collection overlap', () => {
     const articles = [piece('in-collection'), piece('standalone'), piece('draft', { status: 'draft' })];
     const model = buildHomepageDiscoveryModel(

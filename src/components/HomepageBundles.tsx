@@ -13,18 +13,41 @@ interface HomepageBundlesProps {
   config?: HomepageConfig | null;
   onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
   onPreviewPiece?: (article: Article) => void;
+  initialBundleId?: string | null;
+  onInitialBundleHandled?: () => void;
 }
 
 const KES_FORMATTER = new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 });
+
+export const resolveHomepageBundleDeepLink = (
+  bundles: HomepageBundle[],
+  destinationId?: string | null,
+): HomepageBundle | null => {
+  if (!destinationId) return null;
+  return bundles.find(bundle => bundle.id === destinationId || bundle.slug === destinationId) || null;
+};
 
 export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
   bundles,
   config,
   onPurchaseBundle,
   onPreviewPiece,
+  initialBundleId,
+  onInitialBundleHandled,
 }) => {
   const [activeBundle, setActiveBundle] = React.useState<HomepageBundle | null>(null);
   const closeButtonRef = React.useRef<HTMLButtonElement>(null);
+  const handledBundleRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!initialBundleId || handledBundleRef.current === initialBundleId) return;
+    handledBundleRef.current = initialBundleId;
+    const target = resolveHomepageBundleDeepLink(bundles, initialBundleId);
+    document.getElementById('home-reading-bundles')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (target) setActiveBundle(target);
+    onInitialBundleHandled?.();
+  }, [bundles, initialBundleId, onInitialBundleHandled]);
 
   React.useEffect(() => {
     if (!activeBundle) return;

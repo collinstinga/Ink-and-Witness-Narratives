@@ -4,6 +4,8 @@
  * HttpOnly server cookie remains the only authority for commission attribution.
  */
 
+import { getAffiliateReferralTrackingTargetFromSearchParams } from './affiliateReferralDestination.js';
+
 const REF_STORAGE_KEY = 'ink_witness_affiliate_ref';
 const REF_TIMESTAMP_KEY = 'ink_witness_affiliate_time';
 const CAMPAIGN_STORAGE_KEY = 'ink_witness_affiliate_campaign';
@@ -115,7 +117,11 @@ export function clearReferral() {
 async function registerClickOnBackend(ref: string, campaign?: string) {
   try {
     const urlParams = new URLSearchParams(window.location.search);
-    const articleId = urlParams.get('article') || undefined;
+    // Mirror the redirect route's canonical target so its signed dedup cookie
+    // matches this non-blocking client request. This prevents a collection,
+    // bundle, or Reader Pass landing from being counted again as a homepage
+    // click or overwriting its destination-specific attribution context.
+    const articleId = getAffiliateReferralTrackingTargetFromSearchParams(urlParams);
 
     await fetch('/api/affiliate/click', {
       method: 'POST',

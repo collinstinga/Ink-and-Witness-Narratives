@@ -190,6 +190,81 @@ function isSafePublicIdentifier(value: unknown, maxLength = 128): value is strin
     /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
 }
 
+type AffiliateReferralDestination =
+  | { kind: 'home' }
+  | { kind: 'piece' | 'collection' | 'bundle' | 'subscription'; id: string };
+
+const AFFILIATE_REFERRAL_DESTINATIONS = [
+  {
+    kind: 'piece',
+    queryKey: 'article',
+    aliases: ['article', 'piece', 'articleId', 'id', 'monograph'],
+    trackingPrefix: ''
+  },
+  {
+    kind: 'collection',
+    queryKey: 'collection',
+    aliases: ['collection'],
+    trackingPrefix: 'collection:'
+  },
+  {
+    kind: 'bundle',
+    queryKey: 'bundle',
+    aliases: ['bundle'],
+    trackingPrefix: 'bundle:'
+  },
+  {
+    kind: 'subscription',
+    queryKey: 'subscription',
+    aliases: ['subscription'],
+    trackingPrefix: 'subscription:'
+  }
+] as const;
+
+function resolveAffiliateReferralDestination(query: Request['query']): AffiliateReferralDestination {
+  const candidates: Exclude<AffiliateReferralDestination, { kind: 'home' }>[] = [];
+
+  for (const definition of AFFILIATE_REFERRAL_DESTINATIONS) {
+    const ids = definition.aliases
+      .map(alias => query[alias])
+      .filter((value): value is string => typeof value === 'string')
+      .filter(value => isSafePublicIdentifier(value, 128 - definition.trackingPrefix.length));
+    const distinctIds = [...new Set(ids)];
+    // Conflicting legacy aliases are treated as an ambiguous destination. The
+    // link still reaches the homepage but cannot bind attribution to a target
+    // the reader may not actually see.
+    if (distinctIds.length > 1) return { kind: 'home' };
+    if (distinctIds.length === 1) {
+      candidates.push({ kind: definition.kind, id: distinctIds[0] });
+    }
+  }
+
+  // A referral link may name one destination only. Fail closed to the
+  // homepage when multiple destination types are supplied.
+  return candidates.length === 1 ? candidates[0] : { kind: 'home' };
+}
+
+function getAffiliateReferralTrackingTarget(destination: AffiliateReferralDestination): string | undefined {
+  if (destination.kind === 'home') return undefined;
+  const definition = AFFILIATE_REFERRAL_DESTINATIONS.find(candidate => candidate.kind === destination.kind);
+  return definition ? `${definition.trackingPrefix}${destination.id}` : undefined;
+}
+
+function buildAffiliateReferralLandingLocation(
+  destination: AffiliateReferralDestination,
+  affiliateCode?: string,
+  campaignCode?: string
+): string {
+  const params = new URLSearchParams();
+  if (affiliateCode) params.set('ref', affiliateCode);
+  if (destination.kind !== 'home') {
+    const definition = AFFILIATE_REFERRAL_DESTINATIONS.find(candidate => candidate.kind === destination.kind);
+    if (definition) params.set(definition.queryKey, destination.id);
+  }
+  if (campaignCode) params.set('c', campaignCode);
+  return params.size > 0 ? `/?${params.toString()}` : '/';
+}
+
 type AdminCommentCursor = { createdAt: string; id: string };
 
 function encodeAdminCommentCursor(cursor: AdminCommentCursor): string {
@@ -2073,20 +2148,15 @@ export async function createApp() {
 
   // Affiliate / Referral Redirect Tracking Route
   app.get(["/r/:code", "/api/affiliate/redirect/:code"], publicWriteLimiter, referralClickLimiter, async (req: Request, res: Response) => {
-    const fallbackArticleId = isSafePublicIdentifier(
-      req.query.article || req.query.articleId || req.query.id || req.query.monograph || ''
-    ) ? String(req.query.article || req.query.articleId || req.query.id || req.query.monograph) : '';
-    const fallbackLocation = fallbackArticleId
-      ? `/?${new URLSearchParams({ article: fallbackArticleId }).toString()}`
-      : '/';
+    const destination = resolveAffiliateReferralDestination(req.query);
+    const trackingTarget = getAffiliateReferralTrackingTarget(destination);
+    const fallbackLocation = buildAffiliateReferralLandingLocation(destination);
     try {
       const code = (req.params.code || "").trim();
-      const rawArticleId = (req.query.article || req.query.articleId || req.query.id || req.query.monograph || "") as string;
       const rawCampaignCode = (req.query.c || req.query.campaign || "") as string;
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(code)) {
         return res.redirect(302, "/");
       }
-      const articleId = rawArticleId && isSafePublicIdentifier(rawArticleId) ? rawArticleId : "";
       const campaignCode = rawCampaignCode && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(rawCampaignCode)
         ? rawCampaignCode
         : "";
@@ -2101,7 +2171,7 @@ export async function createApp() {
       // status check. This remains correct even when the runtime cache is cold.
       const clickResult = await store.affiliates.registerClick(
         code,
-        articleId || undefined,
+        trackingTarget,
         campaignCode || undefined,
         ipHash,
         userAgent,
@@ -2116,7 +2186,7 @@ export async function createApp() {
       const canonicalCampaignCode = clickResult.campaign?.code;
       const attribution = {
         ref: canonicalAffiliateCode,
-        articleId: articleId || undefined,
+        articleId: trackingTarget,
         campaign: canonicalCampaignCode
       };
       const clickDedupCookie = createAffiliateClickDedupCookieValue(attribution);
@@ -2131,12 +2201,11 @@ export async function createApp() {
         return res.redirect(302, fallbackLocation);
       }
 
-      // Build target redirect URL preserving ref, article, and campaign query parameters.
-      const params = new URLSearchParams();
-      params.set("ref", canonicalAffiliateCode);
-      if (articleId) params.set("article", articleId);
-      if (canonicalCampaignCode) params.set("c", canonicalCampaignCode);
-      return res.redirect(302, `/?${params.toString()}`);
+      return res.redirect(302, buildAffiliateReferralLandingLocation(
+        destination,
+        canonicalAffiliateCode,
+        canonicalCampaignCode
+      ));
     } catch (err) {
       console.warn("[Affiliate Link Route] Error during redirect:", err);
       return res.redirect(302, fallbackLocation);

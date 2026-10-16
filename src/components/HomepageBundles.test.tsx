@@ -3,7 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Article } from '../types.js';
-import { HomepageBundles, type HomepageBundle } from './HomepageBundles.js';
+import {
+  HomepageBundles,
+  resolveHomepageBundleDeepLink,
+  type HomepageBundle,
+} from './HomepageBundles.js';
 
 const piece = (id: string): Article => ({
   id,
@@ -26,6 +30,27 @@ const piece = (id: string): Article => ({
 });
 
 describe('HomepageBundles', () => {
+  it('resolves an exact referral destination by stable id or public slug', () => {
+    const first = piece('one');
+    const target: HomepageBundle = {
+      id: 'starter',
+      name: 'Starter Shelf',
+      slug: 'starter-shelf',
+      description: 'A first set.',
+      pieceIds: [first.id],
+      pieces: [first],
+      checkoutArticle: piece('bundle:starter'),
+      priceKes: 750,
+      isPublished: true,
+      createdAt: '2026-10-04',
+      updatedAt: '2026-10-04',
+    };
+
+    expect(resolveHomepageBundleDeepLink([target], 'starter')).toBe(target);
+    expect(resolveHomepageBundleDeepLink([target], 'starter-shelf')).toBe(target);
+    expect(resolveHomepageBundleDeepLink([target], 'missing')).toBeNull();
+  });
+
   it('explains permanent access and presents the writer price as one purchase', () => {
     const first = piece('one');
     const checkoutArticle = piece('bundle:starter');

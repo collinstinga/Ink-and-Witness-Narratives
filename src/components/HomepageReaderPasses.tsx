@@ -15,16 +15,43 @@ export interface HomepageReaderPassesProps {
   plans: SubscriptionPlan[];
   config?: HomepageConfig | null;
   onChoosePlan: (plan: SubscriptionPlan) => void;
+  initialPlanId?: string | null;
+  onInitialPlanHandled?: () => void;
 }
+
+export const resolveHomepageSubscriptionDeepLink = (
+  plans: SubscriptionPlan[],
+  destinationId?: string | null,
+): SubscriptionPlan | null => {
+  if (!destinationId) return null;
+  return plans.find(plan => plan.isPublished !== false && plan.id === destinationId) || null;
+};
 
 export const HomepageReaderPasses: React.FC<HomepageReaderPassesProps> = ({
   plans,
   config,
   onChoosePlan,
+  initialPlanId,
+  onInitialPlanHandled,
 }) => {
-  const visiblePlans = [...plans]
-    .filter(plan => plan.isPublished !== false)
-    .sort((left, right) => left.order - right.order || left.priceKes - right.priceKes);
+  const visiblePlans = React.useMemo(
+    () => [...plans]
+      .filter(plan => plan.isPublished !== false)
+      .sort((left, right) => left.order - right.order || left.priceKes - right.priceKes),
+    [plans],
+  );
+  const handledPlanRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!initialPlanId || handledPlanRef.current === initialPlanId) return;
+    handledPlanRef.current = initialPlanId;
+    const target = resolveHomepageSubscriptionDeepLink(visiblePlans, initialPlanId);
+    const targetCard = target ? document.getElementById(`reader-pass-${target.id}`) : null;
+    (targetCard || document.getElementById('home-reader-passes'))
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    targetCard?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+    onInitialPlanHandled?.();
+  }, [initialPlanId, onInitialPlanHandled, visiblePlans]);
 
   if (visiblePlans.length === 0) return null;
 
@@ -59,6 +86,8 @@ export const HomepageReaderPasses: React.FC<HomepageReaderPassesProps> = ({
           {visiblePlans.map(plan => (
             <article
               key={plan.id}
+              id={`reader-pass-${plan.id}`}
+              data-subscription-plan-id={plan.id}
               className="group flex min-w-[82%] snap-center flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/80 shadow-xl shadow-black/15 transition hover:-translate-y-0.5 hover:border-sky-800 sm:min-w-[46%] md:min-w-0"
             >
               <div className="relative aspect-[4/3] overflow-hidden bg-gradient-to-br from-sky-950 via-slate-900 to-[#080d17]">

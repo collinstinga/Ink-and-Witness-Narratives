@@ -8,12 +8,14 @@ interface AffiliatePortalProps {
   isOpen: boolean;
   onClose: () => void;
   articles: Article[];
+  onReadArticle: (article: Article) => void;
 }
 
 export const AffiliatePortal: React.FC<AffiliatePortalProps> = ({
   isOpen,
   onClose,
-  articles
+  articles,
+  onReadArticle
 }) => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [affiliate, setAffiliate] = useState<AffiliateAccount | null>(null);
@@ -44,6 +46,7 @@ export const AffiliatePortal: React.FC<AffiliatePortalProps> = ({
         isOpen={isOpen}
         onClose={onClose}
         articles={articles}
+        onReadArticle={onReadArticle}
         onLogout={handleLogout}
       />
     );

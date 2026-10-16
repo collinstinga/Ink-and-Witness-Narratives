@@ -71,7 +71,7 @@ export const LITERARY_CIRCLE_ONBOARDING_STEPS = [
   {
     id: 'first_link',
     title: 'Create your first share',
-    description: 'Build a link to the homepage or a specific piece, then share it with the readers you know best.',
+    description: 'Build a link to the homepage, a piece, collection, bundle, or Reader Pass, then share it with the readers you know best.',
   },
   {
     id: 'promotional_resources',

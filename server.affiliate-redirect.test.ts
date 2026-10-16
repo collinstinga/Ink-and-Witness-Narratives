@@ -56,6 +56,7 @@ vi.mock('./src/server/mpesa.js', () => ({
 }));
 
 import { createApp } from './server.js';
+import { verifyAffiliateAttributionCookie } from './src/server/affiliateAttributionSecurity.js';
 
 describe('affiliate redirect route', () => {
   let server: Server;
@@ -149,6 +150,90 @@ describe('affiliate redirect route', () => {
     ]);
   });
 
+  it('normalizes the piece alias to the legacy-compatible article landing parameter', async () => {
+    const response = await requestRedirect('/api/affiliate/redirect/PARTNER_7?piece=piece_43');
+    const target = getRelativeRedirect(response);
+
+    expect(Object.fromEntries(target.searchParams)).toEqual({
+      ref: 'PARTNER_7',
+      article: 'piece_43'
+    });
+    expect(affiliateMocks.registerClick.mock.calls[0]?.slice(0, 3)).toEqual([
+      'PARTNER_7',
+      'piece_43',
+      undefined
+    ]);
+  });
+
+  it.each([
+    ['collection', 'collection_healing', 'collection:collection_healing'],
+    ['bundle', 'bundle_healing_pair', 'bundle:bundle_healing_pair'],
+    ['subscription', 'first-chapter-3-months', 'subscription:first-chapter-3-months']
+  ] as const)(
+    'lands a %s link on its selected destination and signs its canonical tracking target',
+    async (queryKey, destinationId, canonicalTrackingTarget) => {
+      const response = await requestRedirect(
+        `/api/affiliate/redirect/PARTNER_7?${queryKey}=${destinationId}&c=launch_2026`
+      );
+      const target = getRelativeRedirect(response);
+
+      expect(Object.fromEntries(target.searchParams)).toEqual({
+        ref: 'PARTNER_7',
+        [queryKey]: destinationId,
+        c: 'LAUNCH_2026'
+      });
+      expect(affiliateMocks.registerClick.mock.calls[0]?.slice(0, 3)).toEqual([
+        'PARTNER_7',
+        canonicalTrackingTarget,
+        'launch_2026'
+      ]);
+
+      const cookieHeader = response.headers.get('set-cookie') || '';
+      const signedAttribution = cookieHeader.match(/iw_affiliate_attribution=([^;,]+)/)?.[1];
+      expect(signedAttribution).toBeTruthy();
+      expect(verifyAffiliateAttributionCookie(
+        signedAttribution,
+        'a-later-eligible-purchase',
+        {
+          allowCrossArticle: true,
+          signingSecret: process.env.SESSION_SIGNING_SECRET
+        }
+      )).toMatchObject({
+        ref: 'partner_7',
+        articleId: canonicalTrackingTarget,
+        campaign: 'launch_2026'
+      });
+    }
+  );
+
+  it('fails an ambiguous multi-destination link closed to homepage attribution', async () => {
+    const response = await requestRedirect(
+      '/api/affiliate/redirect/PARTNER_7?article=piece_42&bundle=bundle_healing_pair'
+    );
+    const target = getRelativeRedirect(response);
+
+    expect(Object.fromEntries(target.searchParams)).toEqual({ ref: 'PARTNER_7' });
+    expect(affiliateMocks.registerClick.mock.calls[0]?.slice(0, 3)).toEqual([
+      'PARTNER_7',
+      undefined,
+      undefined
+    ]);
+  });
+
+  it('preserves a safe destination without referral data when the affiliate is unavailable', async () => {
+    affiliateMocks.registerClick.mockResolvedValueOnce({ valid: false });
+
+    const response = await requestRedirect(
+      '/api/affiliate/redirect/PARTNER_7?bundle=bundle_healing_pair'
+    );
+    const target = getRelativeRedirect(response);
+
+    expect(Object.fromEntries(target.searchParams)).toEqual({
+      bundle: 'bundle_healing_pair'
+    });
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
   it('preserves a campaign link while landing on the homepage and records it once', async () => {
     const response = await requestRedirect('/api/affiliate/redirect/PARTNER_7?c=launch_2026');
     const target = getRelativeRedirect(response);
@@ -224,6 +309,33 @@ describe('affiliate redirect route', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('set-cookie')).toContain('iw_affiliate_click_dedup=;');
     expect(response.headers.get('set-cookie')).toContain('Path=/api/affiliate/click');
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('deduplicates the canonical target submitted after a bundle landing', async () => {
+    const redirect = await requestRedirect(
+      '/api/affiliate/redirect/PARTNER_7?bundle=starter_bundle&c=launch_2026'
+    );
+    const cookiePair = redirect.headers.get('set-cookie')?.split(';')[0];
+
+    expect(cookiePair).toMatch(/^iw_affiliate_click_dedup=/);
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: cookiePair!
+      },
+      body: JSON.stringify({
+        ref: 'partner_7',
+        articleId: 'bundle:starter_bundle',
+        campaign: 'launch_2026'
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, deduplicated: true });
     expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
   });
 

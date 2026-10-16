@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SubscriptionPlan } from '../types.js';
-import { HomepageReaderPasses } from './HomepageReaderPasses.js';
+import { HomepageReaderPasses, resolveHomepageSubscriptionDeepLink } from './HomepageReaderPasses.js';
 
 const plan = (overrides: Partial<SubscriptionPlan> = {}): SubscriptionPlan => ({
   id: 'long-read-6-months',
@@ -21,6 +21,15 @@ const plan = (overrides: Partial<SubscriptionPlan> = {}): SubscriptionPlan => ({
 });
 
 describe('HomepageReaderPasses', () => {
+  it('resolves only published referral destinations by stable id', () => {
+    const target = plan();
+    expect(resolveHomepageSubscriptionDeepLink([target], target.id)).toBe(target);
+    expect(resolveHomepageSubscriptionDeepLink(
+      [plan({ id: 'hidden', isPublished: false })],
+      'hidden',
+    )).toBeNull();
+  });
+
   it('renders writer-priced published plans with renewal and focal-position details', () => {
     const markup = renderToStaticMarkup(
       <HomepageReaderPasses

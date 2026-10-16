@@ -40,6 +40,9 @@ export interface HomepageDiscoveryProps {
   heroSection?: React.ReactNode;
   subscriptionsSection?: React.ReactNode;
   newsletterSection?: React.ReactNode;
+  initialCollectionId?: string | null;
+  initialBundleId?: string | null;
+  onInitialDestinationHandled?: () => void;
 }
 
 export interface HomepageCollectionView {
@@ -52,6 +55,16 @@ export interface HomepageDiscoveryModel {
   collections: HomepageCollectionView[];
   pieces: Article[];
 }
+
+export const resolveHomepageCollectionDeepLink = (
+  collections: HomepageCollectionView[],
+  destinationId?: string | null,
+): HomepageCollectionView | null => {
+  if (!destinationId) return null;
+  return collections.find(
+    item => item.collection.id === destinationId || item.collection.slug === destinationId,
+  ) || null;
+};
 
 const isPublished = (article: Article): boolean => article.status === 'published' || !article.status;
 
@@ -201,6 +214,9 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   heroSection,
   subscriptionsSection,
   newsletterSection,
+  initialCollectionId,
+  initialBundleId,
+  onInitialDestinationHandled,
 }) => {
   const model = useMemo(
     () => buildHomepageDiscoveryModel(collections, allArticles, pieces, bundles),
@@ -209,6 +225,7 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   const [activeCollection, setActiveCollection] = useState<HomepageCollectionView | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const handledCollectionRef = useRef<string | null>(null);
   const hasLibrarySections = useMemo(
     () => buildHomepageLibrarySections(categories, allArticles).length > 0,
     [categories, allArticles],
@@ -221,6 +238,16 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
       : null;
     setActiveCollection(collection);
   }, []);
+
+  useEffect(() => {
+    if (!initialCollectionId || handledCollectionRef.current === initialCollectionId) return;
+    handledCollectionRef.current = initialCollectionId;
+    const target = resolveHomepageCollectionDeepLink(model.collections, initialCollectionId);
+    document.getElementById('home-curated-collections')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (target) openCollection(target);
+    onInitialDestinationHandled?.();
+  }, [initialCollectionId, model.collections, onInitialDestinationHandled, openCollection]);
 
   useEffect(() => {
     if (!activeCollection) return;
@@ -478,6 +505,8 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
           config={config}
           onPurchaseBundle={onPurchaseBundle}
           onPreviewPiece={onReadArticle}
+          initialBundleId={initialBundleId}
+          onInitialBundleHandled={onInitialDestinationHandled}
         />
       </DiscoverySectionFrame>
     ) : null,

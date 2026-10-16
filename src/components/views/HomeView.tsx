@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowRight, Feather, Sparkles } from 'lucide-react';
 import { Article, AuthorProfile, Category, ContentBundle, ContentCollection, HomepageConfig, SubscriptionPlan } from '../../types.js';
 import { api } from '../../utils/api.js';
+import { normalizeHomepageSections, type HomepageSectionId } from '../../homepageSections.js';
 import { HomepageDiscovery } from '../HomepageDiscovery.js';
 import type { HomepageBundle } from '../HomepageBundles.js';
 import { HomepageReaderPasses } from '../HomepageReaderPasses.js';
@@ -19,7 +20,45 @@ interface HomeViewProps {
   onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: 'home' | 'all-pieces' | 'about' | 'how-to-pay' | 'support') => void;
   onOpenTip: () => void;
+  deepLink?: HomepageDeepLink | null;
+  onDeepLinkHandled?: () => void;
 }
+
+export type HomepageDeepLink = {
+  kind: 'collection' | 'bundle' | 'subscription';
+  id: string;
+};
+
+const HOMEPAGE_DEEP_LINK_KEYS: HomepageDeepLink['kind'][] = [
+  'collection',
+  'bundle',
+  'subscription',
+];
+const SAFE_HOMEPAGE_DESTINATION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,127})$/;
+
+/**
+ * Reads a single, unambiguous homepage destination. URLSearchParams has
+ * already decoded the value, so do not decode it again here.
+ */
+export const parseHomepageDeepLink = (
+  hashParams: URLSearchParams,
+  searchParams: URLSearchParams,
+): HomepageDeepLink | null => {
+  const destinations: HomepageDeepLink[] = [];
+  for (const kind of HOMEPAGE_DEEP_LINK_KEYS) {
+    const values = [hashParams.get(kind), searchParams.get(kind)]
+      .filter((value): value is string => typeof value === 'string')
+      .map(value => value.trim())
+      .filter(Boolean);
+    const distinctValues = [...new Set(values)];
+    if (distinctValues.length > 1) return null;
+    const value = distinctValues[0];
+    if (value && SAFE_HOMEPAGE_DESTINATION_ID.test(value)) {
+      destinations.push({ kind, id: value });
+    }
+  }
+  return destinations.length === 1 ? destinations[0] : null;
+};
 
 interface HomepageHeroProps {
   backgroundUrl: string;
@@ -105,12 +144,22 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onPurchaseSubscription,
   onSelectCategory,
   onNavigate,
+  deepLink,
+  onDeepLinkHandled,
 }) => {
   const [homepageConfig, setHomepageConfig] = useState<HomepageConfig | null>(null);
   const [homepageBundles, setHomepageBundles] = useState<HomepageBundle[]>([]);
   const [homepageCollections, setHomepageCollections] = useState<ContentCollection[] | null>(null);
   const [homepagePieces, setHomepagePieces] = useState<Article[] | null>(null);
   const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
+  const [homepageLoaded, setHomepageLoaded] = useState(false);
+  const [requestedDeepLink, setRequestedDeepLink] = useState<HomepageDeepLink | null>(deepLink || null);
+
+  useEffect(() => {
+    if (!deepLink) return;
+    setHomepageLoaded(false);
+    setRequestedDeepLink(deepLink);
+  }, [deepLink?.id, deepLink?.kind]);
 
   useEffect(() => {
     let requestSequence = 0;
@@ -120,12 +169,52 @@ export const HomeView: React.FC<HomeViewProps> = ({
       const requestId = ++requestSequence;
       try {
         const data = await api.getHomepageData();
+        let nextBundles = data.bundles || [];
+        let nextCollections = data.collections || [];
+        const destination = requestedDeepLink;
+
+        // Homepage curation is intentionally small. A direct affiliate link may
+        // point at another published group, so load just that public discovery
+        // target on deep-link landings and place it first for exact navigation.
+        if (
+          destination?.kind === 'collection'
+          && !nextCollections.some(item => item.id === destination.id || item.slug === destination.id)
+        ) {
+          try {
+            const discovery = await api.getDiscoveryCollections();
+            const target = discovery.collections.find(
+              item => item.id === destination.id || item.slug === destination.id,
+            );
+            if (target) {
+              nextCollections = [target, ...nextCollections.filter(item => item.id !== target.id)];
+            }
+          } catch {
+            // The curated collection shelf remains a safe fallback.
+          }
+        } else if (
+          destination?.kind === 'bundle'
+          && !nextBundles.some(item => item.id === destination.id || item.slug === destination.id)
+        ) {
+          try {
+            const discovery = await api.getDiscoveryCollections();
+            const target = discovery.bundles.find(
+              item => item.id === destination.id || item.slug === destination.id,
+            );
+            if (target) {
+              nextBundles = [target, ...nextBundles.filter(item => item.id !== target.id)];
+            }
+          } catch {
+            // The curated bundle shelf remains a safe fallback.
+          }
+        }
+
         if (!disposed && requestId === requestSequence && data) {
           setHomepageConfig(data.config);
-          setHomepageBundles(data.bundles || []);
-          setHomepageCollections(data.collections || []);
+          setHomepageBundles(nextBundles);
+          setHomepageCollections(nextCollections);
           setHomepagePieces(data.pieces || []);
           setSubscriptionPlans(data.subscriptionPlans || []);
+          setHomepageLoaded(true);
         }
       } catch (error) {
         if (!disposed && requestId === requestSequence) {
@@ -134,6 +223,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
           setHomepageBundles([]);
           setHomepagePieces(null);
           setSubscriptionPlans([]);
+          setHomepageLoaded(true);
         }
       }
     };
@@ -150,7 +240,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
       window.removeEventListener('ink-homepage-updated', refreshAfterSave);
       window.removeEventListener('storage', refreshOtherTab);
     };
-  }, []);
+  }, [requestedDeepLink?.id, requestedDeepLink?.kind]);
 
   const publishedArticles = articles.filter(article => article.status === 'published' || !article.status);
   const visiblePieces = homepagePieces ?? publishedArticles.slice(0, 8);
@@ -171,6 +261,50 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const authorIdentity = homepageConfig?.heroSubheadline || 'An archive of lived experience, intimacy, power, and memory authored by Jake.';
   const heroHeadline = homepageConfig?.heroHeadline || 'INK & WITNESS';
   const heroBadge = homepageConfig?.heroBadge || 'Ink & Witness Narratives';
+  const normalizedSections = React.useMemo(
+    () => normalizeHomepageSections(homepageConfig?.sections),
+    [homepageConfig?.sections],
+  );
+
+  useEffect(() => {
+    if (!homepageLoaded || !deepLink || !onDeepLinkHandled) return;
+
+    const sectionIdByKind: Record<HomepageDeepLink['kind'], HomepageSectionId> = {
+      collection: 'collections',
+      bundle: 'bundles',
+      subscription: 'subscriptions',
+    };
+    const destinationSection = sectionIdByKind[deepLink.kind];
+    const sectionVisible = normalizedSections.some(
+      section => section.id === destinationSection && section.isVisible,
+    );
+    const targetAvailable = deepLink.kind === 'collection'
+      ? Boolean(homepageCollections?.some(item => item.id === deepLink.id || item.slug === deepLink.id))
+      : deepLink.kind === 'bundle'
+        ? homepageBundles.some(item => item.id === deepLink.id || item.slug === deepLink.id)
+        : subscriptionPlans.some(plan => plan.isPublished !== false && plan.id === deepLink.id);
+
+    // Exact available targets are handled by the mounted shelf. Missing or
+    // writer-hidden targets fall back to the closest available public section.
+    if (sectionVisible && targetAvailable) return;
+
+    const fallbackId = deepLink.kind === 'collection'
+      ? 'home-curated-collections'
+      : deepLink.kind === 'bundle'
+        ? 'home-reading-bundles'
+        : 'home-reader-passes';
+    (document.getElementById(fallbackId) || document.getElementById('home-discovery'))
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    onDeepLinkHandled();
+  }, [
+    deepLink,
+    homepageBundles,
+    homepageCollections,
+    homepageLoaded,
+    normalizedSections,
+    onDeepLinkHandled,
+    subscriptionPlans,
+  ]);
 
   const scrollToDiscovery = () => {
     const target = document.getElementById('home-reader-passes')
@@ -219,6 +353,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
         onPurchaseBundle={onPurchaseBundle}
         onSelectCategory={onSelectCategory}
         onNavigate={onNavigate}
+        initialCollectionId={homepageLoaded && deepLink?.kind === 'collection' ? deepLink.id : null}
+        initialBundleId={homepageLoaded && deepLink?.kind === 'bundle' ? deepLink.id : null}
+        onInitialDestinationHandled={onDeepLinkHandled}
         heroSection={(
           <HomepageHero
             backgroundUrl={backgroundUrl}
@@ -236,6 +373,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
             plans={subscriptionPlans}
             config={homepageConfig}
             onChoosePlan={onPurchaseSubscription}
+            initialPlanId={homepageLoaded && deepLink?.kind === 'subscription' ? deepLink.id : null}
+            onInitialPlanHandled={onDeepLinkHandled}
           />
         )}
         newsletterSection={(
