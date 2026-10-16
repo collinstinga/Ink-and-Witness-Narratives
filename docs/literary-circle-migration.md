@@ -1,0 +1,100 @@
+# Literary Circle migration checkpoint
+
+Migration commands are intentionally staging-only. They refuse to connect
+unless `--environment=staging`, an exact `--expected-project`, and
+`--expected-affiliates=9` are supplied. They also refuse a process marked as
+production. Set `LITERARY_CIRCLE_PRODUCTION_PROJECT_IDS` to the comma-separated
+production project IDs as an additional deny-list. The known production project
+`ink-and-witness-narratives` is denied in code even when that environment
+variable is absent.
+
+`FIREBASE_PROJECT_ID` and `FIRESTORE_DATABASE_ID` must identify the staging
+target. These environment overrides take precedence over
+`firebase-applet-config.json`, and the migration validates the same resolved
+target that the Firebase server client opens. Do not rely on the
+`--environment=staging` label by itself.
+
+The backup command is read-only and may target staging or production. A
+production backup additionally requires `--allow-production-read-only`, the
+exact project ID, and the exact nine-account count. That flag never enables a
+database write.
+
+The backup contains personal and financial data. It is written under the
+git-ignored `data/backups/` directory with a timestamped backup ID. Do not
+commit, email, or copy it to an unapproved location.
+
+## Staging sequence
+
+Use staging credentials and replace the example project and backup path:
+
+```powershell
+npm run literary-circle:backup -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9
+
+npm run literary-circle:migrate:dry-run -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
+
+npm run literary-circle:migrate:apply -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
+```
+
+Before any eventual production migration, capture and verify the live records
+without enabling writes:
+
+```powershell
+npm run literary-circle:backup -- --environment=production --allow-production-read-only --expected-project=EXACT_PRODUCTION_PROJECT_ID --expected-affiliates=9
+```
+
+There is deliberately no production-apply flag in this checkpoint. Production
+write enablement is added only after the staging rehearsal and its idempotency
+verification have both passed.
+
+Run the dry-run command again with the same verified backup. A healthy repeat
+shows no membership or index changes, proving the migration is idempotent.
+
+## Backup scope and checks
+
+The snapshot contains every document from `affiliates`,
+`affiliate_commissions`, `affiliate_clicks`, `affiliate_payouts`,
+`affiliate_campaigns`, `affiliate_audit`, `affiliate_codes`,
+`affiliate_emails`, `affiliate_commission_outbox`, and
+`affiliate_attribution_claims`; only affiliate-attributed documents from
+`transactions`; and the `affiliate_settings` and
+`affiliate_literary_circle` documents from `site_configs`.
+
+`affiliate_sessions` is deliberately excluded because it contains revocable
+bearer credentials rather than historical programme data. The manifest records
+SHA-256 hashes, document counts, and financial/statistical sums. Apply verifies
+every file hash and summary, the Firestore target, the exact nine-account
+identity set, and live ledger contents before any write. After the transaction,
+it captures the datasets again and verifies that every backed-up account field,
+financial record, click, claim, transaction, configuration value, and other
+historical record is unchanged except for the explicitly allowed Literary
+Circle membership and same-owner index additions.
+
+## Apply checkpoint
+
+- Confirm the manifest reports exactly nine affiliates.
+- Confirm commission, payout, wallet, click, revenue, and transaction totals.
+- Resolve every referral-code or email-index ownership conflict; the script
+  aborts the entire transaction if any conflict exists.
+- Confirm the single `migration_markers/literary-circle-founding-affiliates-v1`
+  marker is complete after apply.
+- Confirm all nine accounts retain their original IDs, referral codes, fields,
+  balances, ledgers, and statistics and now have founding membership.
+- Keep payment providers in sandbox/test mode throughout staging validation.
+
+The apply transaction adds only missing Literary Circle membership defaults,
+forces permanent founding recognition, creates or completes index reservations
+only when unowned or owned by the same affiliate, and writes the resumable
+migration marker. It does not alter commission or payout ledgers. Restoration
+is an operator-controlled Firestore procedure; this change does not include an
+automatic restore command.
+
+## Commission policy continuity
+
+Tier commission settings remain proposals until the writer explicitly confirms
+an active policy and a current or future effective date. Each confirmed
+activation, replacement, or deactivation receives a new server-controlled
+version and an effective-dated snapshot. Delayed M-PESA settlements are priced
+against the highest policy version that was effective when the transaction
+occurred; completed commission records remain immutable. Subscription renewals
+fail closed unless the effective snapshot explicitly permits renewal
+commission.

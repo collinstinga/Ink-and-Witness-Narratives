@@ -38,16 +38,21 @@ import {
   AffiliateCampaign, 
   AffiliateSettings, 
   AffiliateAuditLogEntry,
-  Article
+  Article,
+  LiteraryCircleSettings
 } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
+import {
+  LiteraryCircleAdminPanel,
+  type LiteraryCircleMembershipAdminPatch,
+} from './LiteraryCircleAdminPanel.js';
 
 interface AffiliatesAdminTabProps {
   articles: Article[];
 }
 
-type AdminSubTab = 'overview' | 'affiliates' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
+type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
 
 export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
@@ -106,6 +111,9 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [settingsDirty, setSettingsDirty] = useState(false);
   const settingsDirtyRef = useRef(false);
   const summaryRequestIdRef = useRef(0);
+  const [literaryCircleSettings, setLiteraryCircleSettings] = useState<LiteraryCircleSettings | null>(null);
+  const [savingLiteraryCircleSettings, setSavingLiteraryCircleSettings] = useState(false);
+  const [savingLiteraryCircleAffiliateId, setSavingLiteraryCircleAffiliateId] = useState<string>();
 
   const updateSettingsForm = (patch: Partial<AffiliateSettings>) => {
     settingsDirtyRef.current = true;
@@ -126,9 +134,10 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     setError('');
 
     try {
-      const [res, freshSettings] = await Promise.all([
+      const [res, freshSettings, freshLiteraryCircle] = await Promise.all([
         api.getAdminAffiliatesSummary(),
-        isRefresh ? Promise.resolve(null) : api.getAdminAffiliateSettings()
+        isRefresh ? Promise.resolve(null) : api.getAdminAffiliateSettings(),
+        isRefresh ? Promise.resolve(null) : api.getAdminLiteraryCircleSettings()
       ]);
       if (requestId !== summaryRequestIdRef.current) return;
       const currentSettings = freshSettings || res.settings;
@@ -140,6 +149,11 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       // warm serverless instance.
       if (currentSettings && !settingsDirtyRef.current && !isRefresh) {
         setSettingsForm(currentSettings);
+      }
+      if (!isRefresh) {
+        setLiteraryCircleSettings(
+          freshLiteraryCircle?.settings || res.literaryCircleSettings || null
+        );
       }
     } catch (err: any) {
       if (requestId === summaryRequestIdRef.current) {
@@ -401,6 +415,44 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     }
   };
 
+  const handleSaveLiteraryCircleSettings = async (
+    nextSettings: LiteraryCircleSettings,
+    confirmCommissionPolicyActivation: boolean,
+  ): Promise<LiteraryCircleSettings> => {
+    setSavingLiteraryCircleSettings(true);
+    try {
+      const response = await api.updateAdminLiteraryCircleSettings(
+        nextSettings,
+        confirmCommissionPolicyActivation,
+      );
+      setLiteraryCircleSettings(response.settings);
+      setSummary(current => current
+        ? { ...current, literaryCircleSettings: response.settings }
+        : current);
+      return response.settings;
+    } finally {
+      setSavingLiteraryCircleSettings(false);
+    }
+  };
+
+  const handleUpdateLiteraryCircleMembership = async (
+    affiliateId: string,
+    patch: LiteraryCircleMembershipAdminPatch,
+  ): Promise<void> => {
+    setSavingLiteraryCircleAffiliateId(affiliateId);
+    try {
+      const response = await api.updateAdminAffiliateLiteraryCircle(affiliateId, patch);
+      setSummary(current => current ? {
+        ...current,
+        affiliates: current.affiliates.map(affiliate => (
+          affiliate.id === affiliateId ? response.affiliate : affiliate
+        )),
+      } : current);
+    } finally {
+      setSavingLiteraryCircleAffiliateId(undefined);
+    }
+  };
+
   // Filter affiliates
   const filteredAffiliates = (summary?.affiliates || []).filter((aff) => {
     const matchesSearch = 
@@ -500,6 +552,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         >
           <Users className="w-3.5 h-3.5" />
           <span>Affiliates ({summary?.totalAffiliates || 0})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('circle')}
+          className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+            activeSubTab === 'circle' ? 'bg-amber-950 text-amber-200 border border-amber-700/80 shadow-sm' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>Literary Circle</span>
         </button>
 
         <button
@@ -882,6 +944,24 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 </div>
               )}
             </div>
+          )}
+
+          {/* LITERARY CIRCLE MANAGEMENT */}
+          {activeSubTab === 'circle' && (
+            literaryCircleSettings ? (
+              <LiteraryCircleAdminPanel
+                settings={literaryCircleSettings}
+                affiliates={summary?.affiliates || []}
+                savingSettings={savingLiteraryCircleSettings}
+                savingAffiliateId={savingLiteraryCircleAffiliateId}
+                onSaveSettings={handleSaveLiteraryCircleSettings}
+                onUpdateMembership={handleUpdateLiteraryCircleMembership}
+              />
+            ) : (
+              <div className="rounded-2xl border border-amber-700/60 bg-amber-950/20 p-6 text-sm text-amber-200">
+                Literary Circle settings could not be loaded. Refresh the control center before making programme changes.
+              </div>
+            )
           )}
 
           {/* TAB 3: COMMISSIONS LEDGER */}

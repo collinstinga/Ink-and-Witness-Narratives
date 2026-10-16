@@ -47,6 +47,11 @@ import {
 import { api, clearAffiliateToken } from '../../utils/api.js';
 import { playCoinDropSound } from '../../utils/coinSound.js';
 import { AffiliateTermsViewer } from './AffiliateTermsViewer.js';
+import { LiteraryCircleMembershipOverview } from './LiteraryCircleMembershipOverview.js';
+import {
+  LiteraryCircleOnboardingPanel,
+  type LiteraryCircleOnboardingUpdate,
+} from './LiteraryCircleOnboardingPanel.js';
 import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/affiliateTerms.js';
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 
@@ -245,6 +250,18 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       setLoading(false);
       setRefreshing(false);
     }
+  };
+
+  const handleLiteraryCircleOnboardingUpdate = async (update: LiteraryCircleOnboardingUpdate) => {
+    await api.updateAffiliateLiteraryCircleOnboarding(update);
+    await loadDashboard(true);
+  };
+
+  const handleOpenComplimentaryCatalogue = () => {
+    if (typeof window !== 'undefined') {
+      window.location.hash = 'all-pieces';
+    }
+    onClose();
   };
 
   const handleTestCoinDrop = () => {
@@ -742,6 +759,29 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
               {/* TAB 1: OVERVIEW */}
               {activeTab === 'overview' && (
                 <div className="space-y-6 animate-in fade-in">
+                  {data?.literaryCircle?.enabled && (
+                    <>
+                      <LiteraryCircleMembershipOverview
+                        summary={data.literaryCircle}
+                        affiliateName={affiliate?.name || 'Literary Partner'}
+                        activeCommissionRate={commissionRate}
+                        onOpenCatalogue={handleOpenComplimentaryCatalogue}
+                      />
+                      <LiteraryCircleOnboardingPanel
+                        onboarding={data.literaryCircle.onboarding}
+                        affiliateCode={affiliateCode}
+                        recommendedPieces={articles
+                          .filter(article => !article.status || article.status === 'published')
+                          .slice(0, 3)
+                          .map(article => ({ id: article.id, title: article.title }))}
+                        community={data.literaryCircle.community}
+                        onUpdate={handleLiteraryCircleOnboardingUpdate}
+                        onOpenCatalogue={handleOpenComplimentaryCatalogue}
+                        onOpenLinkBuilder={() => setActiveTab('links')}
+                      />
+                    </>
+                  )}
+
                   {/* KPI Metrics Grid */}
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
                     {/* Clicks */}

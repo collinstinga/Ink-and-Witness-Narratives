@@ -63,6 +63,21 @@ const mpesaMocks = vi.hoisted(() => ({
 
 vi.mock('./src/server/mpesa.js', () => mpesaMocks);
 
+const subscriptionStoreMocks = vi.hoisted(() => ({
+  getPlan: vi.fn(),
+  createPurchaseSnapshot: vi.fn(),
+  getReaderSubscription: vi.fn(),
+  getActiveReaderSubscription: vi.fn(),
+  listPublicPlans: vi.fn(async () => []),
+  getReaderSubscriptionSummary: vi.fn(),
+  toSummary: vi.fn((value: unknown) => value)
+}));
+
+vi.mock('./src/server/subscriptionStore.js', () => ({
+  subscriptionStore: subscriptionStoreMocks,
+  SubscriptionPlanConflictError: class SubscriptionPlanConflictError extends Error {}
+}));
+
 const attributionClaimMocks = vi.hoisted(() => ({
   claimAffiliateAttribution: vi.fn(),
   getAffiliateAttributionClaimDocumentId: vi.fn(() => 'c'.repeat(64)),
@@ -148,6 +163,27 @@ describe('public payment route security', () => {
     });
     attributionClaimMocks.claimAffiliateAttribution.mockResolvedValue('claimed');
     attributionClaimMocks.releaseAffiliateAttributionClaim.mockResolvedValue(undefined);
+    subscriptionStoreMocks.getPlan.mockResolvedValue({
+      id: 'first-chapter-3-months',
+      name: 'The First Chapter',
+      description: 'Reader Pass',
+      priceKes: 500,
+      durationMonths: 3,
+      renewable: true,
+      isPublished: true,
+      order: 1,
+      createdAt: '2026-09-01T00:00:00.000Z',
+      updatedAt: '2026-09-01T00:00:00.000Z'
+    });
+    subscriptionStoreMocks.createPurchaseSnapshot.mockReturnValue({
+      version: 1,
+      planId: 'first-chapter-3-months',
+      planName: 'The First Chapter',
+      priceKes: 500,
+      durationMonths: 3,
+      renewable: true
+    });
+    subscriptionStoreMocks.getReaderSubscription.mockResolvedValue(null);
     storeMocks.getFreshComments.mockResolvedValue([]);
     storeMocks.getFreshCommentsPage.mockResolvedValue({ comments: [], hasMore: false, nextCursor: null });
     storeMocks.getFreshReportedComments.mockResolvedValue([]);
@@ -508,6 +544,138 @@ describe('public payment route security', () => {
     expect(response.headers.get('set-cookie')).toMatch(/iw_affiliate_attribution=;/);
     expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
       affiliateCode: 'partner_7',
+      campaignCode: undefined
+    }));
+  });
+
+  it('binds a signed one-time referral to a first Reader Pass payment', async () => {
+    storeMocks.getAuthSession.mockResolvedValueOnce({
+      sessionId: adminSessionToken,
+      userId: 'reader_1',
+      email: 'reader@example.test',
+      name: 'Reader One',
+      role: 'client',
+      expiresAt: Date.now() + 60_000
+    });
+    const signed = createAffiliateAttributionCookieValue({
+      ref: 'PARTNER_7',
+      campaign: 'PASS_LAUNCH',
+      articleId: 'article_1'
+    });
+
+    const response = await fetch(`${baseUrl}/api/subscriptions/checkout/mpesa`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+        cookie: `iw_session=${adminSessionToken}; iw_affiliate_attribution=${signed}`
+      },
+      body: JSON.stringify({
+        planId: 'first-chapter-3-months',
+        phoneNumber: '0712345678',
+        expectedPlanName: 'The First Chapter',
+        expectedPriceKes: 500,
+        expectedDurationMonths: 3,
+        expectedRenewable: true
+      })
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body.affiliateAttributionConsumed).toBe(true);
+    expect(response.headers.get('set-cookie')).toMatch(/iw_affiliate_attribution=;/);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      articleId: 'subscription:first-chapter-3-months',
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionRenewal: false,
+      affiliateCode: 'partner_7',
+      campaignCode: 'pass_launch',
+      affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'c'.repeat(64),
+      userId: 'reader_1',
+      userEmail: 'reader@example.test'
+    }));
+  });
+
+  it('marks a later Reader Pass checkout as a renewal without accepting a raw affiliate code', async () => {
+    storeMocks.getAuthSession.mockResolvedValueOnce({
+      sessionId: adminSessionToken,
+      userId: 'reader_1',
+      email: 'reader@example.test',
+      name: 'Reader One',
+      role: 'client',
+      expiresAt: Date.now() + 60_000
+    });
+    subscriptionStoreMocks.getReaderSubscription.mockResolvedValueOnce({
+      id: 'reader-subscription-1',
+      userId: 'reader_1',
+      userEmail: 'reader@example.test',
+      status: 'expired',
+      activePlanId: 'first-chapter-3-months',
+      activePlanName: 'The First Chapter',
+      renewable: true,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2026-04-01T00:00:00.000Z',
+      lastRenewedAt: '2026-01-01T00:00:00.000Z',
+      lastCheckoutRequestId: 'checkout_old',
+      renewalCount: 0,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    });
+
+    const forged = await fetch(`${baseUrl}/api/subscriptions/checkout/mpesa`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+        cookie: `iw_session=${adminSessionToken}`
+      },
+      body: JSON.stringify({
+        planId: 'first-chapter-3-months',
+        phoneNumber: '0712345678',
+        expectedPlanName: 'The First Chapter',
+        expectedPriceKes: 500,
+        expectedDurationMonths: 3,
+        expectedRenewable: true,
+        affiliateCode: 'FORGED_PARTNER'
+      })
+    });
+    expect(forged.status).toBe(400);
+    expect(mpesaMocks.initiateStkPush).not.toHaveBeenCalled();
+
+    storeMocks.getAuthSession.mockResolvedValueOnce({
+      sessionId: adminSessionToken,
+      userId: 'reader_1',
+      email: 'reader@example.test',
+      name: 'Reader One',
+      role: 'client',
+      expiresAt: Date.now() + 60_000
+    });
+    const response = await fetch(`${baseUrl}/api/subscriptions/checkout/mpesa`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+        cookie: `iw_session=${adminSessionToken}`
+      },
+      body: JSON.stringify({
+        planId: 'first-chapter-3-months',
+        phoneNumber: '0712345678',
+        expectedPlanName: 'The First Chapter',
+        expectedPriceKes: 500,
+        expectedDurationMonths: 3,
+        expectedRenewable: true
+      })
+    });
+
+    expect(response.status).toBe(200);
+    expect(mpesaMocks.initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
+      subscriptionRenewal: true,
+      affiliateCode: undefined,
       campaignCode: undefined
     }));
   });

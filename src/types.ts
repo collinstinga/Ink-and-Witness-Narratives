@@ -918,6 +918,8 @@ export interface PaymentTransaction {
   subscriptionPlanName?: string;
   subscriptionDurationMonths?: number;
   subscriptionRenewable?: boolean;
+  /** True when this payment extends or replaces an existing Reader Pass. */
+  subscriptionRenewal?: boolean;
   subscriptionPlanVersion?: number;
   subscriptionPeriodStartsAt?: string;
   subscriptionExpiresAt?: string;
@@ -1202,6 +1204,93 @@ export interface AffiliatePayoutDetails {
   notes?: string;
 }
 
+export type LiteraryCircleComplimentaryAccessStatus = 'active' | 'suspended' | 'revoked';
+export type LiteraryCircleTierSource = 'default' | 'monthly_performance' | 'manual';
+export type LiteraryCircleOnboardingStatus = 'not_started' | 'in_progress' | 'completed' | 'dismissed';
+export type LiteraryCircleCommissionPolicyStatus = 'draft' | 'active';
+
+export interface LiteraryCircleTierDefinition {
+  id: string;
+  name: string;
+  description: string;
+  rank: number;
+  monthlyVerifiedSalesThreshold: number;
+  proposedCommissionRate: number;
+  enabled: boolean;
+  badgeLabel?: string;
+}
+
+export interface AffiliateLiteraryCircleMembership {
+  schemaVersion: 1;
+  memberSince: string;
+  foundingMember: boolean;
+  foundingRecognizedAt?: string;
+  complimentaryAccess: {
+    status: LiteraryCircleComplimentaryAccessStatus;
+    scope: 'all_published';
+    grantedAt?: string;
+    updatedAt: string;
+    updatedBy: string;
+    reason?: string;
+  };
+  tier: {
+    id: string;
+    assignedAt: string;
+    source: LiteraryCircleTierSource;
+    qualificationPeriod?: string;
+    policyVersion?: number;
+  };
+  onboarding: {
+    version: number;
+    audience: 'existing_upgrade' | 'new_affiliate';
+    status: LiteraryCircleOnboardingStatus;
+    completedStepIds: string[];
+    welcomeRequired: boolean;
+    startedAt?: string;
+    completedAt?: string;
+    introductoryPeriodEndsAt?: string;
+  };
+}
+
+export interface LiteraryCircleSettings {
+  schemaVersion: 1;
+  enabled: boolean;
+  defaultTierId: string;
+  qualificationTimezone: 'Africa/Nairobi';
+  qualificationEffectiveFrom?: string;
+  introductoryPeriodDays: number;
+  onboardingVersion: number;
+  tiers: LiteraryCircleTierDefinition[];
+  commissionPolicy: {
+    status: LiteraryCircleCommissionPolicyStatus;
+    version: number;
+    effectiveAt?: string;
+    subscriptionRenewalsEligible: boolean;
+  };
+  /** Server-managed, effective-dated snapshots used for delayed settlement. */
+  commissionPolicyHistory?: LiteraryCircleCommissionPolicySnapshot[];
+  community: {
+    enabled: boolean;
+    title: string;
+    description: string;
+    whatsappInviteUrl?: string;
+  };
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface LiteraryCircleCommissionPolicySnapshot {
+  version: number;
+  status: LiteraryCircleCommissionPolicyStatus;
+  effectiveAt: string;
+  defaultTierId: string;
+  qualificationEffectiveFrom?: string;
+  tiers: LiteraryCircleTierDefinition[];
+  subscriptionRenewalsEligible: boolean;
+  confirmedAt: string;
+  confirmedBy: string;
+}
+
 export interface AffiliateAccount {
   id: string;
   affiliateCode: string; // e.g. MIKE123
@@ -1233,6 +1322,10 @@ export interface AffiliateAccount {
   updatedAt: string;
   lastLoginAt?: string;
   lastActivityAt?: string;
+  lastReferralAt?: string;
+  lastVerifiedSaleAt?: string;
+  lastDashboardAt?: string;
+  literaryCircle?: AffiliateLiteraryCircleMembership;
   /** Private revocation generation. Never include this in browser responses. */
   sessionVersion?: string;
 }
@@ -1276,6 +1369,12 @@ export interface AffiliateSaleCommission {
     reviewed?: boolean;
   };
   campaignCode?: string;
+  purchaseKind?: 'piece' | 'bundle' | 'subscription';
+  subscriptionPlanId?: string;
+  subscriptionRenewal?: boolean;
+  commissionRateSource?: 'campaign' | 'piece_override' | 'affiliate_override' | 'literary_circle_tier' | 'global_default';
+  literaryCircleTierId?: string;
+  literaryCirclePolicyVersion?: number;
   createdAt: string;
   approvedAt?: string;
   paidAt?: string;
@@ -1384,6 +1483,23 @@ export interface AffiliateDashboardStats {
     attributionDays: number;
     minPayoutThresholdKes: number;
   };
+  literaryCircle?: LiteraryCircleDashboardSummary;
+}
+
+export interface LiteraryCircleDashboardSummary {
+  enabled: boolean;
+  foundingMember: boolean;
+  complimentaryAccessStatus: LiteraryCircleComplimentaryAccessStatus;
+  currentTier: LiteraryCircleTierDefinition;
+  nextTier?: LiteraryCircleTierDefinition;
+  monthlyVerifiedSales: number;
+  lifetimeVerifiedSales: number;
+  progressToNextTierPercent: number;
+  salesToNextTier: number;
+  onboarding: AffiliateLiteraryCircleMembership['onboarding'];
+  introductoryPeriodActive: boolean;
+  commissionPolicyStatus: LiteraryCircleCommissionPolicyStatus;
+  community: LiteraryCircleSettings['community'];
 }
 
 export interface AdminAffiliatesSummary {
@@ -1406,6 +1522,9 @@ export interface AdminAffiliatesSummary {
   settings: AffiliateSettings;
   auditLogs: AffiliateAuditLogEntry[];
   flaggedCount: number;
+  affiliatesWithLifetimeSales?: number;
+  affiliatesWithoutSales?: number;
+  literaryCircleSettings?: LiteraryCircleSettings;
   topAffiliates: {
     id: string;
     name: string;

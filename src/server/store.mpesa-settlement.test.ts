@@ -139,6 +139,7 @@ function pendingSubscriptionTransaction(id: string, overrides: Record<string, un
     subscriptionPlanName: 'The First Chapter',
     subscriptionDurationMonths: 3,
     subscriptionRenewable: true,
+    subscriptionRenewal: false,
     subscriptionPlanVersion: 1,
     amount: 500,
     userId: 'reader_subscription',
@@ -263,6 +264,7 @@ describe('atomic M-Pesa settlement', () => {
       status: 'CONFIRMED',
       purchaseKind: 'subscription',
       subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionRenewal: false,
       subscriptionPeriodStartsAt: transaction.settledAt,
       subscriptionExpiresAt: addUtcCalendarMonths(transaction.settledAt, 3),
     });
@@ -315,8 +317,12 @@ describe('atomic M-Pesa settlement', () => {
       renewalCount: 3,
     });
     expect(firestoreMock.documents.get(`transactions/${checkoutId}`)).toMatchObject({
+      subscriptionRenewal: true,
       subscriptionPeriodStartsAt: '2099-01-31T08:30:00.000Z',
       subscriptionExpiresAt: '2099-04-30T08:30:00.000Z',
+    });
+    expect(firestoreMock.documents.get(`subscription_activations/${checkoutId}`)).toMatchObject({
+      subscriptionRenewal: true
     });
   });
 

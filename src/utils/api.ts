@@ -38,7 +38,11 @@ import {
   ContentBundle,
   PieceReview,
   ReaderSubscriptionSummary,
-  SubscriptionPlan
+  SubscriptionPlan,
+  AffiliateLiteraryCircleMembership,
+  LiteraryCircleOnboardingStatus,
+  LiteraryCircleSettings,
+  LiteraryCircleComplimentaryAccessStatus
 } from '../types.js';
 import { clearReferral, getActiveReferral } from './affiliateReferral.js';
 
@@ -2377,6 +2381,47 @@ export const api = {
     );
   },
 
+  async updateAffiliateLiteraryCircleOnboarding(data: {
+    completedStepId?: string;
+    status?: LiteraryCircleOnboardingStatus;
+  }): Promise<{
+    success: boolean;
+    onboarding?: AffiliateLiteraryCircleMembership['onboarding'];
+    dashboard?: AffiliateDashboardData;
+    message?: string;
+  }> {
+    const token = getAffiliateToken();
+    if (!token) {
+      throw new Error('Please log in to update your Literary Circle welcome progress.');
+    }
+    return safeFetchJson(
+      '/api/affiliate/literary-circle/onboarding',
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-affiliate-token': token
+        },
+        body: JSON.stringify(data)
+      },
+      'Failed to save your Literary Circle welcome progress.'
+    );
+  },
+
+  async getAffiliateLiteraryCircleLibrary(): Promise<{
+    success: boolean;
+    accessSource: 'AFFILIATE_COMPLIMENTARY';
+    articles: Article[];
+  }> {
+    const token = getAffiliateToken();
+    if (!token) throw new Error('Please log in to open the Literary Circle library.');
+    return safeFetchJson(
+      '/api/affiliate/literary-circle/library',
+      { headers: { 'x-affiliate-token': token } },
+      'The Literary Circle library could not be loaded. Please retry.'
+    );
+  },
+
   async getAffiliatePayoutSettings(): Promise<{
     success: boolean;
     payoutSettings: any;
@@ -2592,6 +2637,67 @@ export const api = {
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load affiliates summary.'
+    );
+  },
+
+  async getAdminLiteraryCircleSettings(): Promise<{
+    success: boolean;
+    settings: LiteraryCircleSettings;
+  }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/literary-circle/settings',
+      {
+        cache: 'no-store',
+        headers: { 'x-admin-token': activeToken || '' }
+      },
+      'Failed to load Literary Circle settings.'
+    );
+  },
+
+  async updateAdminLiteraryCircleSettings(
+    settings: LiteraryCircleSettings,
+    confirmCommissionPolicyActivation = false
+  ): Promise<{ success: boolean; settings: LiteraryCircleSettings; message: string }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/literary-circle/settings',
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify({
+          ...settings,
+          ...(confirmCommissionPolicyActivation ? { confirmCommissionPolicyActivation: true } : {})
+        })
+      },
+      'Failed to save Literary Circle settings.'
+    );
+  },
+
+  async updateAdminAffiliateLiteraryCircle(
+    id: string,
+    patch: {
+      complimentaryAccessStatus?: LiteraryCircleComplimentaryAccessStatus;
+      complimentaryAccessReason?: string;
+      manualTierId?: string | null;
+      foundingMember?: true;
+    }
+  ): Promise<{ success: boolean; affiliate: AffiliatePublicProfile; message: string }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      `/api/admin/affiliates/${encodeURIComponent(id)}/literary-circle`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify(patch)
+      },
+      'Failed to update Literary Circle membership.'
     );
   },
 

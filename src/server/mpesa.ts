@@ -304,6 +304,7 @@ export interface InitiateStkPushParams {
   subscriptionPlanName?: string;
   subscriptionDurationMonths?: number;
   subscriptionRenewable?: boolean;
+  subscriptionRenewal?: boolean;
   subscriptionPlanVersion?: number;
   isTip?: boolean;
   type?: 'PURCHASE' | 'TIP';
@@ -353,6 +354,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     subscriptionPlanName,
     subscriptionDurationMonths,
     subscriptionRenewable,
+    subscriptionRenewal,
     subscriptionPlanVersion,
     isTip = false,
     type: requestedType,
@@ -471,6 +473,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     subscriptionPlanName: purchaseKind === 'subscription' ? subscriptionPlanName : undefined,
     subscriptionDurationMonths: purchaseKind === 'subscription' ? subscriptionDurationMonths : undefined,
     subscriptionRenewable: purchaseKind === 'subscription' ? subscriptionRenewable : undefined,
+    subscriptionRenewal: purchaseKind === 'subscription' ? subscriptionRenewal : undefined,
     subscriptionPlanVersion: purchaseKind === 'subscription' ? subscriptionPlanVersion : undefined,
     phoneNumber: formattedPhone,
     amount: cleanAmount,

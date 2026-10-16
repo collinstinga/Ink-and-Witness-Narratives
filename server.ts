@@ -51,6 +51,11 @@ import {
   AffiliateSettingsValidationError,
   sanitizeAffiliateForResponse
 } from "./src/server/affiliateStore.js";
+import {
+  isAffiliateComplimentaryAccessActive,
+  isLiteraryCircleCommissionPolicyChange,
+  LiteraryCircleValidationError
+} from "./src/server/literaryCircle.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
   AFFILIATE_CLICK_DEDUP_COOKIE_NAME,
@@ -984,6 +989,18 @@ async function requireAffiliateAuth(req: Request, res: Response, next: NextFunct
   }
 }
 
+async function resolveFreshAffiliateComplimentaryAccess(req: Request, res: Response): Promise<boolean> {
+  const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string | undefined;
+  if (!token) return false;
+  const affiliate = await store.affiliates.verifyAffiliateSession(token, { forceFresh: true });
+  if (!affiliate) {
+    clearAffiliateSessionCookie(res);
+    return false;
+  }
+  const settings = await store.affiliates.getLiteraryCircleSettingsFresh();
+  return settings.enabled && isAffiliateComplimentaryAccessActive(affiliate);
+}
+
 // Lazy Gemini SDK initialization
 let genAIClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
@@ -1879,6 +1896,7 @@ export async function createApp() {
     const isPaid = article.isPaid !== false;
     const priceKes = resolveArticlePriceKes(article, store.getMpesaSettings().defaultPriceKes || 1050);
     let isUnlocked = !isPaid || isAdmin;
+    let complimentaryAffiliateAccess = false;
 
     if (!isUnlocked && token) {
       let tokenData;
@@ -1910,6 +1928,20 @@ export async function createApp() {
       }
     }
 
+    // Literary Circle access is an authenticated programme privilege, not a
+    // purchase. Resolve the affiliate session from Firestore on every protected
+    // content request so a writer suspension or revocation takes effect without
+    // minting a reader licence, transaction, or commission record.
+    if (!isUnlocked) {
+      try {
+        complimentaryAffiliateAccess = await resolveFreshAffiliateComplimentaryAccess(req, res);
+        if (complimentaryAffiliateAccess) isUnlocked = true;
+      } catch (error) {
+        console.error('[Literary Circle] Complimentary access could not be verified.', error);
+        return res.status(503).json({ error: 'Literary Circle access is temporarily unavailable. Please retry.' });
+      }
+    }
+
     const {
       coverImageOriginal: _privateOriginal,
       behindThePiece: privateBehindThePiece,
@@ -1924,6 +1956,7 @@ export async function createApp() {
         ? { behindThePiece: privateBehindThePiece }
         : {}),
       isUnlocked,
+      ...(complimentaryAffiliateAccess ? { accessSource: 'AFFILIATE_COMPLIMENTARY' } : {}),
       isPaid,
       priceKes,
       prices: { ...(article.prices || {}), KES: priceKes },
@@ -2226,6 +2259,8 @@ export async function createApp() {
     publicWriteValidators.subscriptionCheckout,
     requireAuth,
     async (req: Request, res: Response) => {
+      let reservedAttribution: VerifiedAffiliateAttribution | null = null;
+      let providerRequestStarted = false;
       try {
         const user = (req as any).user as { id: string; email: string; role: string } | null;
         if (!user || user.role !== 'client') {
@@ -2254,9 +2289,9 @@ export async function createApp() {
             error: 'This Reader Pass changed after the page loaded. Reload the latest price and duration before paying.'
           });
         }
+        const existingSubscription = await subscriptionStore.getReaderSubscription(user.id);
         if (!snapshot.renewable) {
-          const activeSubscription = await subscriptionStore.getActiveReaderSubscription(user.id);
-          if (activeSubscription?.activePlanId === snapshot.planId) {
+          if (existingSubscription?.status === 'active' && existingSubscription.activePlanId === snapshot.planId) {
             return res.status(409).json({
               success: false,
               code: 'SUBSCRIPTION_RENEWAL_DISABLED',
@@ -2265,31 +2300,68 @@ export async function createApp() {
           }
         }
         const formattedPhone = formatKenyanPhone(req.body.phoneNumber);
+        const checkoutArticleId = `subscription:${snapshot.planId}`;
+        const attributionResolution = await reserveCheckoutAffiliateAttribution(
+          req,
+          res,
+          checkoutArticleId,
+          'mpesa'
+        );
+        if (attributionResolution.state === 'in_progress') {
+          return res.status(409).json({
+            success: false,
+            code: 'AFFILIATE_CHECKOUT_IN_PROGRESS',
+            error: 'This referral has already started a checkout. Retry to continue without duplicate affiliate attribution.',
+            affiliateAttributionConsumed: false
+          });
+        }
+        const trustedAttribution = attributionResolution.attribution;
+        reservedAttribution = trustedAttribution;
+
+        providerRequestStarted = true;
         const stkResult = await initiateStkPush({
           phoneNumber: formattedPhone,
           amount: snapshot.priceKes,
           accountReference: snapshot.planName,
-          articleId: `subscription:${snapshot.planId}`,
+          articleId: checkoutArticleId,
           articleTitle: snapshot.planName,
           purchaseKind: 'subscription',
           subscriptionPlanId: snapshot.planId,
           subscriptionPlanName: snapshot.planName,
           subscriptionDurationMonths: snapshot.durationMonths,
           subscriptionRenewable: snapshot.renewable,
+          subscriptionRenewal: Boolean(existingSubscription),
           subscriptionPlanVersion: snapshot.version,
           type: 'PURCHASE',
           currency: 'KES',
           originalAmount: snapshot.priceKes,
           exchangeRate: 1,
           exchangeRateTimestamp: new Date().toISOString(),
+          affiliateCode: trustedAttribution?.ref,
+          campaignCode: trustedAttribution?.campaign,
+          affiliateAttributionVersion: trustedAttribution ? 2 : undefined,
+          affiliateAttributionClaimId: trustedAttribution
+            ? getAffiliateAttributionClaimDocumentId(trustedAttribution.attributionId)
+            : undefined,
+          affiliateAttributionAt: trustedAttribution
+            ? new Date(trustedAttribution.issuedAt).toISOString()
+            : undefined,
+          affiliateAttributionExpiresAt: trustedAttribution
+            ? new Date(trustedAttribution.expiresAt).toISOString()
+            : undefined,
           userId: user.id,
           userEmail: user.email
         });
         if (!stkResult.success || !stkResult.checkoutRequestId || !stkResult.paymentCapability) {
+          await releaseKnownFailedAffiliateClaim(reservedAttribution);
+          reservedAttribution = null;
           return res.status(400).json({
             success: false,
             error: stkResult.error || 'Safaricom could not start this Reader Pass payment.'
           });
+        }
+        if (trustedAttribution) {
+          clearAffiliateAttributionCookie(res);
         }
         res.setHeader('Cache-Control', 'no-store');
         return res.json({
@@ -2307,9 +2379,13 @@ export async function createApp() {
           amount: snapshot.priceKes,
           currency: 'KES',
           phoneNumber: formattedPhone,
+          affiliateAttributionConsumed: attributionResolution.clearClientReferral,
           live: true
         });
       } catch (error: any) {
+        if (reservedAttribution && !providerRequestStarted) {
+          await releaseKnownFailedAffiliateClaim(reservedAttribution);
+        }
         const status = error instanceof SubscriptionValidationError ? 400 : 500;
         console.error('[Reader Passes] Checkout could not be initiated.', error);
         return res.status(status).json({
@@ -5986,6 +6062,69 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/stats", requireAffiliateAuth, handleGetAffiliateDashboard);
   app.get("/api/affiliate/overview", requireAffiliateAuth, handleGetAffiliateDashboard);
 
+  // Affiliate: persist the guided Literary Circle welcome without allowing a
+  // browser to alter membership, access, tier, or financial fields.
+  app.put("/api/affiliate/literary-circle/onboarding", requireAffiliateAuth, async (req: Request, res: Response) => {
+    try {
+      const affiliate = (req as any).affiliate;
+      const updated = await store.affiliates.updateLiteraryCircleOnboarding(
+        affiliate.id,
+        {
+          ...(Object.prototype.hasOwnProperty.call(req.body || {}, 'completedStepId')
+            ? { completedStepId: req.body.completedStepId }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(req.body || {}, 'status')
+            ? { status: req.body.status }
+            : {})
+        },
+        `Affiliate (${affiliate.name})`
+      );
+      const dashboard = store.affiliates.getAffiliateDashboard(updated.id);
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({
+        success: true,
+        onboarding: updated.literaryCircle?.onboarding,
+        dashboard: projectAffiliateDashboard(dashboard)
+      });
+    } catch (err: any) {
+      return res.status(400).json({
+        success: false,
+        error: err.message || 'Literary Circle welcome progress could not be saved.'
+      });
+    }
+  });
+
+  // Affiliate: compact complimentary library. The paid bodies remain on the
+  // single-piece route, where access is force-refreshed again before release.
+  app.get("/api/affiliate/literary-circle/library", requireAffiliateAuth, async (req: Request, res: Response) => {
+    try {
+      if (!await resolveFreshAffiliateComplimentaryAccess(req, res)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Complimentary Literary Circle access is not active for this account.'
+        });
+      }
+      const articles = await store.getFreshArticles(false, true);
+      const defaultPriceKes = store.getMpesaSettings().defaultPriceKes || 1050;
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({
+        success: true,
+        accessSource: 'AFFILIATE_COMPLIMENTARY',
+        articles: articles.map(article => ({
+          ...toPublicArticleSummary(article, defaultPriceKes),
+          isUnlocked: true,
+          accessSource: 'AFFILIATE_COMPLIMENTARY'
+        }))
+      });
+    } catch (err) {
+      console.error('[Literary Circle] Complimentary library could not be loaded.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'The Literary Circle library is temporarily unavailable. Please retry.'
+      });
+    }
+  });
+
   // Affiliate: Payout Settings (GET)
   const handleGetPayoutSettings = (req: Request, res: Response) => {
     try {
@@ -6258,6 +6397,95 @@ ${currentDraft || prompt}
 
   app.post("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
   app.put("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
+
+  // Admin: Literary Circle programme policy. It is intentionally isolated
+  // from legacy affiliate settings, and tier commission rates stay proposals
+  // until the writer explicitly confirms activation with an effective date.
+  app.get("/api/admin/affiliates/literary-circle/settings", requireAdminAuth, async (_req: Request, res: Response) => {
+    try {
+      const settings = await store.affiliates.getLiteraryCircleSettingsFresh();
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ success: true, settings });
+    } catch (err) {
+      console.error('[Literary Circle] Failed to load current settings.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Literary Circle settings could not be loaded right now. Please retry.'
+      });
+    }
+  });
+
+  app.put("/api/admin/affiliates/literary-circle/settings", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const current = await store.affiliates.getLiteraryCircleSettingsFresh();
+      const requestedPolicyStatus = req.body?.commissionPolicy?.status;
+      const policyChanged = isLiteraryCircleCommissionPolicyChange(current, req.body);
+      const financiallyActiveChange = policyChanged && (
+        current.commissionPolicy.status === 'active'
+        || requestedPolicyStatus === 'active'
+      );
+      if (
+        financiallyActiveChange
+        && req.body?.confirmCommissionPolicyActivation !== true
+      ) {
+        return res.status(409).json({
+          success: false,
+          code: 'COMMISSION_POLICY_CONFIRMATION_REQUIRED',
+          error: 'Confirm this commission-policy change and its effective date before publishing it.'
+        });
+      }
+      const { confirmCommissionPolicyActivation: _confirmation, ...settingsValue } = req.body || {};
+      const settings = await store.affiliates.saveLiteraryCircleSettings(settingsValue, 'Admin (Jake)');
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({
+        success: true,
+        settings,
+        message: settings.commissionPolicy.status === 'active'
+          ? 'Literary Circle settings saved. The confirmed commission policy will apply from its effective date.'
+          : 'Literary Circle settings saved. Proposed tier commissions remain in draft.'
+      });
+    } catch (err: any) {
+      if (err instanceof LiteraryCircleValidationError) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      console.error('[Literary Circle] Failed to persist settings.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Literary Circle settings could not be saved right now. Please retry.'
+      });
+    }
+  });
+
+  app.put("/api/admin/affiliates/:id/literary-circle", requireAdminAuth, async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const patch = {
+        ...(Object.prototype.hasOwnProperty.call(req.body || {}, 'complimentaryAccessStatus')
+          ? { complimentaryAccessStatus: req.body.complimentaryAccessStatus }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(req.body || {}, 'complimentaryAccessReason')
+          ? { complimentaryAccessReason: req.body.complimentaryAccessReason }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(req.body || {}, 'manualTierId')
+          ? { manualTierId: req.body.manualTierId }
+          : {}),
+        ...(req.body?.foundingMember === true ? { foundingMember: true as const } : {})
+      };
+      const affiliate = await store.affiliates.updateLiteraryCircleMembership(id, patch, 'Admin (Jake)');
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({
+        success: true,
+        affiliate: sanitizeAffiliateForResponse(affiliate),
+        message: `Literary Circle membership updated for ${affiliate.name}.`
+      });
+    } catch (err: any) {
+      const status = /not found/i.test(String(err?.message || '')) ? 404 : 400;
+      return res.status(status).json({
+        success: false,
+        error: err.message || 'Literary Circle membership could not be updated.'
+      });
+    }
+  });
 
   // Admin: Create Affiliate
   app.post("/api/admin/affiliates", requireAdminAuth, async (req: Request, res: Response) => {

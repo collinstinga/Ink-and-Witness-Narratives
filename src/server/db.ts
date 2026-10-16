@@ -4,26 +4,41 @@ import fs from 'fs';
 import path from 'path';
 
 let dbInstance: Firestore | null = null;
+const SERVER_FIREBASE_APP_NAME = 'ink-witness-server-firestore';
 
-function loadFirebaseConfig(): any {
-  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+export interface FirestoreTargetConfig {
+  projectId: string;
+  firestoreDatabaseId: string;
+}
+
+/**
+ * Resolve the exact target used by getDb(). Environment overrides take
+ * precedence so maintenance scripts cannot validate one project while the
+ * Firebase client silently opens the project named in the checked-in config.
+ */
+export function resolveFirestoreTargetConfig(cwd = process.cwd()): FirestoreTargetConfig {
+  const configPath = path.join(cwd, 'firebase-applet-config.json');
+  let fileConfig: { projectId?: string; firestoreDatabaseId?: string } = {};
   if (fs.existsSync(configPath)) {
     try {
-      return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as typeof fileConfig;
     } catch (error) {
       console.warn('[Firestore] Failed to parse firebase-applet-config.json:', error);
     }
   }
-  return {
-    projectId: process.env.FIREBASE_PROJECT_ID || 'ink-and-witness-narratives',
-    firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || '(default)'
-  };
+  const projectId = process.env.FIREBASE_PROJECT_ID?.trim()
+    || fileConfig.projectId?.trim()
+    || 'ink-and-witness-narratives';
+  const firestoreDatabaseId = process.env.FIRESTORE_DATABASE_ID?.trim()
+    || fileConfig.firestoreDatabaseId?.trim()
+    || '(default)';
+  return { projectId, firestoreDatabaseId };
 }
 
 export function getDb(): Firestore {
   if (dbInstance) return dbInstance;
 
-  const config = loadFirebaseConfig();
+  const config = resolveFirestoreTargetConfig();
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   if (process.env.VERCEL && !rawServiceAccount) {
     throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is required on Vercel');
@@ -40,10 +55,14 @@ export function getDb(): Firestore {
     credential = applicationDefault();
   }
 
-  const app = getApps()[0] || initializeApp({
+  const existingApp = getApps().find(candidate => candidate.name === SERVER_FIREBASE_APP_NAME);
+  if (existingApp?.options.projectId && existingApp.options.projectId !== config.projectId) {
+    throw new Error('Firebase server app is already bound to a different project.');
+  }
+  const app = existingApp || initializeApp({
     credential,
     projectId: config.projectId
-  });
+  }, SERVER_FIREBASE_APP_NAME);
   const databaseId = config.firestoreDatabaseId;
   dbInstance = databaseId && databaseId !== '(default)'
     ? getFirestore(app, databaseId)
@@ -59,6 +78,16 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
     await getDb().collection(collectionName).doc(docId).set(sanitizeForFirestore(data), { merge: true });
   } catch (error) {
     console.error(`[Firestore] Error writing ${collectionName}/${docId}:`, error);
+    throw error;
+  }
+}
+
+/** Replace one owned document so intentionally omitted optional fields stay cleared. */
+export async function replaceFirestoreDoc(collectionName: string, docId: string, data: any): Promise<void> {
+  try {
+    await getDb().collection(collectionName).doc(docId).set(sanitizeForFirestore(data));
+  } catch (error) {
+    console.error(`[Firestore] Error replacing ${collectionName}/${docId}:`, error);
     throw error;
   }
 }

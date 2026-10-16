@@ -192,6 +192,7 @@ export interface SubscriptionSettlementResult {
   subscription: ReaderSubscription;
   periodStartsAt: string;
   expiresAt: string;
+  isRenewal: boolean;
   activationAlreadyExists: boolean;
 }
 
@@ -430,10 +431,16 @@ export const subscriptionStore = {
         subscription: stored,
         periodStartsAt: String(activation.periodStartsAt || stored.lastRenewedAt),
         expiresAt: String(activation.expiresAt || stored.expiresAt),
+        isRenewal: typeof activation.subscriptionRenewal === 'boolean'
+          ? activation.subscriptionRenewal
+          : payment.subscriptionRenewal === true,
         activationAlreadyExists: true,
       };
     }
 
+    // This is decided inside the same transaction that creates the activation,
+    // so two concurrent checkouts cannot both be credited as a first payment.
+    const isRenewal = Boolean(current);
     const renewal = calculateSubscriptionRenewalWindow({
       currentExpiry: current?.status === 'revoked' ? undefined : current?.expiresAt,
       settledAt,
@@ -465,6 +472,7 @@ export const subscriptionStore = {
       userEmail,
       plan: snapshot,
       previousExpiresAt: current?.expiresAt || null,
+      subscriptionRenewal: isRenewal,
       periodStartsAt: renewal.renewalBaseAt,
       expiresAt: renewal.expiresAt,
       settledAt: now,
@@ -474,6 +482,7 @@ export const subscriptionStore = {
       subscription: next,
       periodStartsAt: renewal.renewalBaseAt,
       expiresAt: renewal.expiresAt,
+      isRenewal,
       activationAlreadyExists: false,
     };
   },

@@ -13,6 +13,7 @@ const firestore = vi.hoisted(() => ({
 
 vi.mock('./db.js', () => ({
   getDb: firestore.getDb,
+  replaceFirestoreDoc: firestore.setDoc,
   setFirestoreDoc: firestore.setDoc,
   updateFirestoreDoc: firestore.updateDoc,
   getFirestoreDoc: firestore.getDoc,

@@ -1,0 +1,53 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { api } from './api.js';
+
+class MemoryStorage implements Storage {
+  private readonly values = new Map<string, string>();
+  get length() { return this.values.size; }
+  clear() { this.values.clear(); }
+  getItem(key: string) { return this.values.get(key) ?? null; }
+  key(index: number) { return [...this.values.keys()][index] ?? null; }
+  removeItem(key: string) { this.values.delete(key); }
+  setItem(key: string, value: string) { this.values.set(key, String(value)); }
+}
+
+describe('Literary Circle onboarding API client', () => {
+  beforeEach(() => {
+    const localStorage = new MemoryStorage();
+    localStorage.setItem('ink_affiliate_session_active', '1');
+    vi.stubGlobal('localStorage', localStorage);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('saves a completed step and onboarding status with the affiliate session', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ success: true }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.updateAffiliateLiteraryCircleOnboarding({
+      completedStepId: 'welcome',
+      status: 'in_progress',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/affiliate/literary-circle/onboarding');
+    expect(init.method).toBe('PUT');
+    expect(init.headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'x-affiliate-token': 'cookie-session',
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      completedStepId: 'welcome',
+      status: 'in_progress',
+    });
+  });
+});

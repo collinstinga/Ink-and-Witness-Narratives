@@ -165,12 +165,26 @@ describe('sales ledger privacy projections', () => {
       grossCreatorRevenueKes: 255,
       paymentMethod: 'mpesa',
       status: 'APPROVED',
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionRenewal: true,
+      commissionRateSource: 'literary_circle_tier',
+      literaryCircleTierId: 'literary-ambassador',
+      literaryCirclePolicyVersion: 7,
       createdAt: '2026-09-23T10:00:00.000Z',
       buyerEmail: 'private@example.com',
       buyerPhone: '254700000000'
     } as AffiliateSaleCommission & { buyerEmail: string; buyerPhone: string };
     const safe = toAffiliateSaleCommission(source);
     expect(safe.orderId).toBe('ord_tx_123');
+    expect(safe).toMatchObject({
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionRenewal: true,
+      commissionRateSource: 'literary_circle_tier',
+      literaryCircleTierId: 'literary-ambassador',
+      literaryCirclePolicyVersion: 7
+    });
     expect(safe).not.toHaveProperty('buyerEmail');
     expect(safe).not.toHaveProperty('buyerPhone');
   });

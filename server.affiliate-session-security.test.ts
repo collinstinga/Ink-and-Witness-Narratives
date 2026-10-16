@@ -31,6 +31,33 @@ const privateAffiliate = {
   updatedAt: '2026-09-06T00:00:00.000Z'
 };
 
+const activeLiteraryCircleMembership = {
+  schemaVersion: 1 as const,
+  memberSince: '2026-09-06T00:00:00.000Z',
+  foundingMember: true,
+  foundingRecognizedAt: '2026-09-06T00:00:00.000Z',
+  complimentaryAccess: {
+    status: 'active' as const,
+    scope: 'all_published' as const,
+    grantedAt: '2026-09-06T00:00:00.000Z',
+    updatedAt: '2026-09-06T00:00:00.000Z',
+    updatedBy: 'migration:test'
+  },
+  tier: {
+    id: 'literary-partner',
+    assignedAt: '2026-09-06T00:00:00.000Z',
+    source: 'default' as const,
+    policyVersion: 1
+  },
+  onboarding: {
+    version: 1,
+    audience: 'existing_upgrade' as const,
+    status: 'not_started' as const,
+    completedStepIds: [],
+    welcomeRequired: true
+  }
+};
+
 const publicArticleFixture = {
   id: 'art-public-1',
   title: 'Public Summary Test',
@@ -76,7 +103,13 @@ const affiliateMocks = vi.hoisted(() => ({
   getAffiliateDashboard: vi.fn(),
   getSettings: vi.fn(),
   getSettingsFresh: vi.fn(),
-  saveSettings: vi.fn()
+  saveSettings: vi.fn(),
+  getLiteraryCircleSettings: vi.fn(),
+  getLiteraryCircleSettingsFresh: vi.fn(),
+  saveLiteraryCircleSettings: vi.fn(),
+  updateLiteraryCircleMembership: vi.fn(),
+  updateLiteraryCircleOnboarding: vi.fn(),
+  hasComplimentaryCatalogueAccess: vi.fn()
 }));
 
 const storeMocks = vi.hoisted(() => {
@@ -244,6 +277,59 @@ describe('affiliate session route boundaries', () => {
       defaultCommissionRate: 15,
       minPayoutThresholdKes: Number(patch.minPayoutThresholdKes)
     }));
+    const literaryCircleSettings = {
+      schemaVersion: 1,
+      enabled: true,
+      defaultTierId: 'literary-partner',
+      qualificationTimezone: 'Africa/Nairobi',
+      introductoryPeriodDays: 30,
+      onboardingVersion: 1,
+      tiers: [{
+        id: 'literary-partner',
+        name: 'Literary Partner',
+        description: 'Approved Literary Circle membership.',
+        rank: 1,
+        monthlyVerifiedSalesThreshold: 0,
+        proposedCommissionRate: 15,
+        enabled: true
+      }],
+      commissionPolicy: {
+        status: 'draft',
+        version: 1,
+        subscriptionRenewalsEligible: false
+      },
+      community: {
+        enabled: false,
+        title: 'The Ink & Witness Literary Circle',
+        description: 'Private partner updates.'
+      }
+    };
+    affiliateMocks.getLiteraryCircleSettings.mockReturnValue(literaryCircleSettings);
+    affiliateMocks.getLiteraryCircleSettingsFresh.mockResolvedValue(literaryCircleSettings);
+    affiliateMocks.saveLiteraryCircleSettings.mockImplementation(async value => value);
+    affiliateMocks.updateLiteraryCircleMembership.mockImplementation(async (_id, patch) => ({
+      ...privateAffiliate,
+      literaryCircle: {
+        ...activeLiteraryCircleMembership,
+        complimentaryAccess: {
+          ...activeLiteraryCircleMembership.complimentaryAccess,
+          ...(patch.complimentaryAccessStatus ? { status: patch.complimentaryAccessStatus } : {})
+        }
+      }
+    }));
+    affiliateMocks.updateLiteraryCircleOnboarding.mockImplementation(async () => ({
+      ...privateAffiliate,
+      literaryCircle: {
+        ...activeLiteraryCircleMembership,
+        onboarding: {
+          ...activeLiteraryCircleMembership.onboarding,
+          status: 'in_progress',
+          completedStepIds: ['welcome'],
+          welcomeRequired: false
+        }
+      }
+    }));
+    affiliateMocks.hasComplimentaryCatalogueAccess.mockResolvedValue(true);
   });
 
   it('uses cacheable verification for GET and force-fresh verification for mutations', async () => {
@@ -438,6 +524,142 @@ describe('affiliate session route boundaries', () => {
     expect(affiliateMocks.updateAffiliate).not.toHaveBeenCalled();
   });
 
+  it('keeps proposed Literary Circle commission rates in draft without explicit activation', async () => {
+    const getResponse = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    const current = (await getResponse.json() as Record<string, any>).settings;
+
+    const rejectedActivation = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        ...current,
+        commissionPolicy: {
+          ...current.commissionPolicy,
+          status: 'active',
+          effectiveAt: '2026-10-20T00:00:00.000Z'
+        }
+      })
+    });
+
+    expect(getResponse.status).toBe(200);
+    expect(rejectedActivation.status).toBe(409);
+    expect(await rejectedActivation.json()).toMatchObject({
+      code: 'COMMISSION_POLICY_CONFIRMATION_REQUIRED'
+    });
+    expect(affiliateMocks.saveLiteraryCircleSettings).not.toHaveBeenCalled();
+
+    const draftSave = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ ...current, introductoryPeriodDays: 45 })
+    });
+    expect(draftSave.status).toBe(200);
+    expect(affiliateMocks.saveLiteraryCircleSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ introductoryPeriodDays: 45 }),
+      'Admin (Jake)'
+    );
+  });
+
+  it('requires fresh confirmation before changing an already-active commission policy', async () => {
+    const getResponse = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    const draft = (await getResponse.json() as Record<string, any>).settings;
+    const active = {
+      ...draft,
+      commissionPolicy: {
+        ...draft.commissionPolicy,
+        status: 'active',
+        effectiveAt: '2026-10-20T00:00:00.000Z'
+      }
+    };
+    const changed = {
+      ...active,
+      tiers: active.tiers.map((tier: Record<string, any>, index: number) => index === 0
+        ? { ...tier, proposedCommissionRate: 16 }
+        : tier)
+    };
+    affiliateMocks.getLiteraryCircleSettingsFresh.mockResolvedValueOnce(active);
+
+    const rejected = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify(changed)
+    });
+
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({
+      code: 'COMMISSION_POLICY_CONFIRMATION_REQUIRED'
+    });
+    expect(affiliateMocks.saveLiteraryCircleSettings).not.toHaveBeenCalled();
+
+    affiliateMocks.getLiteraryCircleSettingsFresh.mockResolvedValueOnce(active);
+    const confirmed = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ ...changed, confirmCommissionPolicyActivation: true })
+    });
+
+    expect(confirmed.status).toBe(200);
+    expect(affiliateMocks.saveLiteraryCircleSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ tiers: expect.any(Array) }),
+      'Admin (Jake)'
+    );
+  });
+
+  it('allows the writer to suspend complimentary access without exposing the general profile editor', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}/literary-circle`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        complimentaryAccessStatus: 'suspended',
+        complimentaryAccessReason: 'Writer review',
+        balanceAvailableKes: 0,
+        foundingMember: false
+      })
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body.affiliate.literaryCircle.complimentaryAccess.status).toBe('suspended');
+    expect(affiliateMocks.updateLiteraryCircleMembership).toHaveBeenCalledWith(
+      privateAffiliate.id,
+      {
+        complimentaryAccessStatus: 'suspended',
+        complimentaryAccessReason: 'Writer review'
+      },
+      'Admin (Jake)'
+    );
+    expect(affiliateMocks.updateAffiliate).not.toHaveBeenCalled();
+  });
+
   it('keeps named affiliate admin reads ahead of the dynamic affiliate detail route', async () => {
     for (const path of ['settings', 'commissions', 'payouts', 'campaigns', 'audit-logs']) {
       const response = await fetch(`${baseUrl}/api/admin/affiliates/${path}`, {
@@ -533,6 +755,122 @@ describe('affiliate session route boundaries', () => {
     expect(homepage.mostSellingPieces[0]).toMatchObject({ content: '', isUnlocked: false });
     expect(homepage.mostSellingPieces[0]).not.toHaveProperty('coverImageOriginal');
     expect(JSON.stringify(homepage)).not.toContain(publicArticleFixture.content);
+  });
+
+  it('unlocks a paid piece for an active Literary Circle affiliate without creating a purchase', async () => {
+    affiliateMocks.verifyAffiliateSession.mockResolvedValueOnce({
+      ...privateAffiliate,
+      literaryCircle: activeLiteraryCircleMembership
+    });
+
+    const response = await fetch(`${baseUrl}/api/articles/${publicArticleFixture.id}`, {
+      headers: { cookie: validCookie }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      id: publicArticleFixture.id,
+      isUnlocked: true,
+      accessSource: 'AFFILIATE_COMPLIMENTARY',
+      content: publicArticleFixture.content
+    });
+    expect(affiliateMocks.verifyAffiliateSession).toHaveBeenCalledWith(expect.any(String), { forceFresh: true });
+    expect(storeMocks.confirmTransaction).not.toHaveBeenCalled();
+    expect(storeMocks.savePurchasedToken).not.toHaveBeenCalled();
+  });
+
+  it('keeps a paid piece locked after Literary Circle access is suspended', async () => {
+    affiliateMocks.verifyAffiliateSession.mockResolvedValueOnce({
+      ...privateAffiliate,
+      literaryCircle: {
+        ...activeLiteraryCircleMembership,
+        complimentaryAccess: {
+          ...activeLiteraryCircleMembership.complimentaryAccess,
+          status: 'suspended'
+        }
+      }
+    });
+
+    const response = await fetch(`${baseUrl}/api/articles/${publicArticleFixture.id}`, {
+      headers: { cookie: validCookie }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      id: publicArticleFixture.id,
+      isUnlocked: false,
+      content: ''
+    });
+    expect(body).not.toHaveProperty('accessSource');
+  });
+
+  it('fails closed when fresh Literary Circle access verification is unavailable', async () => {
+    affiliateMocks.verifyAffiliateSession.mockRejectedValueOnce(new Error('quota exhausted'));
+
+    const response = await fetch(`${baseUrl}/api/articles/${publicArticleFixture.id}`, {
+      headers: { cookie: validCookie }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({ error: expect.stringMatching(/temporarily unavailable/i) });
+    expect(JSON.stringify(body)).not.toContain('quota exhausted');
+    expect(JSON.stringify(body)).not.toContain(publicArticleFixture.content);
+  });
+
+  it('returns a compact complimentary library only after fresh Literary Circle verification', async () => {
+    affiliateMocks.verifyAffiliateSession.mockResolvedValue({
+      ...privateAffiliate,
+      literaryCircle: activeLiteraryCircleMembership
+    });
+
+    const response = await fetch(`${baseUrl}/api/affiliate/literary-circle/library`, {
+      headers: { cookie: validCookie }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(body).toMatchObject({
+      success: true,
+      accessSource: 'AFFILIATE_COMPLIMENTARY',
+      articles: [{
+        id: publicArticleFixture.id,
+        isUnlocked: true,
+        content: '',
+        accessSource: 'AFFILIATE_COMPLIMENTARY'
+      }]
+    });
+    expect(affiliateMocks.verifyAffiliateSession).toHaveBeenCalledWith(expect.any(String), { forceFresh: true });
+    expect(JSON.stringify(body)).not.toContain(publicArticleFixture.content);
+  });
+
+  it('persists only the authenticated affiliate onboarding progress fields', async () => {
+    const response = await fetch(`${baseUrl}/api/affiliate/literary-circle/onboarding`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: validCookie,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({
+        completedStepId: 'welcome',
+        complimentaryAccessStatus: 'active',
+        commissionRate: 100
+      })
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(body.onboarding).toMatchObject({ completedStepIds: ['welcome'], welcomeRequired: false });
+    expect(affiliateMocks.updateLiteraryCircleOnboarding).toHaveBeenCalledWith(
+      privateAffiliate.id,
+      { completedStepId: 'welcome' },
+      `Affiliate (${privateAffiliate.name})`
+    );
   });
 
   it('returns one coherent no-store bootstrap payload and checks the shared article version', async () => {

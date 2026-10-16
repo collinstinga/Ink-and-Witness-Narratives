@@ -143,11 +143,15 @@ vi.mock('./db.js', () => ({
       ...structuredClone(data)
     });
   }),
+  replaceFirestoreDoc: vi.fn(async (collectionName: string, id: string, data: any) => {
+    firestoreMock.documents.set(`${collectionName}/${id}`, structuredClone(data));
+  }),
   updateFirestoreDoc: vi.fn(async () => undefined),
   deleteFirestoreDoc: vi.fn(async () => undefined)
 }));
 
 import { affiliateStore } from './affiliateStore.js';
+import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
 
 const now = '2026-09-08T08:00:00.000Z';
 const affiliate = {
@@ -218,6 +222,41 @@ function confirmedV2AffiliateTransaction() {
     affiliateAttributionClaimId: v2ClaimId,
     affiliateAttributionAt: new Date(v2IssuedAt).toISOString(),
     affiliateAttributionExpiresAt: new Date(v2ExpiresAt).toISOString()
+  };
+}
+
+function confirmedSubscriptionTransaction(
+  checkoutRequestId: string,
+  subscriptionRenewal: boolean | undefined
+) {
+  const transaction = {
+    ...confirmedAffiliateTransaction(),
+    id: `tx_${checkoutRequestId}`,
+    checkoutRequestId,
+    merchantRequestId: `merchant_${checkoutRequestId}`,
+    articleId: 'subscription:first-chapter-3-months',
+    articleTitle: 'The First Chapter',
+    purchaseKind: 'subscription' as const,
+    subscriptionPlanId: 'first-chapter-3-months',
+    campaignCode: undefined,
+    mpesaReceiptNumber: `RECEIPT-${checkoutRequestId}`,
+    confirmedAt: now,
+  };
+  return subscriptionRenewal === undefined
+    ? transaction
+    : { ...transaction, subscriptionRenewal };
+}
+
+function activeRenewalPolicy(overrides: Record<string, unknown> = {}) {
+  return {
+    ...structuredClone(DEFAULT_LITERARY_CIRCLE_SETTINGS),
+    commissionPolicy: {
+      status: 'active' as const,
+      version: 7,
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      subscriptionRenewalsEligible: true,
+      ...overrides
+    }
   };
 }
 
@@ -295,6 +334,28 @@ describe('affiliate commission durability', () => {
       revenueKes: 500,
       commissionsKes: 100
     });
+  });
+
+  it('does not move a newer verified-sale timestamp backwards when reconciling an older sale', async () => {
+    const newerVerifiedSaleAt = '2026-09-12T08:00:00.000Z';
+    firestoreMock.documents.set(`affiliates/${affiliate.id}`, {
+      ...structuredClone(affiliate),
+      lastVerifiedSaleAt: newerVerifiedSaleAt
+    });
+
+    const transaction = {
+      ...confirmedAffiliateTransaction(),
+      createdAt: '2026-09-05T08:00:00.000Z'
+    };
+    const commission = await affiliateStore.recordAffiliateSale(
+      transaction,
+      affiliate.affiliateCode,
+      campaign.code
+    );
+
+    expect(commission?.createdAt).toBe(transaction.createdAt);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)?.lastVerifiedSaleAt)
+      .toBe(newerVerifiedSaleAt);
   });
 
   it('creates a v2 commission only when the consumed one-time claim matches the sale exactly', async () => {
@@ -452,6 +513,291 @@ describe('affiliate commission durability', () => {
       commissionRate: 15,
       commissionAmountKes: 75,
       campaignCode: undefined
+    });
+  });
+
+  it('credits a first subscription payment once and snapshots that it was not a renewal', async () => {
+    const transaction = confirmedSubscriptionTransaction('checkout_subscription_first', false);
+
+    const first = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode);
+    const retry = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode);
+
+    expect(first).toMatchObject({
+      purchaseKind: 'subscription',
+      subscriptionPlanId: 'first-chapter-3-months',
+      subscriptionRenewal: false,
+      commissionRate: 15,
+      commissionAmountKes: 75,
+      commissionRateSource: 'global_default'
+    });
+    expect(retry).toEqual(first);
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('affiliate_commissions/')
+    )).toHaveLength(1);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)).toMatchObject({
+      totalSalesCount: 1,
+      totalRevenueKes: 500,
+      totalCommissionEarnedKes: 75,
+      balanceAvailableKes: 75
+    });
+  });
+
+  it('fails closed for an ambiguous subscription and skips renewals under the default draft policy', async () => {
+    const ambiguous = confirmedSubscriptionTransaction('checkout_subscription_ambiguous', undefined);
+    const renewal = confirmedSubscriptionTransaction('checkout_subscription_renewal_default', true);
+
+    await expect(affiliateStore.recordAffiliateSale(ambiguous, affiliate.affiliateCode)).resolves.toBeNull();
+    const [first, second] = await Promise.all([
+      affiliateStore.recordAffiliateSale(renewal, affiliate.affiliateCode),
+      affiliateStore.recordAffiliateSale(renewal, affiliate.affiliateCode)
+    ]);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('affiliate_commissions/')
+    )).toBe(false);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)).toMatchObject({
+      totalSalesCount: 0,
+      totalRevenueKes: 0,
+      totalCommissionEarnedKes: 0,
+      balanceAvailableKes: 0
+    });
+  });
+
+  it('does not enable renewal commissions from a draft or future-effective policy', async () => {
+    const renewal = confirmedSubscriptionTransaction('checkout_subscription_renewal_future', true);
+    firestoreMock.documents.set('site_configs/affiliate_literary_circle', {
+      ...activeRenewalPolicy(),
+      commissionPolicy: {
+        status: 'draft',
+        version: 7,
+        subscriptionRenewalsEligible: true
+      }
+    });
+    await expect(affiliateStore.recordAffiliateSale(renewal, affiliate.affiliateCode)).resolves.toBeNull();
+
+    firestoreMock.documents.set(
+      'site_configs/affiliate_literary_circle',
+      activeRenewalPolicy({ effectiveAt: '2026-09-09T00:00:00.000Z' })
+    );
+    await expect(affiliateStore.recordAffiliateSale(renewal, affiliate.affiliateCode)).resolves.toBeNull();
+    expect(Array.from(firestoreMock.documents.keys()).some(key =>
+      key.startsWith('affiliate_commissions/')
+    )).toBe(false);
+  });
+
+  it('credits one renewal only under an active effective policy and preserves its immutable snapshot', async () => {
+    firestoreMock.documents.set(
+      'site_configs/affiliate_literary_circle',
+      activeRenewalPolicy()
+    );
+    const transaction = confirmedSubscriptionTransaction('checkout_subscription_renewal_allowed', true);
+
+    const [first, second] = await Promise.all([
+      affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode),
+      affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode)
+    ]);
+    const original = structuredClone(first);
+
+    firestoreMock.documents.set('site_configs/affiliate_literary_circle', {
+      ...activeRenewalPolicy({ subscriptionRenewalsEligible: false }),
+      commissionPolicy: {
+        ...activeRenewalPolicy({ subscriptionRenewalsEligible: false }).commissionPolicy,
+        version: 8,
+        subscriptionRenewalsEligible: false
+      }
+    });
+    const retry = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode);
+
+    expect(first).toMatchObject({
+      purchaseKind: 'subscription',
+      subscriptionRenewal: true,
+      commissionRate: 15,
+      commissionAmountKes: 75,
+      literaryCirclePolicyVersion: 7
+    });
+    expect(second).toEqual(first);
+    expect(retry).toEqual(original);
+    expect(Array.from(firestoreMock.documents.keys()).filter(key =>
+      key.startsWith('affiliate_commissions/')
+    )).toHaveLength(1);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)).toMatchObject({
+      totalSalesCount: 1,
+      totalRevenueKes: 500,
+      totalCommissionEarnedKes: 75,
+      balanceAvailableKes: 75
+    });
+  });
+
+  it('snapshots an explicitly activated manual Literary Circle tier without changing prior records', async () => {
+    const membership = {
+      schemaVersion: 1,
+      memberSince: now,
+      foundingMember: true,
+      foundingRecognizedAt: now,
+      complimentaryAccess: {
+        status: 'active',
+        scope: 'all_published',
+        grantedAt: now,
+        updatedAt: now,
+        updatedBy: 'test'
+      },
+      tier: {
+        id: 'literary-ambassador',
+        assignedAt: now,
+        source: 'manual',
+        policyVersion: 4
+      },
+      onboarding: {
+        version: 1,
+        audience: 'existing_upgrade',
+        status: 'completed',
+        completedStepIds: [],
+        welcomeRequired: false
+      }
+    };
+    firestoreMock.documents.set(`affiliates/${affiliate.id}`, {
+      ...structuredClone(affiliate),
+      literaryCircle: membership
+    });
+    firestoreMock.documents.set('site_configs/affiliate_literary_circle', {
+      schemaVersion: 1,
+      enabled: true,
+      defaultTierId: 'literary-partner',
+      qualificationTimezone: 'Africa/Nairobi',
+      introductoryPeriodDays: 30,
+      onboardingVersion: 1,
+      tiers: [
+        {
+          id: 'literary-partner',
+          name: 'Literary Partner',
+          description: 'Base',
+          rank: 1,
+          monthlyVerifiedSalesThreshold: 0,
+          proposedCommissionRate: 15,
+          enabled: true
+        },
+        {
+          id: 'literary-ambassador',
+          name: 'Literary Ambassador',
+          description: 'Ambassador',
+          rank: 2,
+          monthlyVerifiedSalesThreshold: 10,
+          proposedCommissionRate: 20,
+          enabled: true
+        }
+      ],
+      commissionPolicy: {
+        status: 'active',
+        version: 4,
+        effectiveAt: '2026-01-01T00:00:00.000Z',
+        subscriptionRenewalsEligible: false
+      },
+      community: { enabled: false, title: 'Circle', description: 'Private' }
+    });
+    await affiliateStore.init();
+    const transaction = {
+      ...confirmedAffiliateTransaction(),
+      campaignCode: undefined
+    };
+
+    const commission = await affiliateStore.recordAffiliateSale(
+      transaction,
+      affiliate.affiliateCode
+    );
+
+    expect(commission).toMatchObject({
+      commissionRate: 20,
+      commissionAmountKes: 100,
+      commissionRateSource: 'literary_circle_tier',
+      literaryCircleTierId: 'literary-ambassador',
+      literaryCirclePolicyVersion: 4,
+      purchaseKind: 'piece'
+    });
+  });
+
+  it('prices a delayed settlement with the policy version effective when the sale occurred', async () => {
+    const membership = {
+      schemaVersion: 1,
+      memberSince: now,
+      foundingMember: true,
+      complimentaryAccess: {
+        status: 'active',
+        scope: 'all_published',
+        grantedAt: now,
+        updatedAt: now,
+        updatedBy: 'test'
+      },
+      tier: {
+        id: 'literary-ambassador',
+        assignedAt: now,
+        source: 'manual',
+        policyVersion: 4
+      },
+      onboarding: {
+        version: 1,
+        audience: 'existing_upgrade',
+        status: 'completed',
+        completedStepIds: [],
+        welcomeRequired: false
+      }
+    };
+    const oldTiers = [
+      {
+        id: 'literary-partner', name: 'Partner', description: 'Base', rank: 1,
+        monthlyVerifiedSalesThreshold: 0, proposedCommissionRate: 15, enabled: true
+      },
+      {
+        id: 'literary-ambassador', name: 'Ambassador', description: 'Ambassador', rank: 2,
+        monthlyVerifiedSalesThreshold: 10, proposedCommissionRate: 20, enabled: true
+      }
+    ];
+    firestoreMock.documents.set(`affiliates/${affiliate.id}`, {
+      ...structuredClone(affiliate),
+      literaryCircle: membership
+    });
+    firestoreMock.documents.set('site_configs/affiliate_literary_circle', {
+      schemaVersion: 1,
+      enabled: true,
+      defaultTierId: 'literary-partner',
+      qualificationTimezone: 'Africa/Nairobi',
+      introductoryPeriodDays: 30,
+      onboardingVersion: 1,
+      tiers: oldTiers.map(tier => tier.id === 'literary-ambassador'
+        ? { ...tier, proposedCommissionRate: 25 }
+        : tier),
+      commissionPolicy: {
+        status: 'active',
+        version: 5,
+        effectiveAt: '2026-09-10T00:00:00.000Z',
+        subscriptionRenewalsEligible: false
+      },
+      commissionPolicyHistory: [{
+        version: 4,
+        status: 'active',
+        effectiveAt: '2026-01-01T00:00:00.000Z',
+        defaultTierId: 'literary-partner',
+        tiers: oldTiers,
+        subscriptionRenewalsEligible: false,
+        confirmedAt: '2026-01-01T00:00:00.000Z',
+        confirmedBy: 'Writer'
+      }],
+      community: { enabled: false, title: 'Circle', description: 'Private' }
+    });
+    await affiliateStore.init();
+
+    const commission = await affiliateStore.recordAffiliateSale({
+      ...confirmedAffiliateTransaction(),
+      campaignCode: undefined,
+      createdAt: '2026-09-08T08:00:00.000Z'
+    }, affiliate.affiliateCode);
+
+    expect(commission).toMatchObject({
+      commissionRate: 20,
+      commissionAmountKes: 100,
+      literaryCircleTierId: 'literary-ambassador',
+      literaryCirclePolicyVersion: 4
     });
   });
 });

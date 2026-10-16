@@ -2,13 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
-import { 
-  getDb, 
+import {
+  getDb,
+  replaceFirestoreDoc,
   setFirestoreDoc,
   updateFirestoreDoc,
   getFirestoreDoc,
-  deleteFirestoreDoc, 
-  getAllFirestoreDocs 
+  deleteFirestoreDoc,
+  getAllFirestoreDocs
 } from './db.js';
 import {
   AffiliateAccount,
@@ -25,7 +26,11 @@ import {
   CommissionStatus,
   PayoutStatus,
   PaymentTransaction,
-  AffiliateSession
+  AffiliateSession,
+  AffiliateLiteraryCircleMembership,
+  LiteraryCircleComplimentaryAccessStatus,
+  LiteraryCircleOnboardingStatus,
+  LiteraryCircleSettings
 } from '../types.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
@@ -41,6 +46,25 @@ import {
   normalizeAffiliateSessionRecord,
   resolveAffiliateSessionVersion
 } from './affiliateSessionSecurity.js';
+import {
+  buildLiteraryCircleDashboardSummary,
+  countVerifiedSalesForPeriod,
+  createLiteraryCircleCommissionPolicySnapshot,
+  createLiteraryCircleMembership,
+  DEFAULT_LITERARY_CIRCLE_SETTINGS,
+  isAffiliateComplimentaryAccessActive,
+  isLiteraryCircleCommissionPolicyChange,
+  isVerifiedAffiliateCommission,
+  LITERARY_CIRCLE_ONBOARDING_STEPS,
+  LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
+  LiteraryCircleValidationError,
+  literaryCirclePeriodKey,
+  normalizeLiteraryCircleSettings,
+  resolveAffiliateCommissionRate,
+  resolveLiteraryCircleSettingsForTransaction,
+  shouldApplyLiteraryCircleCommissionPolicy,
+  validateLiteraryCircleSettings
+} from './literaryCircle.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const AFFILIATES_FILE = path.join(DATA_DIR, 'affiliates.json');
@@ -49,6 +73,7 @@ const CLICKS_FILE = path.join(DATA_DIR, 'affiliate_clicks.json');
 const PAYOUTS_FILE = path.join(DATA_DIR, 'affiliate_payouts.json');
 const CAMPAIGNS_FILE = path.join(DATA_DIR, 'affiliate_campaigns.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'affiliate_settings.json');
+const LITERARY_CIRCLE_SETTINGS_FILE = path.join(DATA_DIR, 'affiliate_literary_circle.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'affiliate_audit.json');
 const AFFILIATE_SESSIONS_FILE = path.join(DATA_DIR, 'affiliate_sessions.v2.json');
 
@@ -66,6 +91,19 @@ const DEFAULT_AFFILIATE_SETTINGS: AffiliateSettings = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_ATTRIBUTION_DAYS = 90;
+
+export interface LiteraryCircleMembershipPatch {
+  complimentaryAccessStatus?: LiteraryCircleComplimentaryAccessStatus;
+  complimentaryAccessReason?: string;
+  manualTierId?: string | null;
+  /** Founding recognition is intentionally additive and can never be removed. */
+  foundingMember?: true;
+}
+
+export interface LiteraryCircleOnboardingPatch {
+  completedStepId?: string;
+  status?: LiteraryCircleOnboardingStatus;
+}
 
 function finiteNumberInRange(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
@@ -214,26 +252,20 @@ function calculateCommissionRateFromRecords(
   affiliate: AffiliateAccount,
   articleId: string,
   settings: AffiliateSettings,
-  campaign?: AffiliateCampaign
+  campaign?: AffiliateCampaign,
+  literaryCircleSettings?: LiteraryCircleSettings,
+  monthlyVerifiedSales = 0,
+  transactionAt = new Date().toISOString()
 ): number {
-  if (campaign?.isActive && campaign.commissionRate > 0 && campaign.commissionRate <= 100) {
-    if (!campaign.eligiblePieceIds || campaign.eligiblePieceIds.length === 0 || campaign.eligiblePieceIds.includes(articleId)) {
-      return campaign.commissionRate;
-    }
-  }
-
-  if (settings.pieceCommissionOverrides?.[articleId] !== undefined) {
-    const pieceRate = Number(settings.pieceCommissionOverrides[articleId]);
-    if (Number.isFinite(pieceRate) && pieceRate > 0 && pieceRate <= 100) {
-      return pieceRate;
-    }
-  }
-
-  if (affiliate.customCommissionRate !== null && affiliate.customCommissionRate !== undefined && affiliate.customCommissionRate > 0 && affiliate.customCommissionRate <= 100) {
-    return affiliate.customCommissionRate;
-  }
-
-  return settings.defaultCommissionRate || DEFAULT_AFFILIATE_SETTINGS.defaultCommissionRate;
+  return resolveAffiliateCommissionRate({
+    affiliate,
+    articleId,
+    affiliateSettings: settings,
+    campaign,
+    literaryCircleSettings,
+    monthlyVerifiedSales,
+    transactionAt
+  }).rate;
 }
 
 // In-Memory state
@@ -243,6 +275,9 @@ let cachedClicks: AffiliateClickEvent[] = [];
 let cachedPayouts: AffiliatePayoutRequest[] = [];
 let cachedCampaigns: AffiliateCampaign[] = [];
 let cachedSettings: AffiliateSettings = normalizeAffiliateSettings(undefined);
+let cachedLiteraryCircleSettings: LiteraryCircleSettings = normalizeLiteraryCircleSettings(
+  DEFAULT_LITERARY_CIRCLE_SETTINGS
+);
 let cachedAuditLogs: AffiliateAuditLogEntry[] = [];
 let cachedSessions: Map<string, AffiliateSession> = new Map();
 let cachedSessionVerifiedAt: Map<string, number> = new Map();
@@ -363,6 +398,7 @@ export const affiliateStore = {
     missingSessions.clear();
     affiliateSessionInvalidationEpochs.clear();
     affiliateDirectoryReady = false;
+    cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(DEFAULT_LITERARY_CIRCLE_SETTINGS);
 
     // Start independent Firestore reads together. These collections do not
     // depend on one another, and awaiting them serially adds several network
@@ -382,6 +418,9 @@ export const affiliateStore = {
     };
     const startupReads = {
       settings: captureStartupRead(getFirestoreDoc<AffiliateSettings>('site_configs', 'affiliate_settings')),
+      literaryCircleSettings: captureStartupRead(
+        getFirestoreDoc<LiteraryCircleSettings>('site_configs', LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID)
+      ),
       affiliates: captureStartupRead(getAllFirestoreDocs<AffiliateAccount>('affiliates')),
       commissions: captureStartupRead(getAllFirestoreDocs<AffiliateSaleCommission>('affiliate_commissions')),
       payouts: captureStartupRead(getAllFirestoreDocs<AffiliatePayoutRequest>('affiliate_payouts')),
@@ -405,6 +444,34 @@ export const affiliateStore = {
       }
     } catch {
       writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+    }
+
+    // Literary Circle policy is stored separately from legacy commission
+    // settings so enabling the programme cannot rewrite an established rate.
+    try {
+      const persistedCircleSettings = await useStartupRead(startupReads.literaryCircleSettings);
+      if (persistedCircleSettings) {
+        cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(persistedCircleSettings);
+        writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+      } else if (fs.existsSync(LITERARY_CIRCLE_SETTINGS_FILE)) {
+        const raw = fs.readFileSync(LITERARY_CIRCLE_SETTINGS_FILE, 'utf-8');
+        cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(JSON.parse(raw));
+        setFirestoreDoc(
+          'site_configs',
+          LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
+          cachedLiteraryCircleSettings
+        ).catch(() => {});
+      } else {
+        writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+        setFirestoreDoc(
+          'site_configs',
+          LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
+          cachedLiteraryCircleSettings
+        ).catch(() => {});
+      }
+    } catch (error) {
+      console.warn('[AffiliateStore] Error loading Literary Circle settings:', error);
+      writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
     }
 
     // 2. Load Affiliates from Firestore / JSON
@@ -591,6 +658,123 @@ export const affiliateStore = {
     return { ...cachedSettings };
   },
 
+  getLiteraryCircleSettings(): LiteraryCircleSettings {
+    return normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
+  },
+
+  async getLiteraryCircleSettingsFresh(): Promise<LiteraryCircleSettings> {
+    const persisted = await getFirestoreDoc<LiteraryCircleSettings>(
+      'site_configs',
+      LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID
+    );
+    if (persisted) {
+      cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(persisted);
+      writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+    } else {
+      // A deleted policy document must fail closed instead of reviving a
+      // previously cached entitlement configuration on a warm instance.
+      cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings({
+        ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+        enabled: false,
+        community: {
+          ...DEFAULT_LITERARY_CIRCLE_SETTINGS.community,
+          enabled: false
+        }
+      });
+      writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+    }
+    return normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
+  },
+
+  async saveLiteraryCircleSettings(
+    value: LiteraryCircleSettings,
+    actor = 'Admin'
+  ): Promise<LiteraryCircleSettings> {
+    const previous = normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
+    const validated = validateLiteraryCircleSettings(value);
+    const policyChanged = isLiteraryCircleCommissionPolicyChange(previous, validated);
+    const policyVersion = policyChanged
+      ? previous.commissionPolicy.version + 1
+      : previous.commissionPolicy.version;
+    const now = new Date().toISOString();
+    const isConfirmedPolicyLifecycleChange = policyChanged && (
+      previous.commissionPolicy.status === 'active'
+      || validated.commissionPolicy.status === 'active'
+    );
+    let effectiveAt = validated.commissionPolicy.effectiveAt;
+    if (isConfirmedPolicyLifecycleChange && validated.commissionPolicy.status === 'draft') {
+      effectiveAt = now;
+    }
+    if (isConfirmedPolicyLifecycleChange && validated.commissionPolicy.status === 'active') {
+      const effectiveTime = Date.parse(effectiveAt || '');
+      if (!Number.isFinite(effectiveTime) || effectiveTime < Date.parse(now) - 5 * 60_000) {
+        throw new LiteraryCircleValidationError(
+          'Choose a current or future effective date for this commission-policy change.'
+        );
+      }
+    }
+    const nextPolicySettings = normalizeLiteraryCircleSettings({
+      ...validated,
+      commissionPolicy: {
+        ...validated.commissionPolicy,
+        version: policyVersion,
+        ...(effectiveAt ? { effectiveAt } : {})
+      },
+      updatedAt: now,
+      updatedBy: actor
+    });
+    const policyHistory = [...(previous.commissionPolicyHistory || [])];
+    const appendSnapshot = (snapshot: ReturnType<typeof createLiteraryCircleCommissionPolicySnapshot>) => {
+      const existingIndex = policyHistory.findIndex(entry => entry.version === snapshot.version);
+      if (existingIndex >= 0) policyHistory[existingIndex] = snapshot;
+      else policyHistory.push(snapshot);
+    };
+    if (isConfirmedPolicyLifecycleChange) {
+      if (
+        previous.commissionPolicy.status === 'active'
+        && previous.commissionPolicy.effectiveAt
+        && !policyHistory.some(snapshot => snapshot.version === previous.commissionPolicy.version)
+      ) {
+        appendSnapshot(createLiteraryCircleCommissionPolicySnapshot(previous, {
+          effectiveAt: previous.commissionPolicy.effectiveAt,
+          confirmedAt: previous.updatedAt || previous.commissionPolicy.effectiveAt,
+          confirmedBy: previous.updatedBy || 'System'
+        }));
+      }
+      appendSnapshot(createLiteraryCircleCommissionPolicySnapshot(nextPolicySettings, {
+        effectiveAt: effectiveAt || now,
+        confirmedAt: now,
+        confirmedBy: actor
+      }));
+    }
+    if (policyHistory.length > 256) {
+      throw new LiteraryCircleValidationError(
+        'Commission policy history is full. Archive it safely before publishing another financial policy.'
+      );
+    }
+    const next = normalizeLiteraryCircleSettings({
+      ...nextPolicySettings,
+      commissionPolicyHistory: policyHistory
+    });
+
+    // Publish only after the durable policy document has committed. Tier
+    // rates remain proposals until their independently versioned policy is
+    // activated, so this does not alter historical commission records.
+    await replaceFirestoreDoc('site_configs', LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID, next);
+    cachedLiteraryCircleSettings = next;
+    writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+    this.recordAudit(
+      actor,
+      'literary_circle_settings_updated',
+      'settings',
+      'Updated Literary Circle configuration',
+      LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
+      previous,
+      next
+    );
+    return normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
+  },
+
   // AFFILIATES CRUD
   getAffiliates(filter?: { status?: string }): AffiliatePublicProfile[] {
     const defaultRate = cachedSettings.defaultCommissionRate || 15;
@@ -635,6 +819,283 @@ export const affiliateStore = {
     const fresh = await getFirestoreDoc<AffiliateAccount>('affiliates', id);
     cacheFreshAffiliateRecord(id, fresh);
     return this.getAffiliateById(id);
+  },
+
+  async updateLiteraryCircleMembership(
+    id: string,
+    patch: LiteraryCircleMembershipPatch,
+    actor = 'Admin'
+  ): Promise<AffiliateAccount> {
+    if (!id) throw new Error('Affiliate id is required.');
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw new Error('Literary Circle membership changes must be provided as an object.');
+    }
+    const allowedAccessStatuses = new Set<LiteraryCircleComplimentaryAccessStatus>([
+      'active',
+      'suspended',
+      'revoked'
+    ]);
+    if (
+      patch.complimentaryAccessStatus !== undefined
+      && !allowedAccessStatuses.has(patch.complimentaryAccessStatus)
+    ) {
+      throw new Error('Literary Circle complimentary access status is invalid.');
+    }
+    if (patch.complimentaryAccessReason !== undefined && typeof patch.complimentaryAccessReason !== 'string') {
+      throw new Error('Literary Circle complimentary access reason must be text.');
+    }
+    if (
+      patch.manualTierId !== undefined
+      && patch.manualTierId !== null
+      && typeof patch.manualTierId !== 'string'
+    ) {
+      throw new Error('Literary Circle manual tier must be a stable tier identifier.');
+    }
+
+    const db = getDb();
+    const persisted = await db.runTransaction(async firestoreTransaction => {
+      const affiliateRef = db.collection('affiliates').doc(id);
+      const settingsRef = db.collection('site_configs').doc(LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID);
+      const [affiliateSnapshot, settingsSnapshot] = await Promise.all([
+        firestoreTransaction.get(affiliateRef),
+        firestoreTransaction.get(settingsRef)
+      ]);
+      if (!affiliateSnapshot.exists) throw new Error('Affiliate not found.');
+
+      const settings = normalizeLiteraryCircleSettings(
+        settingsSnapshot.exists ? settingsSnapshot.data() : cachedLiteraryCircleSettings
+      );
+      const previousAffiliate: AffiliateAccount = {
+        ...(affiliateSnapshot.data() as AffiliateAccount),
+        id
+      };
+      const now = new Date().toISOString();
+      const previousMembership = previousAffiliate.literaryCircle || createLiteraryCircleMembership({
+        now: previousAffiliate.createdAt,
+        settings,
+        foundingMember: false,
+        audience: 'existing_upgrade',
+        actor
+      });
+      let nextMembership: AffiliateLiteraryCircleMembership = {
+        ...previousMembership,
+        complimentaryAccess: { ...previousMembership.complimentaryAccess },
+        tier: { ...previousMembership.tier },
+        onboarding: {
+          ...previousMembership.onboarding,
+          completedStepIds: [...previousMembership.onboarding.completedStepIds]
+        }
+      };
+
+      if (patch.complimentaryAccessStatus !== undefined) {
+        const reason = (patch.complimentaryAccessReason || '').trim().slice(0, 500);
+        nextMembership = {
+          ...nextMembership,
+          complimentaryAccess: {
+            ...nextMembership.complimentaryAccess,
+            status: patch.complimentaryAccessStatus,
+            updatedAt: now,
+            updatedBy: actor,
+            ...(reason ? { reason } : {})
+          }
+        };
+        if (!reason) delete nextMembership.complimentaryAccess.reason;
+      }
+
+      if (patch.manualTierId !== undefined) {
+        if (patch.manualTierId === null) {
+          nextMembership = {
+            ...nextMembership,
+            tier: {
+              id: settings.defaultTierId,
+              assignedAt: now,
+              source: 'default',
+              policyVersion: settings.commissionPolicy.version
+            }
+          };
+        } else {
+          const requestedTierId = patch.manualTierId.trim().toLowerCase();
+          const requestedTier = settings.tiers.find(tier => tier.enabled && tier.id === requestedTierId);
+          if (!requestedTier) throw new Error('Literary Circle tier is unavailable or disabled.');
+          nextMembership = {
+            ...nextMembership,
+            tier: {
+              id: requestedTier.id,
+              assignedAt: now,
+              source: 'manual',
+              policyVersion: settings.commissionPolicy.version
+            }
+          };
+        }
+      }
+
+      // Recognition is permanent. A false value supplied by an older or
+      // untrusted client is a no-op and can never erase a founding badge.
+      if (patch.foundingMember === true && !nextMembership.foundingMember) {
+        nextMembership = {
+          ...nextMembership,
+          foundingMember: true,
+          foundingRecognizedAt: now
+        };
+      }
+
+      const updatedAffiliate: AffiliateAccount = {
+        ...previousAffiliate,
+        literaryCircle: nextMembership,
+        updatedAt: now
+      };
+      firestoreTransaction.update(affiliateRef, {
+        literaryCircle: nextMembership,
+        updatedAt: now
+      });
+      return {
+        previousAffiliate,
+        updatedAffiliate,
+        settings
+      };
+    });
+
+    cachedLiteraryCircleSettings = persisted.settings;
+    const updated = cacheFreshAffiliateRecord(id, persisted.updatedAffiliate);
+    if (!updated) throw new Error('Affiliate not found.');
+    this.recordAudit(
+      actor,
+      'literary_circle_membership_updated',
+      'affiliate',
+      `Updated Literary Circle membership for ${updated.name} (${updated.affiliateCode})`,
+      id,
+      persisted.previousAffiliate.literaryCircle,
+      updated.literaryCircle
+    );
+    return this.getAffiliateById(id) || updated;
+  },
+
+  async updateLiteraryCircleOnboarding(
+    id: string,
+    patch: LiteraryCircleOnboardingPatch,
+    actor = 'Affiliate'
+  ): Promise<AffiliateAccount> {
+    if (!id) throw new Error('Affiliate id is required.');
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw new Error('Literary Circle onboarding changes must be provided as an object.');
+    }
+    const completedStepId = typeof patch.completedStepId === 'string'
+      ? patch.completedStepId.trim()
+      : undefined;
+    if (
+      completedStepId
+      && !LITERARY_CIRCLE_ONBOARDING_STEPS.includes(
+        completedStepId as typeof LITERARY_CIRCLE_ONBOARDING_STEPS[number]
+      )
+    ) {
+      throw new Error('Literary Circle onboarding step is invalid.');
+    }
+    const allowedStatuses = new Set<LiteraryCircleOnboardingStatus>([
+      'not_started',
+      'in_progress',
+      'completed',
+      'dismissed'
+    ]);
+    if (patch.status !== undefined && !allowedStatuses.has(patch.status)) {
+      throw new Error('Literary Circle onboarding status is invalid.');
+    }
+    if (!completedStepId && patch.status === undefined) {
+      throw new Error('Complete an onboarding step or provide an onboarding status.');
+    }
+
+    const db = getDb();
+    const persisted = await db.runTransaction(async firestoreTransaction => {
+      const affiliateRef = db.collection('affiliates').doc(id);
+      const settingsRef = db.collection('site_configs').doc(LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID);
+      const [affiliateSnapshot, settingsSnapshot] = await Promise.all([
+        firestoreTransaction.get(affiliateRef),
+        firestoreTransaction.get(settingsRef)
+      ]);
+      if (!affiliateSnapshot.exists) throw new Error('Affiliate not found.');
+
+      const settings = normalizeLiteraryCircleSettings(
+        settingsSnapshot.exists ? settingsSnapshot.data() : cachedLiteraryCircleSettings
+      );
+      const previousAffiliate: AffiliateAccount = {
+        ...(affiliateSnapshot.data() as AffiliateAccount),
+        id
+      };
+      const now = new Date().toISOString();
+      const previousMembership = previousAffiliate.literaryCircle || createLiteraryCircleMembership({
+        now: previousAffiliate.createdAt,
+        settings,
+        foundingMember: false,
+        audience: 'existing_upgrade',
+        actor
+      });
+      const completedStepIds = Array.from(new Set([
+        ...previousMembership.onboarding.completedStepIds,
+        ...(completedStepId ? [completedStepId] : [])
+      ]));
+      const allStepsComplete = LITERARY_CIRCLE_ONBOARDING_STEPS.every(step => completedStepIds.includes(step));
+      const status = patch.status
+        || (allStepsComplete ? 'completed' : 'in_progress');
+      const onboarding: AffiliateLiteraryCircleMembership['onboarding'] = {
+        ...previousMembership.onboarding,
+        version: settings.onboardingVersion,
+        status,
+        completedStepIds,
+        welcomeRequired: previousMembership.onboarding.welcomeRequired
+          && completedStepId !== 'welcome'
+          && status !== 'completed'
+          && status !== 'dismissed',
+        ...(previousMembership.onboarding.startedAt
+          ? { startedAt: previousMembership.onboarding.startedAt }
+          : (status !== 'not_started' ? { startedAt: now } : {})),
+        ...(status === 'completed'
+          ? { completedAt: previousMembership.onboarding.completedAt || now }
+          : {})
+      };
+      if (status !== 'completed') delete onboarding.completedAt;
+
+      const nextMembership: AffiliateLiteraryCircleMembership = {
+        ...previousMembership,
+        onboarding
+      };
+      const updatedAffiliate: AffiliateAccount = {
+        ...previousAffiliate,
+        literaryCircle: nextMembership,
+        updatedAt: now
+      };
+      firestoreTransaction.update(affiliateRef, {
+        literaryCircle: nextMembership,
+        updatedAt: now
+      });
+      return {
+        previousAffiliate,
+        updatedAffiliate,
+        settings
+      };
+    });
+
+    cachedLiteraryCircleSettings = persisted.settings;
+    const updated = cacheFreshAffiliateRecord(id, persisted.updatedAffiliate);
+    if (!updated) throw new Error('Affiliate not found.');
+    this.recordAudit(
+      actor,
+      'literary_circle_onboarding_updated',
+      'affiliate',
+      `Updated Literary Circle onboarding for ${updated.name} (${updated.affiliateCode})`,
+      id,
+      persisted.previousAffiliate.literaryCircle?.onboarding,
+      updated.literaryCircle?.onboarding
+    );
+    return this.getAffiliateById(id) || updated;
+  },
+
+  async hasComplimentaryCatalogueAccess(
+    id: string,
+    options: { forceFresh?: boolean } = {}
+  ): Promise<boolean> {
+    const affiliate = options.forceFresh
+      ? await this.getAffiliateByIdFresh(id)
+      : this.getAffiliateById(id);
+    return cachedLiteraryCircleSettings.enabled && isAffiliateComplimentaryAccessActive(affiliate);
   },
 
   async createAffiliate(data: Partial<AffiliateAccount>, actor = 'System'): Promise<AffiliateAccount> {
@@ -701,6 +1162,13 @@ export const affiliateStore = {
       termsAcceptedAt: data.termsAcceptedAt || now,
       createdAt: now,
       updatedAt: now,
+      literaryCircle: createLiteraryCircleMembership({
+        now,
+        settings: cachedLiteraryCircleSettings,
+        foundingMember: false,
+        audience: 'new_affiliate',
+        actor
+      }),
       sessionVersion: createAffiliateSessionVersion()
     };
 
@@ -1122,7 +1590,21 @@ export const affiliateStore = {
     const campaign = campaignCode
       ? cachedCampaigns.find(c => c.code.toUpperCase() === campaignCode.toUpperCase())
       : undefined;
-    return calculateCommissionRateFromRecords(affiliate, articleId, cachedSettings, campaign);
+    const now = new Date().toISOString();
+    const monthlyVerifiedSales = countVerifiedSalesForPeriod(
+      cachedCommissions.filter(commission => commission.affiliateId === affiliate.id),
+      literaryCirclePeriodKey(now),
+      cachedLiteraryCircleSettings.qualificationEffectiveFrom
+    );
+    return calculateCommissionRateFromRecords(
+      affiliate,
+      articleId,
+      cachedSettings,
+      campaign,
+      cachedLiteraryCircleSettings,
+      monthlyVerifiedSales,
+      now
+    );
   },
 
   async recordAffiliateSale(tx: PaymentTransaction, affiliateRefCode?: string, campaignCode?: string): Promise<AffiliateSaleCommission | null> {
@@ -1139,10 +1621,14 @@ export const affiliateStore = {
     if (!transactionHasValidAffiliateAttribution(tx)) return null;
     const saleAmountKes = Number(tx.amount);
     if (!Number.isFinite(saleAmountKes) || saleAmountKes <= 0 || saleAmountKes > 1_000_000) return null;
+    if (tx.purchaseKind === 'subscription' && typeof tx.subscriptionRenewal !== 'boolean') return null;
     const attributedAtMs = tx.affiliateAttributionAt
       ? Date.parse(tx.affiliateAttributionAt)
       : Date.parse(tx.createdAt);
     const now = new Date().toISOString();
+    const transactionAt = [tx.confirmedAt, tx.settledAt, tx.completedAt, tx.createdAt]
+      .find(value => typeof value === 'string' && Number.isFinite(Date.parse(value)));
+    if (!transactionAt) return null;
     const commissionId = `com_tx_${crypto.createHash('sha256')
       .update(tx.checkoutRequestId || tx.id)
       .digest('hex')
@@ -1244,10 +1730,38 @@ export const affiliateStore = {
       }
 
       const settingsRef = db.collection('site_configs').doc('affiliate_settings');
-      const settingsSnapshot = await firestoreTransaction.get(settingsRef);
+      const literaryCircleSettingsRef = db.collection('site_configs').doc(LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID);
+      const [settingsSnapshot, literaryCircleSettingsSnapshot] = await Promise.all([
+        firestoreTransaction.get(settingsRef),
+        firestoreTransaction.get(literaryCircleSettingsRef)
+      ]);
       const freshSettings = normalizeAffiliateSettings(
         settingsSnapshot.exists ? settingsSnapshot.data() : undefined
       );
+      const freshLiteraryCircleSettings = normalizeLiteraryCircleSettings(
+        literaryCircleSettingsSnapshot.exists ? literaryCircleSettingsSnapshot.data() : undefined
+      );
+      const transactionLiteraryCircleSettings = resolveLiteraryCircleSettingsForTransaction(
+        freshLiteraryCircleSettings,
+        transactionAt
+      );
+
+      const isSubscriptionRenewal = tx.purchaseKind === 'subscription' && tx.subscriptionRenewal === true;
+      const subscriptionRenewalCommissionEnabled = shouldApplyLiteraryCircleCommissionPolicy(
+        freshLiteraryCircleSettings,
+        transactionAt
+      ) && transactionLiteraryCircleSettings.commissionPolicy.subscriptionRenewalsEligible;
+      if (isSubscriptionRenewal && !subscriptionRenewalCommissionEnabled) {
+        return {
+          created: false,
+          commission: null,
+          affiliateId: freshAffiliate.id,
+          freshAffiliate,
+          freshCampaign: undefined,
+          freshSettings,
+          freshLiteraryCircleSettings
+        };
+      }
 
       let freshCampaign: AffiliateCampaign | undefined;
       let campaignRef: any;
@@ -1286,7 +1800,11 @@ export const affiliateStore = {
           freshSettings
         };
       }
-      if (freshAffiliate.allowedPieceIds?.length && !freshAffiliate.allowedPieceIds.includes(tx.articleId)) {
+      if (
+        tx.purchaseKind !== 'subscription'
+        && freshAffiliate.allowedPieceIds?.length
+        && !freshAffiliate.allowedPieceIds.includes(tx.articleId)
+      ) {
         return {
           created: false,
           commission: null,
@@ -1296,15 +1814,6 @@ export const affiliateStore = {
           freshSettings
         };
       }
-
-      const commissionRate = calculateCommissionRateFromRecords(
-        freshAffiliate,
-        tx.articleId,
-        freshSettings,
-        freshCampaign
-      );
-      const commissionAmountKes = Math.round(saleAmountKes * (commissionRate / 100));
-      const grossCreatorRevenueKes = saleAmountKes - commissionAmountKes;
 
       let isSelfReferral = false;
       if (tx.phoneNumber && freshAffiliate.phone) {
@@ -1320,9 +1829,66 @@ export const affiliateStore = {
         }
       }
 
+      const initialRateResolution = resolveAffiliateCommissionRate({
+        affiliate: freshAffiliate,
+        articleId: tx.articleId,
+        affiliateSettings: freshSettings,
+        campaign: freshCampaign,
+        literaryCircleSettings: freshLiteraryCircleSettings,
+        monthlyVerifiedSales: 0,
+        transactionAt
+      });
+      let monthlyVerifiedSales = 0;
+      if (
+        !isSelfReferral
+        && initialRateResolution.source === 'literary_circle_tier'
+        && freshAffiliate.literaryCircle?.tier.source !== 'manual'
+      ) {
+        const commissionQuery = db.collection('affiliate_commissions')
+          .where('affiliateId', '==', freshAffiliate.id)
+          .limit(10_000);
+        const commissionSnapshot = await firestoreTransaction.get(commissionQuery) as any;
+        const existingCommissions = (commissionSnapshot.docs || []).map((document: any) => ({
+          ...(document.data() as AffiliateSaleCommission),
+          id: document.id
+        }));
+        const periodKey = literaryCirclePeriodKey(transactionAt);
+        monthlyVerifiedSales = countVerifiedSalesForPeriod(
+          existingCommissions,
+          periodKey,
+          transactionLiteraryCircleSettings.qualificationEffectiveFrom
+        );
+        const qualificationStartsAt = Date.parse(
+          transactionLiteraryCircleSettings.qualificationEffectiveFrom || '1970-01-01T00:00:00.000Z'
+        );
+        if (
+          periodKey
+          && literaryCirclePeriodKey(transactionAt) === periodKey
+          && Date.parse(transactionAt) >= qualificationStartsAt
+        ) {
+          monthlyVerifiedSales += 1;
+        }
+      }
+      const rateResolution = resolveAffiliateCommissionRate({
+        affiliate: freshAffiliate,
+        articleId: tx.articleId,
+        affiliateSettings: freshSettings,
+        campaign: freshCampaign,
+        literaryCircleSettings: transactionLiteraryCircleSettings,
+        monthlyVerifiedSales,
+        transactionAt
+      });
+      const commissionRate = rateResolution.rate;
+      const commissionAmountKes = Math.round(saleAmountKes * (commissionRate / 100));
+      const grossCreatorRevenueKes = saleAmountKes - commissionAmountKes;
+
       const autoApprove = freshSettings.autoApproveCommissions;
       const status: CommissionStatus = isSelfReferral ? 'REJECTED' : (autoApprove ? 'APPROVED' : 'PENDING');
       const effectiveCommissionAmount = isSelfReferral ? 0 : commissionAmountKes;
+      const priorVerifiedSaleAt = Date.parse(freshAffiliate.lastVerifiedSaleAt || '');
+      const latestVerifiedSaleAt = Number.isFinite(priorVerifiedSaleAt) && priorVerifiedSaleAt > Date.parse(transactionAt)
+        ? new Date(priorVerifiedSaleAt).toISOString()
+        : new Date(transactionAt).toISOString();
       const commission: AffiliateSaleCommission = {
         id: commissionId,
         orderId: resolveOrderId(tx),
@@ -1343,13 +1909,27 @@ export const affiliateStore = {
         paymentMethod: tx.paymentMethod || 'mpesa',
         status,
         campaignCode: freshCampaign?.code,
+        purchaseKind: tx.purchaseKind || 'piece',
+        ...(tx.subscriptionPlanId ? { subscriptionPlanId: tx.subscriptionPlanId } : {}),
+        ...(tx.purchaseKind === 'subscription' ? { subscriptionRenewal: tx.subscriptionRenewal === true } : {}),
+        ...(!isSelfReferral ? { commissionRateSource: rateResolution.source } : {}),
+        ...(!isSelfReferral && rateResolution.literaryCircleTierId
+          ? { literaryCircleTierId: rateResolution.literaryCircleTierId }
+          : {}),
+        ...(!isSelfReferral && (isSubscriptionRenewal || rateResolution.literaryCirclePolicyVersion)
+          ? {
+              literaryCirclePolicyVersion: isSubscriptionRenewal
+                ? transactionLiteraryCircleSettings.commissionPolicy.version
+                : rateResolution.literaryCirclePolicyVersion
+            }
+          : {}),
         fraudFlag: isSelfReferral ? {
           flagged: true,
           reason: 'Self-referral prohibited: Buyer contact matches affiliate profile.',
           severity: 'high',
           reviewed: true
         } : undefined,
-        createdAt: now,
+        createdAt: transactionAt,
         approvedAt: (!isSelfReferral && autoApprove) ? now : undefined
       };
 
@@ -1361,6 +1941,7 @@ export const affiliateStore = {
       };
       if (!isSelfReferral) {
         affiliateIncrement.totalCommissionEarnedKes = FieldValue.increment(effectiveCommissionAmount);
+        affiliateIncrement.lastVerifiedSaleAt = latestVerifiedSaleAt;
         if (status === 'APPROVED') {
           affiliateIncrement.balanceAvailableKes = FieldValue.increment(effectiveCommissionAmount);
         } else {
@@ -1386,6 +1967,7 @@ export const affiliateStore = {
           totalCommissionEarnedKes: (Number(freshAffiliate.totalCommissionEarnedKes) || 0) + (isSelfReferral ? 0 : commissionAmountKes),
           balanceAvailableKes: (Number(freshAffiliate.balanceAvailableKes) || 0) + (!isSelfReferral && status === 'APPROVED' ? commissionAmountKes : 0),
           balancePendingKes: (Number(freshAffiliate.balancePendingKes) || 0) + (!isSelfReferral && status === 'PENDING' ? commissionAmountKes : 0),
+          ...(!isSelfReferral ? { lastVerifiedSaleAt: latestVerifiedSaleAt } : {}),
           lastActivityAt: now
         },
         freshCampaign: freshCampaign
@@ -1396,13 +1978,20 @@ export const affiliateStore = {
               commissionsKes: (Number(freshCampaign.commissionsKes) || 0) + effectiveCommissionAmount
             }
           : undefined,
-        freshSettings
+        freshSettings,
+        freshLiteraryCircleSettings
       };
     });
 
     if (persisted.freshSettings) {
       cachedSettings = persisted.freshSettings;
       writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+    }
+    if ('freshLiteraryCircleSettings' in persisted && persisted.freshLiteraryCircleSettings) {
+      cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(
+        persisted.freshLiteraryCircleSettings
+      );
+      writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
     }
     if (persisted.affiliateId) {
       cacheFreshAffiliateRecord(
@@ -1742,9 +2331,24 @@ export const affiliateStore = {
     const commissionApproved = sales.filter(s => s.status === 'APPROVED').reduce((acc, s) => acc + s.commissionAmountKes, 0);
     const commissionPaid = sales.filter(s => s.status === 'PAID').reduce((acc, s) => acc + s.commissionAmountKes, 0);
     const totalRevenue = sales.reduce((acc, s) => acc + s.saleAmountKes, 0);
-    const activeRate = (affiliate.customCommissionRate !== null && affiliate.customCommissionRate !== undefined && affiliate.customCommissionRate > 0)
-      ? affiliate.customCommissionRate
-      : (cachedSettings.defaultCommissionRate || 15);
+    const dashboardAt = new Date().toISOString();
+    const dashboardPolicy = resolveLiteraryCircleSettingsForTransaction(
+      cachedLiteraryCircleSettings,
+      dashboardAt
+    );
+    const activeRate = calculateCommissionRateFromRecords(
+      affiliate,
+      '',
+      cachedSettings,
+      undefined,
+      dashboardPolicy,
+      countVerifiedSalesForPeriod(
+        sales,
+        literaryCirclePeriodKey(dashboardAt),
+        dashboardPolicy.qualificationEffectiveFrom
+      ),
+      dashboardAt
+    );
 
     const safeAffiliate = {
       ...sanitizeAffiliateForResponse(affiliate),
@@ -1772,7 +2376,13 @@ export const affiliateStore = {
         activeCommissionRate: activeRate,
         attributionDays: affiliate.attributionDays || cachedSettings.defaultAttributionDays || 30,
         minPayoutThresholdKes: cachedSettings.minPayoutThresholdKes || 1000
-      }
+      },
+      literaryCircle: buildLiteraryCircleDashboardSummary({
+        affiliate,
+        // Never pass the global ledger into an affiliate-facing summary.
+        commissions: sales,
+        settings: cachedLiteraryCircleSettings
+      })
     };
   },
 
@@ -1800,6 +2410,15 @@ export const affiliateStore = {
     const outstandingBalanceKes = affiliates.reduce((sum, a) => sum + (a.balanceAvailableKes || 0), 0);
 
     const flaggedCount = cachedCommissions.filter(c => c.fraudFlag?.flagged && !c.fraudFlag.reviewed).length;
+    const affiliateIdsWithVerifiedSales = new Set(
+      cachedCommissions
+        .filter(isVerifiedAffiliateCommission)
+        .map(commission => commission.affiliateId)
+    );
+    const affiliatesWithLifetimeSales = affiliates.filter(affiliate =>
+      affiliateIdsWithVerifiedSales.has(affiliate.id)
+    ).length;
+    const affiliatesWithoutSales = totalAffiliates - affiliatesWithLifetimeSales;
 
     // Top performers (strictly admin only)
     const topAffiliates = affiliates
@@ -1842,6 +2461,9 @@ export const affiliateStore = {
       settings: cachedSettings,
       auditLogs: this.getAuditLogs(50),
       flaggedCount,
+      affiliatesWithLifetimeSales,
+      affiliatesWithoutSales,
+      literaryCircleSettings: normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings),
       topAffiliates
     };
   },

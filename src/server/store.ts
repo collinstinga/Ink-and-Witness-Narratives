@@ -179,6 +179,7 @@ export type MpesaCallbackIntent = {
   subscriptionPlanName?: string;
   subscriptionDurationMonths?: number;
   subscriptionRenewable?: boolean;
+  subscriptionRenewal?: boolean;
   subscriptionPlanVersion?: number;
   phoneNumber: string;
   amount: number;
@@ -832,6 +833,7 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
       || intent.subscriptionDurationMonths < 1
       || intent.subscriptionDurationMonths > 120
       || typeof intent.subscriptionRenewable !== 'boolean'
+      || (intent.subscriptionRenewal !== undefined && typeof intent.subscriptionRenewal !== 'boolean')
       || intent.subscriptionPlanVersion !== 1
       || !intent.userId
       || !intent.userEmail
@@ -841,6 +843,7 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
     || intent.subscriptionPlanName !== undefined
     || intent.subscriptionDurationMonths !== undefined
     || intent.subscriptionRenewable !== undefined
+    || intent.subscriptionRenewal !== undefined
     || intent.subscriptionPlanVersion !== undefined
   ) {
     return undefined;
@@ -924,6 +927,7 @@ function mpesaIntentsMatch(left: MpesaCallbackIntent, right: MpesaCallbackIntent
     left.subscriptionPlanName === right.subscriptionPlanName &&
     left.subscriptionDurationMonths === right.subscriptionDurationMonths &&
     left.subscriptionRenewable === right.subscriptionRenewable &&
+    left.subscriptionRenewal === right.subscriptionRenewal &&
     left.subscriptionPlanVersion === right.subscriptionPlanVersion &&
     left.phoneNumber === right.phoneNumber &&
     left.amount === right.amount &&
@@ -964,6 +968,7 @@ function transactionFromMpesaIntent(
     subscriptionPlanName: intent.subscriptionPlanName,
     subscriptionDurationMonths: intent.subscriptionDurationMonths,
     subscriptionRenewable: intent.subscriptionRenewable,
+    subscriptionRenewal: intent.subscriptionRenewal,
     subscriptionPlanVersion: intent.subscriptionPlanVersion,
     phoneNumber: intent.phoneNumber,
     amount: intent.amount,
@@ -3402,6 +3407,7 @@ export const store = {
         settledAt: current.settledAt || now,
         downloadToken,
         ...(subscriptionSettlement ? {
+          subscriptionRenewal: subscriptionSettlement.isRenewal,
           subscriptionPeriodStartsAt: subscriptionSettlement.periodStartsAt,
           subscriptionExpiresAt: subscriptionSettlement.expiresAt
         } : {})
@@ -3733,6 +3739,7 @@ export const store = {
         updatedAt: now,
         ...(downloadToken ? { downloadToken } : {}),
         ...(subscriptionSettlement ? {
+          subscriptionRenewal: subscriptionSettlement.isRenewal,
           subscriptionPeriodStartsAt: subscriptionSettlement.periodStartsAt,
           subscriptionExpiresAt: subscriptionSettlement.expiresAt
         } : {})
