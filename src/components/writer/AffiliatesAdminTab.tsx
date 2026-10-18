@@ -28,7 +28,8 @@ import {
   FileText,
   AlertTriangle,
   History,
-  Tag
+  Tag,
+  Images
 } from 'lucide-react';
 import { 
   AdminAffiliatesSummary, 
@@ -39,20 +40,23 @@ import {
   AffiliateSettings, 
   AffiliateAuditLogEntry,
   Article,
+  LiteraryCircleResourceLibrary,
   LiteraryCircleSettings
 } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
+import { prepareImageFileForUpload } from '../../utils/imageUploadPolicy.js';
 import {
   LiteraryCircleAdminPanel,
   type LiteraryCircleMembershipAdminPatch,
 } from './LiteraryCircleAdminPanel.js';
+import { LiteraryCircleResourcesAdmin } from './LiteraryCircleResourcesAdmin.js';
 
 interface AffiliatesAdminTabProps {
   articles: Article[];
 }
 
-type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
+type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'resources' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
 
 export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
@@ -114,6 +118,13 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [literaryCircleSettings, setLiteraryCircleSettings] = useState<LiteraryCircleSettings | null>(null);
   const [savingLiteraryCircleSettings, setSavingLiteraryCircleSettings] = useState(false);
   const [savingLiteraryCircleAffiliateId, setSavingLiteraryCircleAffiliateId] = useState<string>();
+  const [resourceLibrary, setResourceLibrary] = useState<LiteraryCircleResourceLibrary | null>(null);
+  const [resourceLibraryLoading, setResourceLibraryLoading] = useState(false);
+  const [resourceLibraryAttempted, setResourceLibraryAttempted] = useState(false);
+  const [resourceLibraryError, setResourceLibraryError] = useState('');
+  const [savingResourceLibrary, setSavingResourceLibrary] = useState(false);
+  const [uploadingResourceId, setUploadingResourceId] = useState<string>();
+  const resourceRequestIdRef = useRef(0);
 
   const updateSettingsForm = (patch: Partial<AffiliateSettings>) => {
     settingsDirtyRef.current = true;
@@ -174,6 +185,86 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     }, 15000);
     return () => clearInterval(timer);
   }, []);
+
+  const loadResourceLibrary = async () => {
+    const requestId = ++resourceRequestIdRef.current;
+    setResourceLibraryAttempted(true);
+    setResourceLibraryLoading(true);
+    setResourceLibraryError('');
+    try {
+      const response = await api.getAdminLiteraryCircleResources();
+      if (requestId !== resourceRequestIdRef.current) return;
+      setResourceLibrary(response.library);
+    } catch (requestError) {
+      if (requestId !== resourceRequestIdRef.current) return;
+      setResourceLibraryError(
+        requestError instanceof Error
+          ? requestError.message
+          : 'Promotional resources could not be loaded.',
+      );
+    } finally {
+      if (requestId === resourceRequestIdRef.current) setResourceLibraryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeSubTab === 'resources' && !resourceLibrary && !resourceLibraryLoading && !resourceLibraryAttempted) {
+      void loadResourceLibrary();
+    }
+  }, [activeSubTab, resourceLibrary, resourceLibraryAttempted, resourceLibraryLoading]);
+
+  const handleSaveResourceLibrary = async (nextLibrary: LiteraryCircleResourceLibrary) => {
+    setSavingResourceLibrary(true);
+    setResourceLibraryError('');
+    try {
+      const response = await api.updateAdminLiteraryCircleResources(nextLibrary);
+      setResourceLibrary(response.library);
+      return response.library;
+    } catch (saveError) {
+      throw saveError;
+    } finally {
+      setSavingResourceLibrary(false);
+    }
+  };
+
+  const handleUploadResourceImage = async (
+    resourceId: string,
+    file: File,
+    assetAlt: string,
+    expectedRevision: number,
+  ) => {
+    setUploadingResourceId(resourceId);
+    setResourceLibraryError('');
+    try {
+      const dataUrl = await prepareImageFileForUpload(file);
+      const response = await api.uploadAdminLiteraryCircleResourceImage({
+        resourceId,
+        dataUrl,
+        assetAlt,
+        expectedRevision,
+      });
+      setResourceLibrary(response.library);
+      return response.library;
+    } catch (uploadError) {
+      throw uploadError;
+    } finally {
+      setUploadingResourceId(undefined);
+    }
+  };
+
+  const handleRemoveResourceImage = async (resourceId: string, expectedRevision: number) => {
+    setUploadingResourceId(resourceId);
+    setResourceLibraryError('');
+    try {
+      const response = await api.removeAdminLiteraryCircleResourceImage({ resourceId, expectedRevision });
+      setResourceLibrary(response.library);
+      return response.library;
+    } catch (removeError) {
+      throw removeError;
+    } finally {
+      setUploadingResourceId(undefined);
+    }
+  };
 
   const handleCreateAffiliate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -562,6 +653,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         >
           <Sparkles className="w-3.5 h-3.5" />
           <span>Literary Circle</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('resources')}
+          className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+            activeSubTab === 'resources' ? 'bg-violet-950 text-violet-200 border border-violet-700/80 shadow-sm' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Images className="w-3.5 h-3.5" />
+          <span>Promotional Library{resourceLibrary ? ` (${resourceLibrary.items.length})` : ''}</span>
         </button>
 
         <button
@@ -960,6 +1061,45 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
             ) : (
               <div className="rounded-2xl border border-amber-700/60 bg-amber-950/20 p-6 text-sm text-amber-200">
                 Literary Circle settings could not be loaded. Refresh the control center before making programme changes.
+              </div>
+            )
+          )}
+
+          {/* WRITER-APPROVED PROMOTIONAL RESOURCE LIBRARY */}
+          {activeSubTab === 'resources' && (
+            resourceLibraryLoading ? (
+              <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-violet-300/20 bg-violet-950/10 text-sm text-violet-200">
+                <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                Loading promotional resources…
+              </div>
+            ) : resourceLibrary ? (
+              <div className="space-y-3">
+                {resourceLibraryError && (
+                  <div role="alert" className="rounded-xl border border-amber-400/30 bg-amber-950/20 p-3 text-sm text-amber-100">
+                    {resourceLibraryError}
+                  </div>
+                )}
+                <LiteraryCircleResourcesAdmin
+                  library={resourceLibrary}
+                  articles={articles}
+                  campaigns={summary?.campaigns || []}
+                  saving={savingResourceLibrary}
+                  uploadingResourceId={uploadingResourceId}
+                  onSaveLibrary={handleSaveResourceLibrary}
+                  onUploadImage={handleUploadResourceImage}
+                  onRemoveImage={handleRemoveResourceImage}
+                />
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-amber-700/60 bg-amber-950/20 p-6 text-sm text-amber-200">
+                <p>{resourceLibraryError || 'Promotional resources could not be loaded.'}</p>
+                <button
+                  type="button"
+                  onClick={() => void loadResourceLibrary()}
+                  className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl border border-amber-300/30 bg-amber-400/10 px-4 py-2 font-mono text-xs font-bold text-amber-100"
+                >
+                  <RefreshCw aria-hidden="true" className="h-4 w-4" /> Retry
+                </button>
               </div>
             )
           )}

@@ -1047,6 +1047,9 @@ export interface SavedAssetRecord {
   savedAt: string;
   updatedAt: string;
   cropSettings?: any;
+  accessScope?: 'public' | 'literary_circle_private';
+  resourceId?: string;
+  shareable?: boolean;
 }
 
 export interface HomepageBanner {
@@ -1215,6 +1218,50 @@ export type LiteraryCircleCommunityPostType =
   | 'monthly_campaign'
   | 'featured_piece'
   | 'promotional_guidance';
+
+export type LiteraryCircleResourceKind =
+  | 'campaign_kit'
+  | 'social_copy'
+  | 'piece_cover'
+  | 'excerpt'
+  | 'guidance'
+  | 'subscription_campaign';
+
+export type LiteraryCircleResourceDestination =
+  | { kind: 'home' }
+  | {
+      kind: 'piece' | 'collection' | 'bundle' | 'subscription';
+      id: string;
+    };
+
+export interface LiteraryCirclePromotionalResource {
+  id: string;
+  kind: LiteraryCircleResourceKind;
+  title: string;
+  description?: string;
+  body?: string;
+  destination: LiteraryCircleResourceDestination;
+  campaignCode?: string;
+  assetId?: string;
+  assetAlt?: string;
+  isPublished: boolean;
+  order: number;
+  publishedAt?: string;
+  expiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LiteraryCircleResourceLibrary {
+  schemaVersion: 1;
+  revision: number;
+  enabled: boolean;
+  title: string;
+  description: string;
+  items: LiteraryCirclePromotionalResource[];
+  updatedAt?: string;
+  updatedBy?: string;
+}
 
 export interface LiteraryCircleCommunityPost {
   id: string;
@@ -1472,7 +1519,7 @@ export interface AffiliateAuditLogEntry {
   timestamp: string;
   actor: string;
   action: string;
-  targetType: 'affiliate' | 'commission' | 'payout' | 'settings' | 'campaign' | 'link';
+  targetType: 'affiliate' | 'commission' | 'payout' | 'settings' | 'campaign' | 'link' | 'resource';
   targetId?: string;
   summary: string;
   previousValue?: any;

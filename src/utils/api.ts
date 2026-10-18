@@ -42,6 +42,7 @@ import {
   AffiliateLiteraryCircleMembership,
   LiteraryCircleDashboardSummary,
   LiteraryCircleOnboardingStatus,
+  LiteraryCircleResourceLibrary,
   LiteraryCircleSettings,
   LiteraryCircleComplimentaryAccessStatus
 } from '../types.js';
@@ -2439,6 +2440,22 @@ export const api = {
     );
   },
 
+  async getAffiliateLiteraryCircleResources(): Promise<{
+    success: boolean;
+    library: LiteraryCircleResourceLibrary;
+  }> {
+    const token = getAffiliateToken();
+    if (!token) throw new Error('Please log in to open Literary Circle promotional resources.');
+    return safeFetchJson(
+      '/api/affiliate/literary-circle/resources',
+      {
+        cache: 'no-store',
+        headers: { 'x-affiliate-token': token }
+      },
+      'Promotional resources could not be loaded. Please retry.'
+    );
+  },
+
   async getAffiliatePayoutSettings(): Promise<{
     success: boolean;
     payoutSettings: any;
@@ -2669,6 +2686,84 @@ export const api = {
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load Literary Circle settings.'
+    );
+  },
+
+  async getAdminLiteraryCircleResources(): Promise<{
+    success: boolean;
+    library: LiteraryCircleResourceLibrary;
+  }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/literary-circle/resources',
+      {
+        cache: 'no-store',
+        headers: { 'x-admin-token': activeToken || '' }
+      },
+      'Failed to load Literary Circle promotional resources.'
+    );
+  },
+
+  async updateAdminLiteraryCircleResources(
+    library: LiteraryCircleResourceLibrary
+  ): Promise<{ success: boolean; library: LiteraryCircleResourceLibrary; message: string }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/literary-circle/resources',
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify(library)
+      },
+      'Failed to save Literary Circle promotional resources.'
+    );
+  },
+
+  async uploadAdminLiteraryCircleResourceImage(input: {
+    resourceId: string;
+    dataUrl: string;
+    assetAlt: string;
+    expectedRevision: number;
+  }): Promise<{ success: boolean; library: LiteraryCircleResourceLibrary; message: string }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/literary-circle/resource-image',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify(input)
+      },
+      'Failed to upload Literary Circle promotional artwork.'
+    );
+  },
+
+  async removeAdminLiteraryCircleResourceImage(input: {
+    resourceId: string;
+    expectedRevision: number;
+  }): Promise<{
+    success: boolean;
+    library: LiteraryCircleResourceLibrary;
+    retainedShareableAsset: boolean;
+    message: string;
+  }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/literary-circle/resource-image',
+      {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify(input)
+      },
+      'Failed to remove Literary Circle promotional artwork.'
     );
   },
 

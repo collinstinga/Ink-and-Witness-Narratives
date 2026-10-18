@@ -40,6 +40,7 @@ interface LiteraryCircleOnboardingPanelProps {
   onUpdate: (update: LiteraryCircleOnboardingUpdate) => Promise<void>;
   onOpenCatalogue?: () => void;
   onOpenLinkBuilder?: () => void;
+  onOpenPromotionalResources?: () => void;
 }
 
 export const LITERARY_CIRCLE_ONBOARDING_STEPS = [
@@ -93,6 +94,7 @@ export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPan
   onUpdate,
   onOpenCatalogue,
   onOpenLinkBuilder,
+  onOpenPromotionalResources,
 }) => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -238,7 +240,7 @@ export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPan
           </div>
         )}
 
-        {(currentStep.id === 'first_link' || currentStep.id === 'promotional_resources') && onOpenLinkBuilder && (
+        {currentStep.id === 'first_link' && onOpenLinkBuilder && (
           <button
             type="button"
             onClick={onOpenLinkBuilder}
@@ -246,6 +248,17 @@ export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPan
           >
             <Share2 aria-hidden="true" className="h-4 w-4" />
             Open link &amp; campaign builder
+          </button>
+        )}
+
+        {currentStep.id === 'promotional_resources' && onOpenPromotionalResources && (
+          <button
+            type="button"
+            onClick={onOpenPromotionalResources}
+            className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl border border-fuchsia-300/30 bg-fuchsia-400/10 px-3 py-2 font-mono text-xs font-bold text-fuchsia-200 transition hover:bg-fuchsia-400/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-300"
+          >
+            <Sparkles aria-hidden="true" className="h-4 w-4" />
+            Open promotional resources
           </button>
         )}
 

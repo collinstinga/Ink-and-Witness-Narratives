@@ -116,4 +116,23 @@ describe('LiteraryCircleOnboardingPanel', () => {
     expect(enabledMarkup).toContain('joining is optional');
     expect(disabledMarkup).not.toContain('chat.whatsapp.com/circle');
   });
+
+  it('routes the promotional-resources step to the approved toolkit instead of the link builder', () => {
+    const priorStepIds = LITERARY_CIRCLE_ONBOARDING_STEPS
+      .slice(0, LITERARY_CIRCLE_ONBOARDING_STEPS.findIndex(step => step.id === 'promotional_resources'))
+      .map(step => step.id);
+    const markup = renderToStaticMarkup(
+      <LiteraryCircleOnboardingPanel
+        onboarding={onboarding({ status: 'in_progress', completedStepIds: priorStepIds })}
+        affiliateCode="AMINA9"
+        recommendedPieces={[]}
+        onUpdate={vi.fn(async () => undefined)}
+        onOpenLinkBuilder={vi.fn()}
+        onOpenPromotionalResources={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Open promotional resources');
+    expect(markup).not.toContain('Open link &amp; campaign builder');
+  });
 });

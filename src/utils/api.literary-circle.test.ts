@@ -16,6 +16,7 @@ describe('Literary Circle onboarding API client', () => {
   beforeEach(() => {
     const localStorage = new MemoryStorage();
     localStorage.setItem('ink_affiliate_session_active', '1');
+    localStorage.setItem('ink_writer_session_active', '1');
     vi.stubGlobal('localStorage', localStorage);
   });
 
@@ -77,6 +78,62 @@ describe('Literary Circle onboarding API client', () => {
     expect(init.cache).toBe('no-store');
     expect(init.headers).toMatchObject({
       'x-affiliate-token': 'cookie-session',
+    });
+  });
+
+  it('loads promotional resources only through a no-store affiliate request', async () => {
+    const library = {
+      schemaVersion: 1,
+      revision: 1,
+      enabled: true,
+      title: 'Partner toolkit',
+      description: 'Approved materials.',
+      items: [],
+    };
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ success: true, library }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.getAffiliateLiteraryCircleResources()).resolves.toMatchObject({ library });
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/affiliate/literary-circle/resources');
+    expect(init.cache).toBe('no-store');
+    expect(init.headers).toMatchObject({ 'x-affiliate-token': 'cookie-session' });
+  });
+
+  it('sends the writer resource revision with an atomic artwork association request', async () => {
+    const library = {
+      schemaVersion: 1,
+      revision: 4,
+      enabled: true,
+      title: 'Partner toolkit',
+      description: 'Approved materials.',
+      items: [],
+    };
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ success: true, library }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.uploadAdminLiteraryCircleResourceImage({
+      resourceId: 'resource-one',
+      dataUrl: 'data:image/png;base64,AAAA',
+      assetAlt: 'Indigo cover with gold lettering',
+      expectedRevision: 3,
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/affiliates/literary-circle/resource-image');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      resourceId: 'resource-one',
+      expectedRevision: 3,
     });
   });
 });

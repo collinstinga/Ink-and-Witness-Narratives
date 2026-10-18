@@ -130,6 +130,7 @@ const affiliateMocks = vi.hoisted(() => ({
   getPayouts: vi.fn(),
   getCampaigns: vi.fn(),
   getAuditLogs: vi.fn(),
+  getAuditLogsFresh: vi.fn(),
   createAffiliate: vi.fn(),
   updateAffiliate: vi.fn(),
   updateAffiliateCredential: vi.fn(),
@@ -144,7 +145,16 @@ const affiliateMocks = vi.hoisted(() => ({
   saveLiteraryCircleSettings: vi.fn(),
   updateLiteraryCircleMembership: vi.fn(),
   updateLiteraryCircleOnboarding: vi.fn(),
-  hasComplimentaryCatalogueAccess: vi.fn()
+  hasComplimentaryCatalogueAccess: vi.fn(),
+  rememberCommittedAudit: vi.fn()
+}));
+
+const resourceMocks = vi.hoisted(() => ({
+  getFresh: vi.fn(),
+  project: vi.fn(),
+  save: vi.fn(),
+  associateImage: vi.fn(),
+  removeImage: vi.fn()
 }));
 
 const affiliateErrorMocks = vi.hoisted(() => ({
@@ -208,6 +218,19 @@ vi.mock('./src/server/affiliateCredentials.js', () => ({
   validateAffiliatePasswordStrength: vi.fn(() => ({ valid: true })),
   verifyAffiliatePassword: vi.fn(async () => ({ valid: true, needsRehash: false }))
 }));
+vi.mock('./src/server/literaryCircleResources.js', () => ({
+  getLiteraryCircleResourceLibraryFresh: resourceMocks.getFresh,
+  projectLiteraryCircleResourcesForAffiliate: resourceMocks.project,
+  saveLiteraryCircleResourceLibrary: resourceMocks.save,
+  associateLiteraryCircleResourceImage: resourceMocks.associateImage,
+  removeLiteraryCircleResourceImage: resourceMocks.removeImage,
+  LiteraryCircleResourcesConflictError: class LiteraryCircleResourcesConflictError extends Error {
+    readonly code = 'LITERARY_CIRCLE_RESOURCES_CONFLICT';
+  },
+  LiteraryCircleResourcesValidationError: class LiteraryCircleResourcesValidationError extends Error {
+    readonly code = 'LITERARY_CIRCLE_RESOURCES_INVALID';
+  }
+}));
 vi.mock('./src/server/publicWriteSecurity.js', () => ({
   publicWriteValidators: new Proxy({}, {
     get: () => (_req: unknown, _res: unknown, next: () => void) => next()
@@ -264,6 +287,7 @@ describe('affiliate session route boundaries', () => {
     affiliateMocks.getPayouts.mockReturnValue([]);
     affiliateMocks.getCampaigns.mockReturnValue([]);
     affiliateMocks.getAuditLogs.mockReturnValue([]);
+    affiliateMocks.getAuditLogsFresh.mockResolvedValue([]);
     affiliateMocks.createAffiliate.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.updateAffiliate.mockImplementation((_id, patch) => ({
       ...privateAffiliate,
@@ -375,6 +399,37 @@ describe('affiliate session route boundaries', () => {
       }
     }));
     affiliateMocks.hasComplimentaryCatalogueAccess.mockResolvedValue(true);
+    const resourceLibrary = {
+      schemaVersion: 1,
+      revision: 2,
+      enabled: true,
+      title: 'Partner campaign desk',
+      description: 'Approved materials.',
+      items: [{
+        id: 'resource-one',
+        kind: 'social_copy',
+        title: 'Approved caption',
+        body: 'Current approved copy.',
+        destination: { kind: 'piece', id: publicArticleFixture.id },
+        isPublished: true,
+        order: 0,
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt: '2026-10-02T00:00:00.000Z'
+      }]
+    };
+    resourceMocks.getFresh.mockResolvedValue(resourceLibrary);
+    resourceMocks.project.mockImplementation(value => value);
+    resourceMocks.save.mockResolvedValue({ library: resourceLibrary, audit: { id: 'audit-resource-save' } });
+    resourceMocks.associateImage.mockResolvedValue({
+      library: resourceLibrary,
+      asset: { id: 'asset-one', shareable: false },
+      audit: { id: 'audit-resource-image' }
+    });
+    resourceMocks.removeImage.mockResolvedValue({
+      library: resourceLibrary,
+      retainedShareableAsset: false,
+      audit: { id: 'audit-resource-remove' }
+    });
   });
 
   it('uses cacheable verification for GET and force-fresh verification for mutations', async () => {
@@ -749,13 +804,38 @@ describe('affiliate session route boundaries', () => {
     expect(affiliateMocks.getCommissions).toHaveBeenCalled();
     expect(affiliateMocks.getPayouts).toHaveBeenCalled();
     expect(affiliateMocks.getCampaigns).toHaveBeenCalled();
-    expect(affiliateMocks.getAuditLogs).toHaveBeenCalled();
+    expect(affiliateMocks.getAuditLogsFresh).toHaveBeenCalled();
 
     const detailResponse = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}`, {
       headers: { cookie: `iw_session=${adminSessionToken}` }
     });
     expect(detailResponse.status).toBe(200);
     expect(affiliateMocks.getAffiliateById).toHaveBeenCalledWith(privateAffiliate.id);
+  });
+
+  it('loads admin affiliate audits from the shared store and fails closed if that read is unavailable', async () => {
+    affiliateMocks.getAuditLogsFresh.mockResolvedValueOnce([{
+      id: 'audit-shared-1',
+      timestamp: '2026-10-18T08:00:00.000Z',
+      actor: 'Writer',
+      action: 'literary_circle_resources_saved',
+      targetType: 'resource',
+      summary: 'Shared committed audit'
+    }]);
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/audit-logs?limit=25`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(await response.json()).toEqual([expect.objectContaining({ id: 'audit-shared-1' })]);
+    expect(affiliateMocks.getAuditLogsFresh).toHaveBeenCalledWith(25);
+
+    affiliateMocks.getAuditLogsFresh.mockRejectedValueOnce(new Error('private firestore detail'));
+    const unavailable = await fetch(`${baseUrl}/api/admin/affiliates/audit-logs`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` }
+    });
+    expect(unavailable.status).toBe(503);
+    expect(JSON.stringify(await unavailable.json())).not.toContain('private firestore detail');
   });
 
   it('accepts an unchanged normalized email without forwarding identity mutation', async () => {
@@ -1066,6 +1146,125 @@ describe('affiliate session route boundaries', () => {
     expect(statuses[12]).toBe(429);
     expect(finalResponse?.headers.get('cache-control')).toContain('no-store');
     expect(affiliateMocks.getLiteraryCircleSettingsFresh).toHaveBeenCalledTimes(12);
+  });
+
+  it('returns promotional resources only after one fresh affiliate check with no-store headers', async () => {
+    affiliateMocks.verifyAffiliateSession.mockResolvedValue({
+      ...privateAffiliate,
+      acceptedTerms: true,
+      literaryCircle: activeLiteraryCircleMembership
+    });
+
+    const response = await fetch(`${baseUrl}/api/affiliate/literary-circle/resources`, {
+      headers: { cookie: validCookie }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
+    expect(response.headers.get('x-robots-tag')).toContain('noarchive');
+    expect(body.library.items).toHaveLength(1);
+    expect(body.library).not.toHaveProperty('updatedBy');
+    expect(affiliateMocks.verifyAffiliateSession).toHaveBeenCalledWith(expect.any(String), { forceFresh: true });
+    expect(affiliateMocks.getLiteraryCircleSettingsFresh).toHaveBeenCalledTimes(1);
+    expect(resourceMocks.getFresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops before resource reads for anonymous or terms-incomplete affiliates', async () => {
+    const anonymousResponse = await fetch(`${baseUrl}/api/affiliate/literary-circle/resources`);
+    expect(anonymousResponse.status).toBe(401);
+    expect(resourceMocks.getFresh).not.toHaveBeenCalled();
+
+    affiliateMocks.verifyAffiliateSession.mockResolvedValueOnce({
+      ...privateAffiliate,
+      acceptedTerms: false
+    });
+    const termsResponse = await fetch(`${baseUrl}/api/affiliate/literary-circle/resources`, {
+      headers: { cookie: validCookie }
+    });
+    expect(termsResponse.status).toBe(403);
+    expect(resourceMocks.getFresh).not.toHaveBeenCalled();
+    expect(affiliateMocks.getLiteraryCircleSettingsFresh).not.toHaveBeenCalled();
+  });
+
+  it('does not disclose promotional resources to legacy or revoked Literary Circle accounts', async () => {
+    affiliateMocks.verifyAffiliateSession.mockResolvedValueOnce({
+      ...privateAffiliate,
+      acceptedTerms: true
+    });
+    const legacyResponse = await fetch(`${baseUrl}/api/affiliate/literary-circle/resources`, {
+      headers: { cookie: validCookie }
+    });
+    expect(legacyResponse.status).toBe(403);
+    expect(resourceMocks.getFresh).not.toHaveBeenCalled();
+    expect(affiliateMocks.getLiteraryCircleSettingsFresh).not.toHaveBeenCalled();
+
+    affiliateMocks.verifyAffiliateSession.mockResolvedValueOnce({
+      ...privateAffiliate,
+      acceptedTerms: true,
+      literaryCircle: {
+        ...activeLiteraryCircleMembership,
+        complimentaryAccess: {
+          ...activeLiteraryCircleMembership.complimentaryAccess,
+          status: 'revoked'
+        }
+      }
+    });
+    const revokedResponse = await fetch(`${baseUrl}/api/affiliate/literary-circle/resources`, {
+      headers: { cookie: validCookie }
+    });
+    expect(revokedResponse.status).toBe(403);
+    expect(resourceMocks.getFresh).not.toHaveBeenCalled();
+    expect(affiliateMocks.getLiteraryCircleSettingsFresh).not.toHaveBeenCalled();
+  });
+
+  it('fails closed without stale resource metadata when a fresh resource read fails', async () => {
+    affiliateMocks.verifyAffiliateSession.mockResolvedValue({
+      ...privateAffiliate,
+      acceptedTerms: true,
+      literaryCircle: activeLiteraryCircleMembership
+    });
+    resourceMocks.getFresh.mockRejectedValueOnce(new Error('private resource firestore detail'));
+
+    const response = await fetch(`${baseUrl}/api/affiliate/literary-circle/resources`, {
+      headers: { cookie: validCookie }
+    });
+    const body = await response.json() as Record<string, any>;
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(JSON.stringify(body)).not.toContain('private resource firestore detail');
+    expect(body).not.toHaveProperty('library');
+  });
+
+  it('authenticates the large promotional-artwork route before parsing its body', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/resource-image`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{malformed-json'
+    });
+
+    expect(response.status).toBe(401);
+    expect(resourceMocks.associateImage).not.toHaveBeenCalled();
+  });
+
+  it('publishes an admin resource mutation only after its transactional audit is committed', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/resources`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ schemaVersion: 1, revision: 2, enabled: true, title: 'Desk', description: 'Approved.', items: [] })
+    });
+
+    expect(response.status).toBe(200);
+    expect(resourceMocks.save).toHaveBeenCalledWith(expect.objectContaining({ revision: 2 }), 'Admin (Test Admin)', 2);
+    expect(affiliateMocks.rememberCommittedAudit).toHaveBeenCalledWith({ id: 'audit-resource-save' });
   });
 
   it('persists only the authenticated affiliate onboarding progress fields', async () => {

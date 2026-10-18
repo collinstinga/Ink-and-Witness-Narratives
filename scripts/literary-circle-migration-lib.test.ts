@@ -11,9 +11,12 @@ import {
   assertStagingTarget,
   buildDatasetPayload,
   canonicalJson,
+  captureAffiliateDatasets,
   configuredFirebaseTarget,
   mergeFoundingMembership,
   planIndexReservation,
+  prettyStableJson,
+  sha256Hex,
   summarizeDatasetDocuments,
   validateFoundingAffiliateDocuments,
   verifyAffiliateBackup,
@@ -65,6 +68,59 @@ function completePayloadSet(): Map<string, BackupDatasetPayload> {
     payloads.set(definition.key, buildDatasetPayload(definition, documents));
   }
   return payloads;
+}
+
+function payloadSetWithResourceAssets(): Map<string, BackupDatasetPayload> {
+  const payloads = completePayloadSet();
+  const siteConfigs = AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'affiliate_site_configs')!;
+  const resourceAssets = AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'literary_circle_resource_assets')!;
+  payloads.set('affiliate_site_configs', buildDatasetPayload(siteConfigs, [{
+    id: 'literary_circle_resources',
+    data: {
+      items: [
+        { id: 'published-resource', assetId: 'asset-public', isPublished: true },
+        { id: 'draft-resource', assetId: 'asset-private', isPublished: false }
+      ]
+    }
+  }]));
+  payloads.set('literary_circle_resource_assets', buildDatasetPayload(resourceAssets, [
+    { id: 'asset-private', data: { accessScope: 'literary_circle_private', dataUrl: 'data:image/png;base64,cHJpdmF0ZQ==' } },
+    { id: 'asset-public', data: { accessScope: 'public', dataUrl: 'data:image/png;base64,cHVibGlj' } }
+  ]));
+  return payloads;
+}
+
+type CaptureDb = NonNullable<Parameters<typeof captureAffiliateDatasets>[0]>;
+
+function fakeFirestore(documents: ReadonlyMap<string, Record<string, unknown>>): CaptureDb {
+  const snapshot = (collection: string, id: string) => {
+    const data = documents.get(`${collection}/${id}`);
+    return {
+      id,
+      exists: data !== undefined,
+      data: () => data
+    };
+  };
+  return {
+    collection(collection: string) {
+      return {
+        doc(id: string) {
+          return { get: async () => snapshot(collection, id) };
+        },
+        async get() {
+          const prefix = `${collection}/`;
+          return {
+            docs: [...documents.keys()]
+              .filter(documentPath => (
+                documentPath.startsWith(prefix)
+                && !documentPath.slice(prefix.length).includes('/')
+              ))
+              .map(documentPath => snapshot(collection, documentPath.slice(prefix.length)))
+          };
+        }
+      };
+    }
+  } as unknown as CaptureDb;
 }
 
 describe('Literary Circle migration safety helpers', () => {
@@ -141,24 +197,106 @@ describe('Literary Circle migration safety helpers', () => {
     expect(() => validateFoundingAffiliateDocuments(duplicate)).toThrow(/not unique/i);
   });
 
+  it('captures the resource library and only its referenced public and private assets', async () => {
+    const payloads = await captureAffiliateDatasets(fakeFirestore(new Map([
+      ['site_configs/literary_circle_resources', {
+        items: [
+          { id: 'published-resource', assetId: 'asset-public', isPublished: true },
+          { id: 'draft-resource', assetId: 'asset-private', isPublished: false }
+        ]
+      }],
+      ['uploaded_assets/asset-public', { accessScope: 'public', dataUrl: 'data:image/png;base64,cHVibGlj' }],
+      ['uploaded_assets/asset-private', {
+        accessScope: 'literary_circle_private',
+        dataUrl: 'data:image/png;base64,cHJpdmF0ZQ=='
+      }],
+      ['uploaded_assets/unrelated-asset', { accessScope: 'public', dataUrl: 'data:image/png;base64,b3RoZXI=' }]
+    ])));
+
+    expect(payloads.get('affiliate_site_configs')?.documents.map(document => document.id))
+      .toContain('literary_circle_resources');
+    expect(payloads.get('literary_circle_resource_assets')?.documents.map(document => document.id))
+      .toEqual(['asset-private', 'asset-public']);
+  });
+
+  it('refuses to capture a resource library with a missing referenced asset', async () => {
+    await expect(captureAffiliateDatasets(fakeFirestore(new Map([
+      ['site_configs/literary_circle_resources', {
+        items: [{ id: 'draft-resource', assetId: 'missing-asset', isPublished: false }]
+      }]
+    ])))).rejects.toThrow(/missing uploaded_assets documents: missing-asset/i);
+  });
+
   it('writes a verifiable snapshot and rejects a changed dataset file', () => {
     const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
     const written = writeAffiliateBackup({
-      payloads: completePayloadSet(),
+      payloads: payloadSetWithResourceAssets(),
       target,
       now: '2026-10-16T00:00:00.000Z'
     });
     cleanupDirectories.push(written.directory);
-    expect(verifyAffiliateBackup(written.manifestPath, {
+    const verified = verifyAffiliateBackup(written.manifestPath, {
       target,
       expectedAffiliates: FOUNDING_AFFILIATE_COUNT
-    }).manifest.contentSha256).toBe(written.manifest.contentSha256);
+    });
+    expect(verified.manifest.schemaVersion).toBe(2);
+    expect(verified.manifest.contentSha256).toBe(written.manifest.contentSha256);
+    expect(verified.payloads.get('literary_circle_resource_assets')?.documents.map(document => document.id))
+      .toEqual(['asset-private', 'asset-public']);
 
     fs.appendFileSync(path.join(written.directory, 'affiliate_clicks.json'), ' ');
     expect(() => verifyAffiliateBackup(written.manifestPath, {
       target,
       expectedAffiliates: FOUNDING_AFFILIATE_COUNT
     })).toThrow(/hash check failed/i);
+  });
+
+  it('rejects resource-asset payloads that do not exactly close the library references', () => {
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const payloads = payloadSetWithResourceAssets();
+    const resourceAssets = AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'literary_circle_resource_assets')!;
+    payloads.set('literary_circle_resource_assets', buildDatasetPayload(resourceAssets, [{
+      id: 'asset-public',
+      data: { accessScope: 'public' }
+    }]));
+
+    expect(() => writeAffiliateBackup({
+      payloads,
+      target,
+      now: '2026-10-16T00:30:00.000Z'
+    })).toThrow(/must exactly match every asset referenced/i);
+  });
+
+  it('verifies resource-asset closure independently of manifest hashes and counts', () => {
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const written = writeAffiliateBackup({
+      payloads: payloadSetWithResourceAssets(),
+      target,
+      now: '2026-10-16T00:45:00.000Z'
+    });
+    cleanupDirectories.push(written.directory);
+
+    const payloadPath = path.join(written.directory, 'literary_circle_resource_assets.json');
+    const assetPayload = JSON.parse(fs.readFileSync(payloadPath, 'utf8')) as BackupDatasetPayload;
+    assetPayload.documents = assetPayload.documents.filter(document => document.id === 'asset-public');
+    const assetContents = prettyStableJson(assetPayload);
+    fs.writeFileSync(payloadPath, assetContents);
+
+    const manifest = JSON.parse(fs.readFileSync(written.manifestPath, 'utf8')) as Record<string, any>;
+    const manifestEntry = manifest.datasets.find((entry: Record<string, unknown>) => (
+      entry.key === 'literary_circle_resource_assets'
+    ));
+    if (!manifestEntry) throw new Error('Test backup is missing the resource-assets manifest entry.');
+    manifestEntry.sha256 = sha256Hex(assetContents);
+    manifestEntry.count = 1;
+    const { contentSha256: _contentSha256, ...unsignedManifest } = manifest;
+    manifest.contentSha256 = sha256Hex(canonicalJson(unsignedManifest));
+    fs.writeFileSync(written.manifestPath, prettyStableJson(manifest));
+
+    expect(() => verifyAffiliateBackup(written.manifestPath, {
+      target,
+      expectedAffiliates: FOUNDING_AFFILIATE_COUNT
+    })).toThrow(/must exactly match every asset referenced/i);
   });
 
   it('requires explicit read-only confirmation before backing up production', () => {

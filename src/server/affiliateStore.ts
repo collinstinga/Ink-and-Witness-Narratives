@@ -2346,6 +2346,18 @@ export const affiliateStore = {
   },
 
   // AUDIT LOGS
+  rememberCommittedAudit(entry: AffiliateAuditLogEntry): AffiliateAuditLogEntry {
+    const safeEntry = sanitizeAuditValue(JSON.parse(JSON.stringify(entry))) as AffiliateAuditLogEntry;
+    const existingIndex = cachedAuditLogs.findIndex(candidate => candidate.id === safeEntry.id);
+    if (existingIndex >= 0) cachedAuditLogs.splice(existingIndex, 1);
+    cachedAuditLogs.unshift(safeEntry);
+    if (cachedAuditLogs.length > 1000) {
+      cachedAuditLogs = cachedAuditLogs.slice(0, 1000);
+    }
+    writeJsonFileSync(AUDIT_FILE, cachedAuditLogs);
+    return safeEntry;
+  },
+
   recordAudit(actor: string, action: string, targetType: any, summary: string, targetId?: string, previousValue?: any, newValue?: any): AffiliateAuditLogEntry {
     const entry: AffiliateAuditLogEntry = {
       id: `aud_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
@@ -2359,17 +2371,35 @@ export const affiliateStore = {
       newValue: newValue ? sanitizeAuditValue(JSON.parse(JSON.stringify(newValue))) : undefined
     };
 
-    cachedAuditLogs.unshift(entry);
-    if (cachedAuditLogs.length > 1000) {
-      cachedAuditLogs = cachedAuditLogs.slice(0, 1000);
-    }
-    writeJsonFileSync(AUDIT_FILE, cachedAuditLogs);
+    this.rememberCommittedAudit(entry);
     setFirestoreDoc('affiliate_audit', entry.id, entry).catch(() => {});
     return entry;
   },
 
   getAuditLogs(limit = 100): AffiliateAuditLogEntry[] {
     return cachedAuditLogs.slice(0, limit).map(entry => sanitizeAuditValue(entry));
+  },
+
+  async getAuditLogsFresh(limit = 100): Promise<AffiliateAuditLogEntry[]> {
+    const boundedLimit = Math.min(500, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 100));
+    const snapshot = await getDb()
+      .collection('affiliate_audit')
+      .orderBy('timestamp', 'desc')
+      .limit(boundedLimit)
+      .get();
+    const fresh = snapshot.docs.map(document => sanitizeAuditValue({
+      ...(document.data() as AffiliateAuditLogEntry),
+      id: document.id
+    }) as AffiliateAuditLogEntry);
+    const freshIds = new Set(fresh.map(entry => entry.id));
+    cachedAuditLogs = [
+      ...fresh,
+      ...cachedAuditLogs.filter(entry => !freshIds.has(entry.id))
+    ]
+      .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))
+      .slice(0, 1000);
+    writeJsonFileSync(AUDIT_FILE, cachedAuditLogs);
+    return fresh;
   },
 
   // STRICTLY PRIVATE AFFILIATE DASHBOARD

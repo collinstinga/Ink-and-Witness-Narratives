@@ -58,6 +58,15 @@ import {
   LiteraryCircleValidationError,
   projectLiteraryCircleCommunityForAffiliate
 } from "./src/server/literaryCircle.js";
+import {
+  associateLiteraryCircleResourceImage,
+  getLiteraryCircleResourceLibraryFresh,
+  LiteraryCircleResourcesConflictError,
+  LiteraryCircleResourcesValidationError,
+  projectLiteraryCircleResourcesForAffiliate,
+  removeLiteraryCircleResourceImage,
+  saveLiteraryCircleResourceLibrary
+} from "./src/server/literaryCircleResources.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
   AFFILIATE_CLICK_DEDUP_COOKIE_NAME,
@@ -1168,7 +1177,8 @@ export async function createApp() {
   // Base64, below Vercel's non-configurable 4.5 MB Function payload limit.
   const largeAdminBodyRoutes = [
     '/api/admin/save-permanent-image',
-    '/api/admin/upload-image'
+    '/api/admin/upload-image',
+    '/api/admin/affiliates/literary-circle/resource-image'
   ];
   const largeAdminBodyRouteSet = new Set(largeAdminBodyRoutes);
   const handleBodyParsingError = (err: any, _req: Request, res: Response, next: NextFunction) => {
@@ -1343,6 +1353,32 @@ export async function createApp() {
     }
   });
 
+  const literaryCircleResourcesLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 12,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    keyGenerator: (req: Request) => String((req as any).affiliate?.id || 'unknown'),
+    message: {
+      success: false,
+      error: "Promotional resource refresh limit reached. Please wait a moment before retrying."
+    }
+  });
+
+  const literaryCircleResourceUploadLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    keyGenerator: (req: Request) => String((req as any).user?.userId || 'unknown'),
+    message: {
+      success: false,
+      error: "Promotional artwork upload limit reached. Please wait before trying again."
+    }
+  });
+
   // Mutable publishing data must never be served from an older shared CDN
   // snapshot. The consolidated bootstrap route performs one coherent read,
   // while the health check is the only endpoint safe to share-cache here.
@@ -1361,15 +1397,37 @@ export async function createApp() {
   const servePersistentAsset = async (req: Request, res: Response) => {
     try {
       const rawId = req.params.assetId || req.params.filename;
-      const assetId = rawId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const isLegacyFilename = Boolean(req.params.filename);
+      const validAssetId = /^[a-zA-Z0-9_-]{1,180}$/;
+      const validLegacyFilename = /^[a-zA-Z0-9_-]{1,170}\.(?:jpe?g|png|webp)$/i;
+      if (
+        (!isLegacyFilename && !validAssetId.test(rawId))
+        || (isLegacyFilename && !validLegacyFilename.test(rawId))
+      ) {
+        res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+        return res.status(404).json({ error: 'Image not found.' });
+      }
+      const assetId = isLegacyFilename ? rawId.replace('.', '_') : rawId;
       const asset = await store.getUploadedAsset(assetId);
       if (!asset?.dataUrl) return res.status(404).json({ error: 'Image not found.' });
+      // Literary Circle draft artwork is stored beside existing uploaded
+      // images, but it must never inherit this public immutable delivery
+      // contract. Publishing a promotional resource explicitly changes the
+      // asset scope before an affiliate receives a public URL.
+      if (asset.accessScope === 'literary_circle_private') {
+        res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+        res.setHeader('CDN-Cache-Control', 'no-store');
+        res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+        return res.status(404).json({ error: 'Image not found.' });
+      }
 
       const image = validateImageDataUrl(asset.dataUrl);
       res.setHeader('Content-Type', image.mimeType);
       res.setHeader('Content-Disposition', `inline; filename="${assetId}.${image.extension}"`);
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
       res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       res.setHeader('Content-Length', String(image.buffer.length));
       return res.send(image.buffer);
@@ -6263,6 +6321,56 @@ ${currentDraft || prompt}
     }
   );
 
+  // Affiliate: writer-approved promotional toolkit. It is deliberately kept
+  // out of the frequently polled dashboard and rechecks the affiliate account,
+  // programme switch, resource document, and publish windows on every load.
+  app.get(
+    "/api/affiliate/literary-circle/resources",
+    requireFreshAffiliateAuth,
+    literaryCircleResourcesLimiter,
+    async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      res.setHeader('Vary', 'Cookie');
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+      try {
+        const affiliate = (req as any).affiliate;
+        if (affiliate.acceptedTerms === false) {
+          return res.status(403).json({
+            success: false,
+            error: 'Accept the current affiliate terms before opening promotional resources.'
+          });
+        }
+        if (!isAffiliateComplimentaryAccessActive(affiliate)) {
+          return res.status(403).json({
+            success: false,
+            error: 'Active Literary Circle access is required to open promotional resources.'
+          });
+        }
+        const [programme, library] = await Promise.all([
+          store.affiliates.getLiteraryCircleSettingsFresh(),
+          getLiteraryCircleResourceLibraryFresh()
+        ]);
+        if (!programme.enabled) {
+          return res.status(403).json({
+            success: false,
+            error: 'The Literary Circle programme is not currently available.'
+          });
+        }
+        const projected = projectLiteraryCircleResourcesForAffiliate(library);
+        const { updatedBy: _updatedBy, ...safeLibrary } = projected;
+        return res.json({ success: true, library: safeLibrary });
+      } catch (err) {
+        console.error('[Literary Circle] Promotional resources could not be loaded.', err);
+        return res.status(503).json({
+          success: false,
+          error: 'Promotional resources are temporarily unavailable. Please retry.'
+        });
+      }
+    }
+  );
+
   // Affiliate: compact complimentary library. The paid bodies remain on the
   // single-piece route, where access is force-refreshed again before release.
   app.get("/api/affiliate/literary-circle/library", requireAffiliateAuth, async (req: Request, res: Response) => {
@@ -6566,6 +6674,176 @@ ${currentDraft || prompt}
 
   app.post("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
   app.put("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
+
+  // Admin: a bounded, independently revisioned promotional-resource library.
+  // Keeping it outside the commission-policy document prevents image/editor
+  // work from contending with financially effective tier changes.
+  app.get("/api/admin/affiliates/literary-circle/resources", requireAdminAuth, async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const library = await getLiteraryCircleResourceLibraryFresh();
+      return res.json({ success: true, library });
+    } catch (err) {
+      console.error('[Literary Circle] Failed to load promotional resources.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Promotional resources could not be loaded right now. Please retry.'
+      });
+    }
+  });
+
+  app.put("/api/admin/affiliates/literary-circle/resources", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const actor = `Admin (${(req as any).user?.name || 'Writer'})`;
+      const result = await saveLiteraryCircleResourceLibrary(
+        req.body,
+        actor,
+        req.body?.revision
+      );
+      store.affiliates.rememberCommittedAudit(result.audit);
+      return res.json({
+        success: true,
+        library: result.library,
+        message: 'Promotional resources saved.'
+      });
+    } catch (err: any) {
+      if (err instanceof LiteraryCircleResourcesConflictError) {
+        return res.status(409).json({ success: false, code: err.code, error: err.message });
+      }
+      if (err instanceof LiteraryCircleResourcesValidationError) {
+        return res.status(400).json({ success: false, code: err.code, error: err.message });
+      }
+      console.error('[Literary Circle] Failed to save promotional resources.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Promotional resources could not be saved right now. Please retry.'
+      });
+    }
+  });
+
+  app.post(
+    "/api/admin/affiliates/literary-circle/resource-image",
+    requireAdminAuth,
+    literaryCircleResourceUploadLimiter,
+    async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      try {
+        const allowedKeys = new Set(['resourceId', 'dataUrl', 'assetAlt', 'expectedRevision']);
+        if (Object.keys(req.body || {}).some(key => !allowedKeys.has(key))) {
+          return res.status(400).json({ success: false, error: 'Promotional artwork request contains unsupported fields.' });
+        }
+        const result = await associateLiteraryCircleResourceImage({
+          resourceId: req.body?.resourceId,
+          dataUrl: req.body?.dataUrl,
+          assetAlt: req.body?.assetAlt,
+          expectedRevision: req.body?.expectedRevision,
+          actor: `Admin (${(req as any).user?.name || 'Writer'})`
+        });
+        store.affiliates.rememberCommittedAudit(result.audit);
+        return res.json({
+          success: true,
+          library: result.library,
+          asset: result.asset,
+          message: result.asset.shareable
+            ? 'Promotional artwork uploaded and released for affiliate sharing.'
+            : 'Promotional artwork uploaded as a private draft.'
+        });
+      } catch (err: any) {
+        if (err instanceof LiteraryCircleResourcesConflictError) {
+          return res.status(409).json({ success: false, code: err.code, error: err.message });
+        }
+        if (err instanceof LiteraryCircleResourcesValidationError || err instanceof ImageValidationError) {
+          return res.status(400).json({ success: false, error: err.message });
+        }
+        console.error('[Literary Circle] Failed to upload promotional artwork.', err);
+        return res.status(503).json({
+          success: false,
+          error: 'Promotional artwork could not be uploaded right now. Please retry.'
+        });
+      }
+    }
+  );
+
+  app.delete("/api/admin/affiliates/literary-circle/resource-image", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const allowedKeys = new Set(['resourceId', 'expectedRevision']);
+      if (Object.keys(req.body || {}).some(key => !allowedKeys.has(key))) {
+        return res.status(400).json({ success: false, error: 'Promotional artwork request contains unsupported fields.' });
+      }
+      const result = await removeLiteraryCircleResourceImage({
+        resourceId: req.body?.resourceId,
+        expectedRevision: req.body?.expectedRevision,
+        actor: `Admin (${(req as any).user?.name || 'Writer'})`
+      });
+      if (result.audit) store.affiliates.rememberCommittedAudit(result.audit);
+      return res.json({
+        success: true,
+        library: result.library,
+        retainedShareableAsset: result.retainedShareableAsset,
+        message: result.retainedShareableAsset
+          ? 'Artwork removed from the library. Previously downloaded or public copies cannot be recalled.'
+          : 'Private draft artwork removed.'
+      });
+    } catch (err: any) {
+      if (err instanceof LiteraryCircleResourcesConflictError) {
+        return res.status(409).json({ success: false, code: err.code, error: err.message });
+      }
+      if (err instanceof LiteraryCircleResourcesValidationError) {
+        return res.status(400).json({ success: false, code: err.code, error: err.message });
+      }
+      console.error('[Literary Circle] Failed to remove promotional artwork.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Promotional artwork could not be removed right now. Please retry.'
+      });
+    }
+  });
+
+  app.get("/api/admin/affiliates/literary-circle/resource-assets/:assetId", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    res.setHeader('Vary', 'Cookie');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    try {
+      const assetId = req.params.assetId || '';
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(assetId)) {
+        return res.status(404).json({ error: 'Image not found.' });
+      }
+      const asset = await store.getUploadedAsset(assetId);
+      if (
+        !asset?.dataUrl
+        || asset.target !== 'affiliate_resource'
+        || (asset.accessScope !== 'literary_circle_private' && asset.accessScope !== 'public')
+      ) {
+        return res.status(404).json({ error: 'Image not found.' });
+      }
+      const image = validateImageDataUrl(asset.dataUrl);
+      res.setHeader('Content-Type', image.mimeType);
+      res.setHeader('Content-Disposition', `inline; filename="${assetId}.${image.extension}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+      res.setHeader('Content-Length', String(image.buffer.length));
+      return res.send(image.buffer);
+    } catch (err) {
+      if (err instanceof ImageValidationError) {
+        return res.status(415).json({ error: 'Stored image is not an approved image type.' });
+      }
+      console.error('[Literary Circle] Failed to preview promotional artwork.', err);
+      return res.status(503).json({ error: 'Promotional artwork is temporarily unavailable.' });
+    }
+  });
 
   // Admin: Literary Circle programme policy. It is intentionally isolated
   // from legacy affiliate settings, and tier commission rates stay proposals
@@ -6944,13 +7222,17 @@ ${currentDraft || prompt}
   });
 
   // Admin: Audit Logs
-  app.get("/api/admin/affiliates/audit-logs", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/affiliates/audit-logs", requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const limit = req.query.limit ? Number(req.query.limit) : 100;
-      const logs = store.affiliates.getAuditLogs(limit);
+      const requestedLimit = req.query.limit ? Number(req.query.limit) : 100;
+      const limit = Math.min(500, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 100));
+      const logs = await store.affiliates.getAuditLogsFresh(limit);
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
       res.json(logs);
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch audit logs." });
+      res.status(503).json({ success: false, error: "Audit logs are temporarily unavailable. Please retry." });
     }
   });
 

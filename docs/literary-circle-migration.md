@@ -57,7 +57,11 @@ The snapshot contains every document from `affiliates`,
 `affiliate_emails`, `affiliate_commission_outbox`, and
 `affiliate_attribution_claims`; only affiliate-attributed documents from
 `transactions`; and the `affiliate_settings` and
-`affiliate_literary_circle` documents from `site_configs`.
+`affiliate_literary_circle` documents from `site_configs`. It also includes the
+`site_configs/literary_circle_resources` document when present and exactly every
+`uploaded_assets` document referenced by an `items[].assetId` in that resource
+library, including draft, expired, and private resource artwork. The backup
+aborts if any referenced asset document is missing.
 
 `affiliate_sessions` is deliberately excluded because it contains revocable
 bearer credentials rather than historical programme data. The manifest records
@@ -67,7 +71,10 @@ identity set, and live ledger contents before any write. After the transaction,
 it captures the datasets again and verifies that every backed-up account field,
 financial record, click, claim, transaction, configuration value, and other
 historical record is unchanged except for the explicitly allowed Literary
-Circle membership and same-owner index additions.
+Circle membership and same-owner index additions. Resource-asset verification
+also requires the backed-up asset-document IDs to exactly match the references
+in the backed-up resource library, preventing both omissions and unrelated
+asset inclusion.
 
 ## Apply checkpoint
 

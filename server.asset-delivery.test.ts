@@ -106,6 +106,26 @@ describe('persistent asset delivery', () => {
     expect(storeMocks.getAuthSession).not.toHaveBeenCalled();
   });
 
+  it('does not expose private Literary Circle draft artwork through public asset URLs', async () => {
+    storeMocks.getUploadedAsset.mockResolvedValueOnce({
+      accessScope: 'literary_circle_private',
+      dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlGQAAAAASUVORK5CYII='
+    });
+
+    const response = await fetch(`${baseUrl}/api/assets/private-resource-image`);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
+  });
+
+  it('rejects malformed asset identifiers instead of aliasing them to another record', async () => {
+    const response = await fetch(`${baseUrl}/api/assets/unsafe%2Epng`);
+
+    expect(response.status).toBe(404);
+    expect(storeMocks.getUploadedAsset).not.toHaveBeenCalled();
+  });
+
   it('returns a non-cacheable 503 and allows initialization to be retried', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     storeMocks.init.mockRejectedValueOnce(new Error('temporary Firestore outage'));

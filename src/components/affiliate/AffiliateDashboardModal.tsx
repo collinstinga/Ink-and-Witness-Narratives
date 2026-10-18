@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X, 
   Share2, 
@@ -46,7 +46,8 @@ import {
   ContentBundle,
   ContentCollection,
   SubscriptionPlan,
-  LiteraryCircleDashboardSummary
+  LiteraryCircleDashboardSummary,
+  LiteraryCircleResourceLibrary
 } from '../../types.js';
 import { api, clearAffiliateToken } from '../../utils/api.js';
 import {
@@ -61,6 +62,7 @@ import { playCoinDropSound } from '../../utils/coinSound.js';
 import { AffiliateTermsViewer } from './AffiliateTermsViewer.js';
 import { LiteraryCircleCommunity } from './LiteraryCircleCommunity.js';
 import { LiteraryCircleLibrary } from './LiteraryCircleLibrary.js';
+import { LiteraryCircleResourcesLibrary } from './LiteraryCircleResourcesLibrary.js';
 import { LiteraryCircleMembershipOverview } from './LiteraryCircleMembershipOverview.js';
 import {
   LiteraryCircleOnboardingPanel,
@@ -77,7 +79,7 @@ interface AffiliateDashboardModalProps {
   onLogout: () => void;
 }
 
-type TabType = 'overview' | 'links' | 'sales' | 'payouts' | 'settings';
+type TabType = 'overview' | 'resources' | 'links' | 'sales' | 'payouts' | 'settings';
 
 export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = ({
   isOpen,
@@ -115,6 +117,11 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   const [literaryCircleCommunityLoading, setLiteraryCircleCommunityLoading] = useState(false);
   const [literaryCircleCommunityError, setLiteraryCircleCommunityError] = useState('');
   const [literaryCircleCommunityReloadKey, setLiteraryCircleCommunityReloadKey] = useState(0);
+  const [resourceLibrary, setResourceLibrary] = useState<LiteraryCircleResourceLibrary | null>(null);
+  const [resourceLibraryLoading, setResourceLibraryLoading] = useState(false);
+  const [resourceLibraryError, setResourceLibraryError] = useState('');
+  const [resourceLibraryReloadKey, setResourceLibraryReloadKey] = useState(0);
+  const resourceLibraryAttemptedRef = useRef(false);
   const [campaignTag, setCampaignTag] = useState<string>('');
   const [copiedLink, setCopiedLink] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
@@ -304,6 +311,12 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
 
   const handleManualRefresh = () => {
     setLiteraryCircleCommunityReloadKey((key) => key + 1);
+    if (resourceLibrary || activeTab === 'resources') {
+      setResourceLibrary(null);
+      resourceLibraryAttemptedRef.current = false;
+      setResourceLibraryError('');
+      setResourceLibraryReloadKey(key => key + 1);
+    }
     void loadDashboard(true);
   };
 
@@ -462,6 +475,54 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
     freshLiteraryCircle?.enabled,
     isOpen,
     literaryCircleLibraryReloadKey,
+  ]);
+
+  useEffect(() => {
+    const hasResourceAccess = Boolean(
+      freshLiteraryCircle?.enabled
+      && freshLiteraryCircle.complimentaryAccessStatus === 'active',
+    );
+    if (!isOpen || !hasResourceAccess) {
+      setResourceLibrary(null);
+      setResourceLibraryLoading(false);
+      resourceLibraryAttemptedRef.current = false;
+      setResourceLibraryError('');
+      return;
+    }
+    if (activeTab !== 'resources' || resourceLibraryAttemptedRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    resourceLibraryAttemptedRef.current = true;
+    setResourceLibraryLoading(true);
+    setResourceLibraryError('');
+    void api.getAffiliateLiteraryCircleResources()
+      .then(response => {
+        if (!cancelled) setResourceLibrary(response.library);
+      })
+      .catch(resourceError => {
+        if (cancelled) return;
+        setResourceLibrary(null);
+        setResourceLibraryError(
+          resourceError instanceof Error
+            ? resourceError.message
+            : 'Promotional resources could not be loaded. Please retry.',
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setResourceLibraryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTab,
+    freshLiteraryCircle?.complimentaryAccessStatus,
+    freshLiteraryCircle?.enabled,
+    isOpen,
+    resourceLibraryReloadKey,
   ]);
 
   if (!isOpen) return null;
@@ -792,6 +853,20 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
               <span>Overview &amp; Stats</span>
             </button>
 
+            {freshLiteraryCircle?.enabled && freshLiteraryCircle.complimentaryAccessStatus === 'active' && (
+              <button
+                onClick={() => setActiveTab('resources')}
+                className={`py-3 px-3.5 font-mono text-xs font-semibold border-b-2 transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === 'resources'
+                    ? 'border-fuchsia-400 text-fuchsia-200 bg-fuchsia-950/20'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Promotional Resources</span>
+              </button>
+            )}
+
             <button
               onClick={() => setActiveTab('links')}
               className={`py-3 px-3.5 font-mono text-xs font-semibold border-b-2 transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
@@ -978,6 +1053,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         onUpdate={handleLiteraryCircleOnboardingUpdate}
                         onOpenCatalogue={handleOpenComplimentaryCatalogue}
                         onOpenLinkBuilder={() => setActiveTab('links')}
+                        onOpenPromotionalResources={() => setActiveTab('resources')}
                       />
                       {freshLiteraryCircle.complimentaryAccessStatus === 'active' && (
                         <>
@@ -1227,6 +1303,52 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                       </div>
                     )}
                   </div>
+                </div>
+              )}
+
+              {/* LITERARY CIRCLE PROMOTIONAL RESOURCES */}
+              {activeTab === 'resources'
+                && freshLiteraryCircle?.enabled
+                && freshLiteraryCircle.complimentaryAccessStatus === 'active'
+                && (
+                <div className="space-y-4 animate-in fade-in">
+                  {resourceLibraryLoading ? (
+                    <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-fuchsia-300/20 bg-fuchsia-950/10 text-sm text-fuchsia-200">
+                      <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                      Loading writer-approved promotional resources…
+                    </div>
+                  ) : resourceLibraryError ? (
+                    <div role="alert" className="rounded-2xl border border-amber-400/30 bg-amber-950/20 p-4 text-sm text-amber-100">
+                      <p>{resourceLibraryError}</p>
+                      <p className="mt-1 text-xs text-amber-100/70">No private resource metadata is retained after a failed access check.</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setResourceLibrary(null);
+                          resourceLibraryAttemptedRef.current = false;
+                          setResourceLibraryError('');
+                          setResourceLibraryReloadKey(key => key + 1);
+                        }}
+                        className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl border border-amber-300/30 bg-amber-400/10 px-4 py-2 font-mono text-xs font-bold text-amber-100"
+                      >
+                        <RefreshCw aria-hidden="true" className="h-4 w-4" /> Retry resources
+                      </button>
+                    </div>
+                  ) : resourceLibrary?.enabled ? (
+                    <LiteraryCircleResourcesLibrary
+                      library={resourceLibrary}
+                      affiliateCode={affiliateCode}
+                      onOpenLinkBuilder={(destination, campaign) => {
+                        setSelectedReferralDestination(destination);
+                        setCampaignTag(normalizeAffiliateCampaign(campaign));
+                        setActiveTab('links');
+                      }}
+                    />
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/50 px-4 py-12 text-center text-sm text-slate-400">
+                      The writer has not published the promotional resources library yet.
+                    </div>
+                  )}
                 </div>
               )}
 

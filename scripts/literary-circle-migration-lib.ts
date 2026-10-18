@@ -4,10 +4,13 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 1 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 2 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = ['ink-and-witness-narratives'] as const;
+
+const LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID = 'literary_circle_resources';
+const LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY = 'literary_circle_resource_assets';
 
 export interface FirebaseTarget {
   projectId: string;
@@ -174,13 +177,50 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
     collection: 'site_configs',
     fileName: 'affiliate_site_configs.json',
     scope: 'explicit_documents',
-    documentIds: ['affiliate_settings', 'affiliate_literary_circle'],
+    documentIds: ['affiliate_settings', 'affiliate_literary_circle', LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID],
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY,
+    collection: 'uploaded_assets',
+    fileName: 'literary_circle_resource_assets.json',
+    scope: 'explicit_documents',
     sumFields: EMPTY_SUM_FIELDS
   }
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function literaryCircleResourceAssetIds(
+  siteConfigPayload: BackupDatasetPayload | undefined
+): string[] {
+  const resources = siteConfigPayload?.documents.find(
+    document => document.id === LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID
+  );
+  const items = Array.isArray(resources?.data.items) ? resources.data.items : [];
+  const assetIds = new Set<string>();
+  for (const item of items) {
+    if (!isRecord(item) || typeof item.assetId !== 'string') continue;
+    const assetId = item.assetId.trim();
+    if (assetId) assetIds.add(assetId);
+  }
+  return [...assetIds].sort((left, right) => left.localeCompare(right));
+}
+
+function assertLiteraryCircleResourceAssetClosure(
+  payloads: ReadonlyMap<string, BackupDatasetPayload>
+): void {
+  const expectedIds = literaryCircleResourceAssetIds(payloads.get('affiliate_site_configs'));
+  const assetPayload = payloads.get(LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY);
+  if (!assetPayload) {
+    throw new Error('Backup is missing the Literary Circle resource-assets dataset.');
+  }
+  const actualIds = assetPayload.documents.map(document => document.id).sort((left, right) => left.localeCompare(right));
+  if (canonicalJson(actualIds) !== canonicalJson(expectedIds)) {
+    throw new Error('Literary Circle resource-assets backup must exactly match every asset referenced by the resource library.');
+  }
 }
 
 function sortedJsonValue(value: unknown): unknown {
@@ -334,15 +374,29 @@ export function buildBackupManifest(options: {
   return { ...unsigned, contentSha256: sha256Hex(canonicalJson(unsigned)) };
 }
 
-export async function captureAffiliateDatasets(): Promise<Map<string, BackupDatasetPayload>> {
-  const db = getDb();
+export async function captureAffiliateDatasets(
+  db: ReturnType<typeof getDb> = getDb()
+): Promise<Map<string, BackupDatasetPayload>> {
   const payloads = new Map<string, BackupDatasetPayload>();
   for (const definition of AFFILIATE_BACKUP_DATASETS) {
     let documents: BackupDocument[];
     if (definition.scope === 'explicit_documents') {
+      const documentIds = definition.key === LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY
+        ? literaryCircleResourceAssetIds(payloads.get('affiliate_site_configs'))
+        : definition.documentIds || [];
       const snapshots = await Promise.all(
-        (definition.documentIds || []).map(documentId => db.collection(definition.collection).doc(documentId).get())
+        documentIds.map(documentId => db.collection(definition.collection).doc(documentId).get())
       );
+      if (definition.key === LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY) {
+        const missingIds = snapshots
+          .map((snapshot, index) => snapshot.exists ? undefined : documentIds[index])
+          .filter((documentId): documentId is string => Boolean(documentId));
+        if (missingIds.length) {
+          throw new Error(
+            `Literary Circle resource library references missing uploaded_assets documents: ${missingIds.join(', ')}.`
+          );
+        }
+      }
       documents = snapshots
         .filter(snapshot => snapshot.exists)
         .map(snapshot => ({ id: snapshot.id, data: snapshot.data() as Record<string, unknown> }));
@@ -358,6 +412,7 @@ export async function captureAffiliateDatasets(): Promise<Map<string, BackupData
     }
     payloads.set(definition.key, buildDatasetPayload(definition, documents));
   }
+  assertLiteraryCircleResourceAssetClosure(payloads);
   return payloads;
 }
 
@@ -367,6 +422,7 @@ export function writeAffiliateBackup(options: {
   now?: string;
   cwd?: string;
 }): { directory: string; manifestPath: string; manifest: AffiliateBackupManifest } {
+  assertLiteraryCircleResourceAssetClosure(options.payloads);
   const cwd = options.cwd || process.cwd();
   const createdAt = options.now || new Date().toISOString();
   const timestamp = createdAt.replace(/[^0-9A-Za-z]+/g, '-').replace(/-+$/g, '');
@@ -555,6 +611,8 @@ export function verifyAffiliateBackup(
     assertSameJson(summary.sums, entry.sums, `Backup sum check failed for ${definition.key}.`);
     payloads.set(definition.key, payload);
   }
+
+  assertLiteraryCircleResourceAssetClosure(payloads);
 
   const affiliates = payloads.get('affiliates');
   if (!affiliates || affiliates.documents.length !== options.expectedAffiliates) {
