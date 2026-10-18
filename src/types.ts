@@ -1208,6 +1208,27 @@ export type LiteraryCircleComplimentaryAccessStatus = 'active' | 'suspended' | '
 export type LiteraryCircleTierSource = 'default' | 'monthly_performance' | 'manual';
 export type LiteraryCircleOnboardingStatus = 'not_started' | 'in_progress' | 'completed' | 'dismissed';
 export type LiteraryCircleCommissionPolicyStatus = 'draft' | 'active';
+export type LiteraryCircleCommunityPostType =
+  | 'announcement'
+  | 'release_preview'
+  | 'exclusive_excerpt'
+  | 'monthly_campaign'
+  | 'featured_piece'
+  | 'promotional_guidance';
+
+export interface LiteraryCircleCommunityPost {
+  id: string;
+  type: LiteraryCircleCommunityPostType;
+  title: string;
+  body: string;
+  isPublished: boolean;
+  order: number;
+  publishedAt?: string;
+  expiresAt?: string;
+  pieceId?: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+}
 
 export interface LiteraryCircleTierDefinition {
   id: string;
@@ -1254,6 +1275,8 @@ export interface AffiliateLiteraryCircleMembership {
 
 export interface LiteraryCircleSettings {
   schemaVersion: 1;
+  /** Monotonic server-managed revision used to reject stale full-document saves. */
+  revision?: number;
   enabled: boolean;
   defaultTierId: string;
   qualificationTimezone: 'Africa/Nairobi';
@@ -1274,6 +1297,7 @@ export interface LiteraryCircleSettings {
     title: string;
     description: string;
     whatsappInviteUrl?: string;
+    posts?: LiteraryCircleCommunityPost[];
   };
   updatedAt?: string;
   updatedBy?: string;

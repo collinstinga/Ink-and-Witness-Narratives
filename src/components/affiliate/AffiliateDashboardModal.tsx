@@ -45,7 +45,8 @@ import {
   AffiliateCampaign,
   ContentBundle,
   ContentCollection,
-  SubscriptionPlan
+  SubscriptionPlan,
+  LiteraryCircleDashboardSummary
 } from '../../types.js';
 import { api, clearAffiliateToken } from '../../utils/api.js';
 import {
@@ -58,6 +59,7 @@ import {
 } from '../../utils/affiliateReferralDestination.js';
 import { playCoinDropSound } from '../../utils/coinSound.js';
 import { AffiliateTermsViewer } from './AffiliateTermsViewer.js';
+import { LiteraryCircleCommunity } from './LiteraryCircleCommunity.js';
 import { LiteraryCircleLibrary } from './LiteraryCircleLibrary.js';
 import { LiteraryCircleMembershipOverview } from './LiteraryCircleMembershipOverview.js';
 import {
@@ -109,6 +111,10 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   const [literaryCircleLibraryLoading, setLiteraryCircleLibraryLoading] = useState(false);
   const [literaryCircleLibraryError, setLiteraryCircleLibraryError] = useState('');
   const [literaryCircleLibraryReloadKey, setLiteraryCircleLibraryReloadKey] = useState(0);
+  const [freshLiteraryCircle, setFreshLiteraryCircle] = useState<LiteraryCircleDashboardSummary | null>(null);
+  const [literaryCircleCommunityLoading, setLiteraryCircleCommunityLoading] = useState(false);
+  const [literaryCircleCommunityError, setLiteraryCircleCommunityError] = useState('');
+  const [literaryCircleCommunityReloadKey, setLiteraryCircleCommunityReloadKey] = useState(0);
   const [campaignTag, setCampaignTag] = useState<string>('');
   const [copiedLink, setCopiedLink] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
@@ -278,7 +284,14 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   };
 
   const handleLiteraryCircleOnboardingUpdate = async (update: LiteraryCircleOnboardingUpdate) => {
-    await api.updateAffiliateLiteraryCircleOnboarding(update);
+    const result = await api.updateAffiliateLiteraryCircleOnboarding(update);
+    const onboarding = result.onboarding;
+    if (onboarding) {
+      setFreshLiteraryCircle((current) => current ? {
+        ...current,
+        onboarding
+      } : current);
+    }
     await loadDashboard(true);
   };
 
@@ -287,6 +300,11 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       window.location.hash = 'all-pieces';
     }
     onClose();
+  };
+
+  const handleManualRefresh = () => {
+    setLiteraryCircleCommunityReloadKey((key) => key + 1);
+    void loadDashboard(true);
   };
 
   const handleTestCoinDrop = () => {
@@ -363,9 +381,50 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   }, [isOpen]);
 
   useEffect(() => {
+    if (!isOpen) {
+      setFreshLiteraryCircle(null);
+      setLiteraryCircleCommunityLoading(false);
+      setLiteraryCircleCommunityError('');
+      return;
+    }
+
+    let cancelled = false;
+    setFreshLiteraryCircle(null);
+    setLiteraryCircleCommunityLoading(true);
+    setLiteraryCircleCommunityError('');
+
+    void api.getAffiliateLiteraryCircleCommunity()
+      .then((result) => {
+        if (!cancelled) {
+          // Refresh the library only after the fresh access decision arrives.
+          // Starting both requests together would spend a protected read using
+          // the previous access snapshot and then immediately repeat it.
+          setLiteraryCircleLibraryReloadKey((key) => key + 1);
+          setFreshLiteraryCircle(result.literaryCircle);
+        }
+      })
+      .catch((communityError: unknown) => {
+        if (cancelled) return;
+        setFreshLiteraryCircle(null);
+        setLiteraryCircleCommunityError(
+          communityError instanceof Error
+            ? communityError.message
+            : 'The private Literary Circle community could not be loaded. Your dashboard remains available.'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLiteraryCircleCommunityLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, literaryCircleCommunityReloadKey]);
+
+  useEffect(() => {
     const complimentaryAccessActive = Boolean(
-      data?.literaryCircle?.enabled
-      && data.literaryCircle.complimentaryAccessStatus === 'active'
+      freshLiteraryCircle?.enabled
+      && freshLiteraryCircle.complimentaryAccessStatus === 'active'
     );
     if (!isOpen || !complimentaryAccessActive) {
       setLiteraryCircleArticles([]);
@@ -399,8 +458,8 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       cancelled = true;
     };
   }, [
-    data?.literaryCircle?.complimentaryAccessStatus,
-    data?.literaryCircle?.enabled,
+    freshLiteraryCircle?.complimentaryAccessStatus,
+    freshLiteraryCircle?.enabled,
     isOpen,
     literaryCircleLibraryReloadKey,
   ]);
@@ -644,12 +703,14 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
 
             <button
               id="affiliate-refresh-btn"
-              onClick={() => loadDashboard(true)}
+              type="button"
+              onClick={handleManualRefresh}
               disabled={refreshing}
               className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
-              title="Refresh Analytics"
+              title="Refresh dashboard and private Literary Circle"
+              aria-label="Refresh dashboard and private Literary Circle"
             >
-              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin text-cyan-400' : ''}`} />
+              <RefreshCw aria-hidden="true" className={`w-4 h-4 ${refreshing ? 'animate-spin text-cyan-400' : ''}`} />
             </button>
 
             {affiliate?.acceptedTerms !== false && (
@@ -870,27 +931,55 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
               {/* TAB 1: OVERVIEW */}
               {activeTab === 'overview' && (
                 <div className="space-y-6 animate-in fade-in">
-                  {data?.literaryCircle?.enabled && (
+                  {literaryCircleCommunityLoading && (
+                    <div
+                      role="status"
+                      className="flex min-h-24 items-center justify-center gap-2 rounded-2xl border border-violet-300/20 bg-violet-950/10 text-sm text-violet-200"
+                    >
+                      <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                      Checking your private Literary Circle access…
+                    </div>
+                  )}
+                  {literaryCircleCommunityError && (
+                    <div
+                      role="alert"
+                      className="rounded-2xl border border-amber-400/30 bg-amber-950/20 p-4 text-sm text-amber-100"
+                    >
+                      <p>{literaryCircleCommunityError}</p>
+                      <p className="mt-1 text-xs text-amber-100/70">
+                        Private community details remain hidden until a fresh security check succeeds.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setLiteraryCircleCommunityReloadKey((key) => key + 1)}
+                        className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-amber-300/30 bg-amber-400/10 px-3 py-2 font-mono text-xs font-bold text-amber-100 transition hover:bg-amber-400/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                      >
+                        <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
+                        Retry private access check
+                      </button>
+                    </div>
+                  )}
+                  {freshLiteraryCircle?.enabled && (
                     <>
                       <LiteraryCircleMembershipOverview
-                        summary={data.literaryCircle}
+                        summary={freshLiteraryCircle}
                         affiliateName={affiliate?.name || 'Literary Partner'}
                         activeCommissionRate={commissionRate}
                         onOpenCatalogue={handleOpenComplimentaryCatalogue}
                       />
                       <LiteraryCircleOnboardingPanel
-                        onboarding={data.literaryCircle.onboarding}
+                        onboarding={freshLiteraryCircle.onboarding}
                         affiliateCode={affiliateCode}
                         recommendedPieces={articles
                           .filter(article => !article.status || article.status === 'published')
                           .slice(0, 3)
                           .map(article => ({ id: article.id, title: article.title }))}
-                        community={data.literaryCircle.community}
+                        community={freshLiteraryCircle.community}
                         onUpdate={handleLiteraryCircleOnboardingUpdate}
                         onOpenCatalogue={handleOpenComplimentaryCatalogue}
                         onOpenLinkBuilder={() => setActiveTab('links')}
                       />
-                      {data.literaryCircle.complimentaryAccessStatus === 'active' && (
+                      {freshLiteraryCircle.complimentaryAccessStatus === 'active' && (
                         <>
                           {literaryCircleLibraryLoading ? (
                             <div
@@ -920,6 +1009,11 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                           )}
                         </>
                       )}
+                      <LiteraryCircleCommunity
+                        community={freshLiteraryCircle.community}
+                        articles={literaryCircleArticles.length ? literaryCircleArticles : linkableArticles}
+                        onReadArticle={onReadArticle}
+                      />
                     </>
                   )}
 

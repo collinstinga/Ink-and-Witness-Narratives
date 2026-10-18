@@ -50,6 +50,9 @@ describe('LiteraryCircleAdminPanel', () => {
     expect(markup).toContain('Permanently recognize this account as a Founding Literary Partner');
     expect(markup).toContain('Migration pending');
     expect(markup).toContain('Subscription renewals earn commission');
+    expect(markup).toContain('Private community bulletin');
+    expect(markup).toContain('Add bulletin item');
+    expect(markup).toContain('Drafts stay writer-only');
     expect(markup).not.toContain('partner@example.test');
   });
 
@@ -59,6 +62,36 @@ describe('LiteraryCircleAdminPanel', () => {
     expect(localDateTimeToIso(local)).toMatch(/^2026-10-16T/);
     expect(localDateTimeToIso('not-a-date')).toBeUndefined();
     expect(isoToLocalDateTime('not-a-date')).toBe('');
+  });
+
+  it('keeps unpublished community bulletin drafts editable in the writer-only panel', () => {
+    const markup = renderToStaticMarkup(
+      <LiteraryCircleAdminPanel
+        settings={{
+          ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+          community: {
+            ...DEFAULT_LITERARY_CIRCLE_SETTINGS.community,
+            posts: [{
+              id: 'campaign-draft',
+              type: 'monthly_campaign',
+              title: 'October reading campaign',
+              body: 'Draft guidance for partners.',
+              isPublished: false,
+              order: 0,
+            }],
+          },
+        }}
+        affiliates={[]}
+        savingSettings={false}
+        onSaveSettings={vi.fn(async settings => settings)}
+        onUpdateMembership={vi.fn(async () => undefined)}
+      />,
+    );
+
+    expect(markup).toContain('October reading campaign');
+    expect(markup).toContain('Draft guidance for partners.');
+    expect(markup).toContain('Publish this item to approved affiliates');
+    expect(markup).toContain('Stable ID: campaign-draft');
   });
 
   it('distinguishes financial policy changes from ordinary programme copy edits', () => {

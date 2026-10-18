@@ -50,4 +50,33 @@ describe('Literary Circle onboarding API client', () => {
       status: 'in_progress',
     });
   });
+
+  it('loads the private community through a no-store affiliate request', async () => {
+    const literaryCircle = {
+      enabled: true,
+      community: {
+        enabled: true,
+        title: 'Private Circle Desk',
+        description: 'Current partner guidance.',
+        posts: [],
+      },
+    };
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ success: true, literaryCircle }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await api.getAffiliateLiteraryCircleCommunity();
+
+    expect(result.literaryCircle).toEqual(literaryCircle);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/affiliate/literary-circle/community');
+    expect(init.cache).toBe('no-store');
+    expect(init.headers).toMatchObject({
+      'x-affiliate-token': 'cookie-session',
+    });
+  });
 });

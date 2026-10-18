@@ -4,7 +4,6 @@ import crypto from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import {
   getDb,
-  replaceFirestoreDoc,
   setFirestoreDoc,
   updateFirestoreDoc,
   getFirestoreDoc,
@@ -170,6 +169,13 @@ export class AffiliateSettingsValidationError extends Error {
   }
 }
 
+export class LiteraryCircleSettingsConflictError extends Error {
+  constructor() {
+    super('Literary Circle settings changed since this editor was opened. Reload the latest settings before saving again.');
+    this.name = 'LiteraryCircleSettingsConflictError';
+  }
+}
+
 function validateAffiliateSettingsPatch(patch: Partial<AffiliateSettings>): void {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     throw new AffiliateSettingsValidationError('Affiliate settings must be provided as an object.');
@@ -311,6 +317,17 @@ function writeJsonFileSync(filePath: string, data: any) {
   } catch (err) {
     console.error(`[AffiliateStore] Error writing to ${filePath}:`, err);
   }
+}
+
+function publishLiteraryCircleSettingsSnapshot(value: unknown): LiteraryCircleSettings {
+  const next = normalizeLiteraryCircleSettings(value);
+  const currentRevision = cachedLiteraryCircleSettings.revision || 0;
+  const nextRevision = next.revision || 0;
+  if (nextRevision >= currentRevision) {
+    cachedLiteraryCircleSettings = next;
+    writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+  }
+  return normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
 }
 
 export function sanitizeAffiliateForResponse(affiliate: AffiliateAccount): AffiliatePublicProfile {
@@ -668,8 +685,10 @@ export const affiliateStore = {
       LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID
     );
     if (persisted) {
-      cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(persisted);
-      writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+      // A read that started before a successful writer transaction can finish
+      // afterward. Never let that older snapshot regress the process cache or
+      // briefly republish content that the writer has just removed.
+      publishLiteraryCircleSettingsSnapshot(persisted);
     } else {
       // A deleted policy document must fail closed instead of reviving a
       // previously cached entitlement configuration on a warm instance.
@@ -688,91 +707,134 @@ export const affiliateStore = {
 
   async saveLiteraryCircleSettings(
     value: LiteraryCircleSettings,
-    actor = 'Admin'
+    actor = 'Admin',
+    expectedRevision = value.revision
   ): Promise<LiteraryCircleSettings> {
-    const previous = normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
     const validated = validateLiteraryCircleSettings(value);
-    const policyChanged = isLiteraryCircleCommissionPolicyChange(previous, validated);
-    const policyVersion = policyChanged
-      ? previous.commissionPolicy.version + 1
-      : previous.commissionPolicy.version;
-    const now = new Date().toISOString();
-    const isConfirmedPolicyLifecycleChange = policyChanged && (
-      previous.commissionPolicy.status === 'active'
-      || validated.commissionPolicy.status === 'active'
+    const preserveExistingCommunityPosts = !Object.prototype.hasOwnProperty.call(
+      value.community,
+      'posts'
     );
-    let effectiveAt = validated.commissionPolicy.effectiveAt;
-    if (isConfirmedPolicyLifecycleChange && validated.commissionPolicy.status === 'draft') {
-      effectiveAt = now;
-    }
-    if (isConfirmedPolicyLifecycleChange && validated.commissionPolicy.status === 'active') {
-      const effectiveTime = Date.parse(effectiveAt || '');
-      if (!Number.isFinite(effectiveTime) || effectiveTime < Date.parse(now) - 5 * 60_000) {
-        throw new LiteraryCircleValidationError(
-          'Choose a current or future effective date for this commission-policy change.'
-        );
+    const now = new Date().toISOString();
+    const requestedRevision = Number.isSafeInteger(expectedRevision) && Number(expectedRevision) >= 0
+      ? Number(expectedRevision)
+      : 0;
+    const settingsReference = getDb()
+      .collection('site_configs')
+      .doc(LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID);
+    const persisted = await getDb().runTransaction(async firestoreTransaction => {
+      const snapshot = await firestoreTransaction.get(settingsReference);
+      const previous = normalizeLiteraryCircleSettings(
+        snapshot.exists
+          ? snapshot.data()
+          : {
+              ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+              enabled: false,
+              community: {
+                ...DEFAULT_LITERARY_CIRCLE_SETTINGS.community,
+                enabled: false
+              }
+            }
+      );
+      const currentRevision = previous.revision || 0;
+      if (currentRevision !== requestedRevision) {
+        throw new LiteraryCircleSettingsConflictError();
       }
-    }
-    const nextPolicySettings = normalizeLiteraryCircleSettings({
-      ...validated,
-      commissionPolicy: {
-        ...validated.commissionPolicy,
-        version: policyVersion,
-        ...(effectiveAt ? { effectiveAt } : {})
-      },
-      updatedAt: now,
-      updatedBy: actor
-    });
-    const policyHistory = [...(previous.commissionPolicyHistory || [])];
-    const appendSnapshot = (snapshot: ReturnType<typeof createLiteraryCircleCommissionPolicySnapshot>) => {
-      const existingIndex = policyHistory.findIndex(entry => entry.version === snapshot.version);
-      if (existingIndex >= 0) policyHistory[existingIndex] = snapshot;
-      else policyHistory.push(snapshot);
-    };
-    if (isConfirmedPolicyLifecycleChange) {
-      if (
+
+      // Clients released before the private bulletin did not send `posts`.
+      // Preserve the durable list for those otherwise-valid saves instead of
+      // treating an omitted, newly-added field as an instruction to erase it.
+      const requested = preserveExistingCommunityPosts
+        ? normalizeLiteraryCircleSettings({
+            ...validated,
+            community: {
+              ...validated.community,
+              posts: previous.community.posts || []
+            }
+          })
+        : validated;
+
+      const policyChanged = isLiteraryCircleCommissionPolicyChange(previous, requested);
+      const policyVersion = policyChanged
+        ? previous.commissionPolicy.version + 1
+        : previous.commissionPolicy.version;
+      const isConfirmedPolicyLifecycleChange = policyChanged && (
         previous.commissionPolicy.status === 'active'
-        && previous.commissionPolicy.effectiveAt
-        && !policyHistory.some(snapshot => snapshot.version === previous.commissionPolicy.version)
-      ) {
-        appendSnapshot(createLiteraryCircleCommissionPolicySnapshot(previous, {
-          effectiveAt: previous.commissionPolicy.effectiveAt,
-          confirmedAt: previous.updatedAt || previous.commissionPolicy.effectiveAt,
-          confirmedBy: previous.updatedBy || 'System'
+        || requested.commissionPolicy.status === 'active'
+      );
+      let effectiveAt = requested.commissionPolicy.effectiveAt;
+      if (isConfirmedPolicyLifecycleChange && requested.commissionPolicy.status === 'draft') {
+        effectiveAt = now;
+      }
+      if (isConfirmedPolicyLifecycleChange && requested.commissionPolicy.status === 'active') {
+        const effectiveTime = Date.parse(effectiveAt || '');
+        if (!Number.isFinite(effectiveTime) || effectiveTime < Date.parse(now) - 5 * 60_000) {
+          throw new LiteraryCircleValidationError(
+            'Choose a current or future effective date for this commission-policy change.'
+          );
+        }
+      }
+      const nextPolicySettings = normalizeLiteraryCircleSettings({
+        ...requested,
+        revision: currentRevision + 1,
+        commissionPolicy: {
+          ...requested.commissionPolicy,
+          version: policyVersion,
+          ...(effectiveAt ? { effectiveAt } : {})
+        },
+        updatedAt: now,
+        updatedBy: actor
+      });
+      const policyHistory = [...(previous.commissionPolicyHistory || [])];
+      const appendSnapshot = (snapshotValue: ReturnType<typeof createLiteraryCircleCommissionPolicySnapshot>) => {
+        const existingIndex = policyHistory.findIndex(entry => entry.version === snapshotValue.version);
+        if (existingIndex >= 0) policyHistory[existingIndex] = snapshotValue;
+        else policyHistory.push(snapshotValue);
+      };
+      if (isConfirmedPolicyLifecycleChange) {
+        if (
+          previous.commissionPolicy.status === 'active'
+          && previous.commissionPolicy.effectiveAt
+          && !policyHistory.some(snapshotValue => snapshotValue.version === previous.commissionPolicy.version)
+        ) {
+          appendSnapshot(createLiteraryCircleCommissionPolicySnapshot(previous, {
+            effectiveAt: previous.commissionPolicy.effectiveAt,
+            confirmedAt: previous.updatedAt || previous.commissionPolicy.effectiveAt,
+            confirmedBy: previous.updatedBy || 'System'
+          }));
+        }
+        appendSnapshot(createLiteraryCircleCommissionPolicySnapshot(nextPolicySettings, {
+          effectiveAt: effectiveAt || now,
+          confirmedAt: now,
+          confirmedBy: actor
         }));
       }
-      appendSnapshot(createLiteraryCircleCommissionPolicySnapshot(nextPolicySettings, {
-        effectiveAt: effectiveAt || now,
-        confirmedAt: now,
-        confirmedBy: actor
-      }));
-    }
-    if (policyHistory.length > 256) {
-      throw new LiteraryCircleValidationError(
-        'Commission policy history is full. Archive it safely before publishing another financial policy.'
-      );
-    }
-    const next = normalizeLiteraryCircleSettings({
-      ...nextPolicySettings,
-      commissionPolicyHistory: policyHistory
+      if (policyHistory.length > 256) {
+        throw new LiteraryCircleValidationError(
+          'Commission policy history is full. Archive it safely before publishing another financial policy.'
+        );
+      }
+      const next = normalizeLiteraryCircleSettings({
+        ...nextPolicySettings,
+        commissionPolicyHistory: policyHistory
+      });
+      firestoreTransaction.set(settingsReference, next, { merge: false });
+      return { previous, next };
     });
 
-    // Publish only after the durable policy document has committed. Tier
-    // rates remain proposals until their independently versioned policy is
-    // activated, so this does not alter historical commission records.
-    await replaceFirestoreDoc('site_configs', LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID, next);
-    cachedLiteraryCircleSettings = next;
-    writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+    // Publish the process-local copy only after the atomic source-of-truth
+    // write succeeds. A stale editor therefore cannot revive old content.
+    const published = publishLiteraryCircleSettingsSnapshot(persisted.next);
     this.recordAudit(
       actor,
       'literary_circle_settings_updated',
       'settings',
       'Updated Literary Circle configuration',
       LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
-      previous,
-      next
+      persisted.previous,
+      persisted.next
     );
-    return normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
+    return published;
   },
 
   // AFFILIATES CRUD
@@ -955,7 +1017,7 @@ export const affiliateStore = {
       };
     });
 
-    cachedLiteraryCircleSettings = persisted.settings;
+    publishLiteraryCircleSettingsSnapshot(persisted.settings);
     const updated = cacheFreshAffiliateRecord(id, persisted.updatedAffiliate);
     if (!updated) throw new Error('Affiliate not found.');
     this.recordAudit(
@@ -1073,7 +1135,7 @@ export const affiliateStore = {
       };
     });
 
-    cachedLiteraryCircleSettings = persisted.settings;
+    publishLiteraryCircleSettingsSnapshot(persisted.settings);
     const updated = cacheFreshAffiliateRecord(id, persisted.updatedAffiliate);
     if (!updated) throw new Error('Affiliate not found.');
     this.recordAudit(
@@ -1988,10 +2050,7 @@ export const affiliateStore = {
       writeJsonFileSync(SETTINGS_FILE, cachedSettings);
     }
     if ('freshLiteraryCircleSettings' in persisted && persisted.freshLiteraryCircleSettings) {
-      cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(
-        persisted.freshLiteraryCircleSettings
-      );
-      writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
+      publishLiteraryCircleSettingsSnapshot(persisted.freshLiteraryCircleSettings);
     }
     if (persisted.affiliateId) {
       cacheFreshAffiliateRecord(

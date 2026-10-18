@@ -22,7 +22,7 @@ vi.mock('./db.js', () => ({
   deleteFirestoreDoc: firestore.deleteDoc
 }));
 
-import { affiliateStore } from './affiliateStore.js';
+import { affiliateStore, LiteraryCircleSettingsConflictError } from './affiliateStore.js';
 import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
 import type { AffiliateAccount, AffiliateSaleCommission, LiteraryCircleSettings } from '../types.js';
 
@@ -173,7 +173,7 @@ describe('affiliate store Literary Circle integration', () => {
     expect((await affiliateStore.getLiteraryCircleSettingsFresh()).introductoryPeriodDays).toBe(45);
 
     const beforeFailure = affiliateStore.getLiteraryCircleSettings();
-    firestore.replaceDoc.mockRejectedValueOnce(new Error('simulated Literary Circle write failure'));
+    firestore.runTransaction.mockRejectedValueOnce(new Error('simulated Literary Circle write failure'));
     await expect(affiliateStore.saveLiteraryCircleSettings({
       ...beforeFailure,
       introductoryPeriodDays: 60
@@ -194,26 +194,144 @@ describe('affiliate store Literary Circle integration', () => {
       community: {
         ...versioned.community,
         enabled: true,
-        whatsappInviteUrl: 'https://whatsapp.com/channel/0029Vexample'
+        whatsappInviteUrl: 'https://whatsapp.com/channel/0029Vexample',
+        posts: [{
+          id: 'launch-note',
+          type: 'announcement',
+          title: 'Welcome note',
+          body: 'Private guidance for approved affiliates.',
+          isPublished: true,
+          order: 0
+        }]
       }
     }, 'Circle Settings Test');
     expect(firestore.documents.get('site_configs/affiliate_literary_circle').community.whatsappInviteUrl)
       .toContain('whatsapp.com');
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle').community.posts)
+      .toMatchObject([{ id: 'launch-note', isPublished: true }]);
     await affiliateStore.saveLiteraryCircleSettings({
       ...withInvite,
       community: {
+        ...withInvite.community,
         enabled: false,
-        title: withInvite.community.title,
-        description: withInvite.community.description
+        whatsappInviteUrl: undefined
       }
     }, 'Circle Settings Test');
     expect(firestore.documents.get('site_configs/affiliate_literary_circle').community)
       .not.toHaveProperty('whatsappInviteUrl');
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle').community.posts)
+      .toMatchObject([{ id: 'launch-note' }]);
 
     await expect(affiliateStore.saveLiteraryCircleSettings({
       ...beforeFailure,
       tiers: []
     } as LiteraryCircleSettings, 'Circle Settings Test')).rejects.toThrow(/between 1 and 12/i);
+  });
+
+  it('atomically rejects a stale full-document save so removed private posts cannot return', async () => {
+    const initial = await affiliateStore.getLiteraryCircleSettingsFresh();
+    const first = await affiliateStore.saveLiteraryCircleSettings({
+      ...initial,
+      community: {
+        ...initial.community,
+        enabled: true,
+        posts: [{
+          id: 'private-note',
+          type: 'announcement',
+          title: 'Private note',
+          body: 'Approved affiliate guidance.',
+          isPublished: true,
+          order: 0
+        }]
+      }
+    }, 'First Writer Tab');
+    const second = await affiliateStore.saveLiteraryCircleSettings({
+      ...first,
+      community: {
+        ...first.community,
+        posts: []
+      }
+    }, 'Second Writer Tab');
+
+    expect(second.revision).toBe((first.revision || 0) + 1);
+    await expect(affiliateStore.saveLiteraryCircleSettings({
+      ...first,
+      community: {
+        ...first.community,
+        description: 'A stale tab must not restore the deleted post.'
+      }
+    }, 'Stale Writer Tab')).rejects.toBeInstanceOf(LiteraryCircleSettingsConflictError);
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle').community.posts).toEqual([]);
+    expect(affiliateStore.getLiteraryCircleSettings().community.posts).toEqual([]);
+  });
+
+  it('does not let a delayed older Firestore read regress the cache after a writer save', async () => {
+    const staleSnapshot = clone(await affiliateStore.getLiteraryCircleSettingsFresh());
+    let finishStaleRead!: (value: LiteraryCircleSettings) => void;
+    const staleRead = new Promise<LiteraryCircleSettings>(resolve => {
+      finishStaleRead = resolve;
+    });
+    firestore.getDoc.mockImplementationOnce(() => staleRead);
+
+    const pendingRefresh = affiliateStore.getLiteraryCircleSettingsFresh();
+    const saved = await affiliateStore.saveLiteraryCircleSettings({
+      ...staleSnapshot,
+      community: {
+        ...staleSnapshot.community,
+        enabled: true,
+        posts: [{
+          id: 'newer-note',
+          type: 'announcement',
+          title: 'Newer note',
+          body: 'This revision must remain authoritative.',
+          isPublished: true,
+          order: 0
+        }]
+      }
+    }, 'Concurrent Writer Save');
+
+    finishStaleRead(staleSnapshot);
+    const refreshed = await pendingRefresh;
+
+    expect(refreshed.revision).toBe(saved.revision);
+    expect(refreshed.community.posts).toMatchObject([{ id: 'newer-note' }]);
+    expect(affiliateStore.getLiteraryCircleSettings()).toEqual(refreshed);
+  });
+
+  it('preserves bulletin posts for compatible legacy saves that omit the new posts field', async () => {
+    const initial = await affiliateStore.getLiteraryCircleSettingsFresh();
+    const withPost = await affiliateStore.saveLiteraryCircleSettings({
+      ...initial,
+      community: {
+        ...initial.community,
+        posts: [{
+          id: 'preserved-note',
+          type: 'announcement',
+          title: 'Preserve me',
+          body: 'An older editor must not erase this post.',
+          isPublished: false,
+          order: 0
+        }]
+      }
+    }, 'Current Writer Client');
+    const { posts: _posts, ...legacyCommunity } = withPost.community;
+
+    const legacySaved = await affiliateStore.saveLiteraryCircleSettings({
+      ...withPost,
+      community: {
+        ...legacyCommunity,
+        description: 'Updated by a compatible older editor.'
+      }
+    }, 'Legacy Writer Client');
+
+    expect(legacySaved.community.description).toContain('compatible older editor');
+    expect(legacySaved.community.posts).toMatchObject([{ id: 'preserved-note' }]);
+    await expect(affiliateStore.saveLiteraryCircleSettings({
+      ...legacySaved,
+      community: null
+    } as unknown as LiteraryCircleSettings, 'Malformed Writer Client')).rejects.toThrow(/community settings must be provided as an object/i);
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle').community.posts)
+      .toMatchObject([{ id: 'preserved-note' }]);
   });
 
   it('appends immutable effective-dated snapshots for each confirmed active policy lifecycle change', async () => {

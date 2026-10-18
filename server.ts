@@ -49,12 +49,14 @@ import {
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import {
   AffiliateSettingsValidationError,
+  LiteraryCircleSettingsConflictError,
   sanitizeAffiliateForResponse
 } from "./src/server/affiliateStore.js";
 import {
   isAffiliateComplimentaryAccessActive,
   isLiteraryCircleCommissionPolicyChange,
-  LiteraryCircleValidationError
+  LiteraryCircleValidationError,
+  projectLiteraryCircleCommunityForAffiliate
 } from "./src/server/literaryCircle.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
@@ -456,7 +458,16 @@ function projectAffiliateDashboard(
   if (!dashboard) return null;
   return {
     ...dashboard,
-    sales: (dashboard.sales || []).map(toAffiliateSaleCommission)
+    sales: (dashboard.sales || []).map(toAffiliateSaleCommission),
+    // Community content is deliberately excluded from the cached/polled
+    // dashboard. A dedicated endpoint force-refreshes both the affiliate
+    // session and writer settings before releasing private bulletin data.
+    ...(dashboard.literaryCircle ? {
+      literaryCircle: {
+        ...dashboard.literaryCircle,
+        community: { enabled: false, title: '', description: '', posts: [] }
+      }
+    } : {})
   };
 }
 
@@ -1064,6 +1075,44 @@ async function requireAffiliateAuth(req: Request, res: Response, next: NextFunct
   }
 }
 
+// High-sensitivity reads use one deliberate source-of-truth verification.
+// Keeping this separate avoids a cached middleware check followed by a second
+// forced session/account read inside the route handler.
+async function requireFreshAffiliateAuth(req: Request, res: Response, next: NextFunction) {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+  const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string;
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      error: "Authentication required. Please log in to access the affiliate portal.",
+      code: "AUTH_REQUIRED"
+    });
+  }
+
+  try {
+    const affiliate = await store.affiliates.verifyAffiliateSession(token, { forceFresh: true });
+    if (!affiliate) {
+      clearAffiliateSessionCookie(res);
+      return res.status(401).json({
+        success: false,
+        error: "Affiliate session expired or invalid. Please log in again.",
+        code: "SESSION_EXPIRED"
+      });
+    }
+    (req as any).affiliate = sanitizeAffiliateForResponse(affiliate);
+    return next();
+  } catch {
+    return res.status(503).json({
+      success: false,
+      error: "Affiliate authentication is temporarily unavailable. Please try again shortly.",
+      code: "AUTH_UNAVAILABLE"
+    });
+  }
+}
+
 async function resolveFreshAffiliateComplimentaryAccess(req: Request, res: Response): Promise<boolean> {
   const token = (req as any).cookies?.[AFFILIATE_SESSION_COOKIE_NAME] as string | undefined;
   if (!token) return false;
@@ -1277,6 +1326,21 @@ export async function createApp() {
     legacyHeaders: false,
     validate: { xForwardedForHeader: false, default: false },
     message: { success: false, error: "Purchase recovery limit reached. Please wait before trying again." }
+  });
+
+  const literaryCircleCommunityLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 12,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    // Per-account limiting cannot be bypassed by rotating network addresses.
+    // Authentication has already populated this identifier before the limiter.
+    keyGenerator: (req: Request) => String((req as any).affiliate?.id || 'unknown'),
+    message: {
+      success: false,
+      error: "Private Literary Circle refresh limit reached. Please wait a moment before retrying."
+    }
   });
 
   // Mutable publishing data must never be served from an older shared CDN
@@ -6163,6 +6227,42 @@ ${currentDraft || prompt}
     }
   });
 
+  // Affiliate: private Literary Circle bulletin. This endpoint is the only
+  // browser source for community content: both account approval and writer
+  // settings are re-read so a suspension, deletion, unpublish, or disable
+  // takes effect across warm server instances without waiting for a cache.
+  app.get(
+    "/api/affiliate/literary-circle/community",
+    requireFreshAffiliateAuth,
+    literaryCircleCommunityLimiter,
+    async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      try {
+        const affiliate = (req as any).affiliate;
+        const settings = await store.affiliates.getLiteraryCircleSettingsFresh();
+        const dashboard = store.affiliates.getAffiliateDashboard(affiliate.id);
+        if (!dashboard?.literaryCircle) {
+          throw new Error('Fresh Literary Circle summary is unavailable.');
+        }
+        return res.json({
+          success: true,
+          literaryCircle: {
+            ...dashboard.literaryCircle,
+            community: projectLiteraryCircleCommunityForAffiliate(settings)
+          }
+        });
+      } catch (err) {
+        console.error('[Literary Circle] Private community could not be loaded.', err);
+        return res.status(503).json({
+          success: false,
+          error: 'The private Literary Circle community is temporarily unavailable. Please retry.'
+        });
+      }
+    }
+  );
+
   // Affiliate: compact complimentary library. The paid bodies remain on the
   // single-piece route, where access is force-refreshed again before release.
   app.get("/api/affiliate/literary-circle/library", requireAffiliateAuth, async (req: Request, res: Response) => {
@@ -6485,6 +6585,7 @@ ${currentDraft || prompt}
   });
 
   app.put("/api/admin/affiliates/literary-circle/settings", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       const current = await store.affiliates.getLiteraryCircleSettingsFresh();
       const requestedPolicyStatus = req.body?.commissionPolicy?.status;
@@ -6514,6 +6615,13 @@ ${currentDraft || prompt}
           : 'Literary Circle settings saved. Proposed tier commissions remain in draft.'
       });
     } catch (err: any) {
+      if (err instanceof LiteraryCircleSettingsConflictError) {
+        return res.status(409).json({
+          success: false,
+          code: 'LITERARY_CIRCLE_SETTINGS_CONFLICT',
+          error: err.message
+        });
+      }
       if (err instanceof LiteraryCircleValidationError) {
         return res.status(400).json({ success: false, error: err.message });
       }

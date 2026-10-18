@@ -12,6 +12,7 @@ import {
 
 import type {
   AffiliatePublicProfile,
+  LiteraryCircleCommunityPost,
   LiteraryCircleComplimentaryAccessStatus,
   LiteraryCircleSettings,
   LiteraryCircleTierDefinition,
@@ -63,6 +64,30 @@ function nextTierId(tiers: LiteraryCircleTierDefinition[]): string {
   while (used.has(`literary-tier-${index}`)) index += 1;
   return `literary-tier-${index}`;
 }
+
+function nextCommunityPostId(posts: LiteraryCircleCommunityPost[]): string {
+  const used = new Set(posts.map(post => post.id));
+  const base = `community-${Date.now().toString(36)}`;
+  let candidate = base;
+  let suffix = 1;
+  while (used.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+const COMMUNITY_POST_TYPE_LABELS: Array<{
+  value: LiteraryCircleCommunityPost['type'];
+  label: string;
+}> = [
+  { value: 'announcement', label: 'Writer announcement' },
+  { value: 'release_preview', label: 'Upcoming release preview' },
+  { value: 'exclusive_excerpt', label: 'Exclusive excerpt' },
+  { value: 'monthly_campaign', label: 'Monthly reading campaign' },
+  { value: 'featured_piece', label: 'Featured literary piece' },
+  { value: 'promotional_guidance', label: 'Promotional guidance' },
+];
 
 export function isFinancialLiteraryCirclePolicyChange(
   current: LiteraryCircleSettings,
@@ -279,6 +304,48 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
     updateDraft({ ...draft, tiers: draft.tiers.filter(tier => tier.id !== id) });
   };
 
+  const communityPosts = draft.community.posts || [];
+
+  const updateCommunityPost = (id: string, patch: Partial<LiteraryCircleCommunityPost>) => {
+    updateDraft({
+      ...draft,
+      community: {
+        ...draft.community,
+        posts: communityPosts.map(post => post.id === id ? { ...post, ...patch } : post),
+      },
+    });
+  };
+
+  const addCommunityPost = () => {
+    if (communityPosts.length >= 24) return;
+    const now = new Date().toISOString();
+    updateDraft({
+      ...draft,
+      community: {
+        ...draft.community,
+        posts: [...communityPosts, {
+          id: nextCommunityPostId(communityPosts),
+          type: 'announcement',
+          title: 'New Literary Circle update',
+          body: 'Add the private announcement, preview, or campaign guidance here.',
+          isPublished: false,
+          order: communityPosts.length,
+          publishedAt: now,
+        }],
+      },
+    });
+  };
+
+  const removeCommunityPost = (id: string) => {
+    updateDraft({
+      ...draft,
+      community: {
+        ...draft.community,
+        posts: communityPosts.filter(post => post.id !== id),
+      },
+    });
+  };
+
   const saveSettings = async () => {
     setError('');
     setSuccess('');
@@ -474,6 +541,86 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
         <label className="mt-3 block text-xs font-semibold text-slate-300">Description
           <textarea className={`${fieldClass} mt-1.5 min-h-24`} value={draft.community.description} maxLength={600} onChange={event => updateDraft({ ...draft, community: { ...draft.community, description: event.target.value } })} />
         </label>
+        <div className="mt-5 border-t border-violet-200/10 pt-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h4 className="font-serif text-lg font-bold text-white">Private community bulletin</h4>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                Publish announcements, release previews, excerpts, campaigns, featured pieces, and approved promotional guidance. Drafts stay writer-only.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={addCommunityPost}
+              disabled={communityPosts.length >= 24}
+              className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-violet-300/30 bg-violet-400/10 px-4 py-2 text-xs font-bold text-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus aria-hidden="true" className="h-4 w-4" /> Add bulletin item
+            </button>
+          </div>
+
+          <div className="mt-4 space-y-4">
+            {communityPosts.length ? communityPosts.map(post => (
+              <article key={post.id} className="rounded-2xl border border-violet-300/15 bg-slate-950/50 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-mono text-[10px] uppercase tracking-wider text-slate-500">Stable ID: {post.id}</p>
+                    <p className="mt-1 text-xs text-slate-400">Only published, started, unexpired items appear to approved affiliates.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeCommunityPost(post.id)}
+                    aria-label={`Delete ${post.title}`}
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-rose-300 transition hover:bg-rose-500/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
+                  >
+                    <Trash2 aria-hidden="true" className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <label className="text-xs font-semibold text-slate-300">Type
+                    <select className={`${fieldClass} mt-1.5`} value={post.type} onChange={event => updateCommunityPost(post.id, { type: event.target.value as LiteraryCircleCommunityPost['type'] })}>
+                      {COMMUNITY_POST_TYPE_LABELS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-xs font-semibold text-slate-300">Display order
+                    <input className={`${fieldClass} mt-1.5`} type="number" min={0} max={10000} step={1} value={post.order} onChange={event => updateCommunityPost(post.id, { order: Number(event.target.value) })} />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-300">Publish from
+                    <input className={`${fieldClass} mt-1.5`} type="datetime-local" value={isoToLocalDateTime(post.publishedAt)} onChange={event => updateCommunityPost(post.id, { publishedAt: localDateTimeToIso(event.target.value) })} />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-300">Expire automatically
+                    <input className={`${fieldClass} mt-1.5`} type="datetime-local" value={isoToLocalDateTime(post.expiresAt)} onChange={event => updateCommunityPost(post.id, { expiresAt: localDateTimeToIso(event.target.value) })} />
+                  </label>
+                </div>
+                <label className="mt-3 block text-xs font-semibold text-slate-300">Title
+                  <input className={`${fieldClass} mt-1.5`} value={post.title} maxLength={120} onChange={event => updateCommunityPost(post.id, { title: event.target.value })} />
+                </label>
+                <label className="mt-3 block text-xs font-semibold text-slate-300">Private message
+                  <textarea className={`${fieldClass} mt-1.5 min-h-28`} value={post.body} maxLength={2000} onChange={event => updateCommunityPost(post.id, { body: event.target.value })} />
+                </label>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <label className="text-xs font-semibold text-slate-300">Linked piece ID (optional)
+                    <input className={`${fieldClass} mt-1.5 font-mono`} value={post.pieceId || ''} maxLength={128} onChange={event => updateCommunityPost(post.id, { pieceId: event.target.value || undefined })} placeholder="Published piece ID" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-300">Button label (optional)
+                    <input className={`${fieldClass} mt-1.5`} value={post.ctaLabel || ''} maxLength={80} onChange={event => updateCommunityPost(post.id, { ctaLabel: event.target.value || undefined })} placeholder="Open campaign resource" />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-300">HTTPS resource URL (optional)
+                    <input className={`${fieldClass} mt-1.5`} type="url" value={post.ctaUrl || ''} maxLength={1000} onChange={event => updateCommunityPost(post.id, { ctaUrl: event.target.value || undefined })} placeholder="https://…" />
+                  </label>
+                </div>
+                <label className="mt-3 flex min-h-10 items-center gap-2 text-xs text-slate-300">
+                  <input type="checkbox" checked={post.isPublished} onChange={event => updateCommunityPost(post.id, { isPublished: event.target.checked })} className="h-4 w-4 accent-violet-400" />
+                  Publish this item to approved affiliates
+                </label>
+              </article>
+            )) : (
+              <p className="rounded-xl border border-dashed border-slate-700 bg-black/15 p-4 text-sm text-slate-400">
+                No bulletin items yet. Add one and keep it as a draft until it is ready.
+              </p>
+            )}
+          </div>
+        </div>
         <label className="mt-3 flex min-h-10 items-center gap-2 text-xs text-slate-300">
           <input type="checkbox" checked={draft.community.enabled} onChange={event => updateDraft({ ...draft, community: { ...draft.community, enabled: event.target.checked } })} className="h-4 w-4 accent-violet-400" />
           Show private community information to approved affiliates

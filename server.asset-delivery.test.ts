@@ -46,6 +46,7 @@ vi.mock('./src/server/store.js', () => ({
 }));
 vi.mock('./src/server/affiliateStore.js', () => ({
   AffiliateSettingsValidationError: class AffiliateSettingsValidationError extends Error {},
+  LiteraryCircleSettingsConflictError: class LiteraryCircleSettingsConflictError extends Error {},
   sanitizeAffiliateForResponse: (value: unknown) => value
 }));
 vi.mock('./src/server/publicWriteSecurity.js', () => ({

@@ -4,6 +4,8 @@ import type {
   AffiliateSettings,
   AffiliateLiteraryCircleMembership,
   AffiliateSaleCommission,
+  LiteraryCircleCommunityPost,
+  LiteraryCircleCommunityPostType,
   LiteraryCircleCommissionPolicySnapshot,
   LiteraryCircleDashboardSummary,
   LiteraryCircleSettings,
@@ -13,7 +15,18 @@ import type {
 const SAFE_TIER_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const MAX_TIERS = 12;
 const MAX_INTRODUCTORY_DAYS = 365;
+const MAX_COMMUNITY_POSTS = 24;
 const VERIFIED_COMMISSION_STATUSES = new Set(['PENDING', 'APPROVED', 'PAID']);
+const SAFE_COMMUNITY_POST_ID = /^[a-z0-9](?:[a-z0-9_-]{0,94}[a-z0-9])?$/;
+const SAFE_PUBLIC_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const COMMUNITY_POST_TYPES = new Set<LiteraryCircleCommunityPostType>([
+  'announcement',
+  'release_preview',
+  'exclusive_excerpt',
+  'monthly_campaign',
+  'featured_piece',
+  'promotional_guidance'
+]);
 
 export const LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID = 'affiliate_literary_circle';
 export const LITERARY_CIRCLE_SCHEMA_VERSION = 1 as const;
@@ -30,6 +43,7 @@ export const LITERARY_CIRCLE_ONBOARDING_STEPS = [
 
 export const DEFAULT_LITERARY_CIRCLE_SETTINGS: LiteraryCircleSettings = {
   schemaVersion: LITERARY_CIRCLE_SCHEMA_VERSION,
+  revision: 0,
   enabled: true,
   defaultTierId: 'literary-partner',
   qualificationTimezone: 'Africa/Nairobi',
@@ -75,7 +89,8 @@ export const DEFAULT_LITERARY_CIRCLE_SETTINGS: LiteraryCircleSettings = {
   community: {
     enabled: false,
     title: 'The Ink & Witness Literary Circle',
-    description: 'Private announcements, campaign notes, early previews and reading recommendations.'
+    description: 'Private announcements, campaign notes, early previews and reading recommendations.',
+    posts: []
   }
 };
 
@@ -121,6 +136,64 @@ function safeWhatsappUrl(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function safeHttpsUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 1_000) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== 'https:' || url.username || url.password) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function safeOptionalText(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().slice(0, maximum);
+  return normalized || undefined;
+}
+
+function normalizeCommunityPosts(value: unknown): LiteraryCircleCommunityPost[] {
+  if (!Array.isArray(value)) return [];
+  const byId = new Map<string, LiteraryCircleCommunityPost>();
+  for (const [index, rawValue] of value.slice(0, MAX_COMMUNITY_POSTS).entries()) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) continue;
+    const raw = rawValue as Partial<LiteraryCircleCommunityPost>;
+    const id = typeof raw.id === 'string' ? raw.id.trim().toLowerCase() : '';
+    const title = safeOptionalText(raw.title, 120);
+    const body = safeOptionalText(raw.body, 2_000);
+    if (!SAFE_COMMUNITY_POST_ID.test(id) || !title || !body) continue;
+    const type = COMMUNITY_POST_TYPES.has(raw.type as LiteraryCircleCommunityPostType)
+      ? raw.type as LiteraryCircleCommunityPostType
+      : 'announcement';
+    const publishedAt = safeOptionalIso(raw.publishedAt);
+    const expiresAt = safeOptionalIso(raw.expiresAt);
+    const pieceId = typeof raw.pieceId === 'string'
+      && raw.pieceId.length <= 128
+      && SAFE_PUBLIC_IDENTIFIER.test(raw.pieceId)
+      ? raw.pieceId
+      : undefined;
+    byId.set(id, {
+      id,
+      type,
+      title,
+      body,
+      isPublished: raw.isPublished === true,
+      order: finiteInteger(raw.order, index, 0, 10_000),
+      ...(publishedAt ? { publishedAt } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+      ...(pieceId ? { pieceId } : {}),
+      ...(safeOptionalText(raw.ctaLabel, 80) ? { ctaLabel: safeOptionalText(raw.ctaLabel, 80) } : {}),
+      ...(safeHttpsUrl(raw.ctaUrl) ? { ctaUrl: safeHttpsUrl(raw.ctaUrl) } : {})
+    });
+  }
+  return [...byId.values()].sort((left, right) => (
+    left.order - right.order
+    || (Date.parse(right.publishedAt || '') || 0) - (Date.parse(left.publishedAt || '') || 0)
+    || left.id.localeCompare(right.id)
+  ));
 }
 
 function normalizeTier(value: unknown, fallback: LiteraryCircleTierDefinition): LiteraryCircleTierDefinition {
@@ -231,6 +304,7 @@ export function normalizeLiteraryCircleSettings(value: unknown): LiteraryCircleS
 
   return {
     schemaVersion: LITERARY_CIRCLE_SCHEMA_VERSION,
+    revision: finiteInteger(settings.revision, 0, 0, Number.MAX_SAFE_INTEGER),
     enabled: typeof settings.enabled === 'boolean' ? settings.enabled : DEFAULT_LITERARY_CIRCLE_SETTINGS.enabled,
     defaultTierId,
     qualificationTimezone: 'Africa/Nairobi',
@@ -265,7 +339,8 @@ export function normalizeLiteraryCircleSettings(value: unknown): LiteraryCircleS
       description: safeText(community.description, DEFAULT_LITERARY_CIRCLE_SETTINGS.community.description, 600),
       ...(safeWhatsappUrl(community.whatsappInviteUrl)
         ? { whatsappInviteUrl: safeWhatsappUrl(community.whatsappInviteUrl) }
-        : {})
+        : {}),
+      posts: normalizeCommunityPosts(community.posts)
     },
     ...(safeOptionalIso(settings.updatedAt) ? { updatedAt: safeOptionalIso(settings.updatedAt) } : {}),
     ...(safeText(settings.updatedBy, '', 120) ? { updatedBy: safeText(settings.updatedBy, '', 120) } : {})
@@ -411,6 +486,9 @@ export function validateLiteraryCircleSettings(value: unknown): LiteraryCircleSe
   if (!normalized.tiers.some(tier => tier.id === normalized.defaultTierId && tier.enabled)) {
     throw new LiteraryCircleValidationError('The default tier must be enabled.');
   }
+  if (!candidate.community || typeof candidate.community !== 'object' || Array.isArray(candidate.community)) {
+    throw new LiteraryCircleValidationError('Literary Circle community settings must be provided as an object.');
+  }
   if (candidate.commissionPolicy?.status === 'active' && !safeOptionalIso(candidate.commissionPolicy.effectiveAt)) {
     throw new LiteraryCircleValidationError('Activating tier commissions requires an effective date.');
   }
@@ -420,7 +498,70 @@ export function validateLiteraryCircleSettings(value: unknown): LiteraryCircleSe
   ) {
     throw new LiteraryCircleValidationError('Use a valid HTTPS WhatsApp invitation URL.');
   }
+  if (candidate.community?.posts !== undefined) {
+    if (!Array.isArray(candidate.community.posts) || candidate.community.posts.length > MAX_COMMUNITY_POSTS) {
+      throw new LiteraryCircleValidationError(`Configure at most ${MAX_COMMUNITY_POSTS} private community posts.`);
+    }
+    const postIds = new Set<string>();
+    for (const [index, rawPost] of candidate.community.posts.entries()) {
+      if (!rawPost || typeof rawPost !== 'object') {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} is invalid.`);
+      }
+      const id = typeof rawPost.id === 'string' ? rawPost.id.trim().toLowerCase() : '';
+      if (!SAFE_COMMUNITY_POST_ID.test(id)) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} requires a stable identifier.`);
+      }
+      if (postIds.has(id)) throw new LiteraryCircleValidationError(`Community post identifier “${id}” is duplicated.`);
+      postIds.add(id);
+      if (!COMMUNITY_POST_TYPES.has(rawPost.type)) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} has an unsupported type.`);
+      }
+      if (!safeOptionalText(rawPost.title, 120) || !safeOptionalText(rawPost.body, 2_000)) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} requires a title and message.`);
+      }
+      if (rawPost.ctaUrl && !safeHttpsUrl(rawPost.ctaUrl)) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} requires a valid HTTPS action URL.`);
+      }
+      if (rawPost.pieceId && (
+        rawPost.pieceId.length > 128
+        || !SAFE_PUBLIC_IDENTIFIER.test(rawPost.pieceId)
+      )) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} has an invalid piece identifier.`);
+      }
+      if (rawPost.publishedAt && !safeOptionalIso(rawPost.publishedAt)) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} has an invalid publish date.`);
+      }
+      if (rawPost.expiresAt && !safeOptionalIso(rawPost.expiresAt)) {
+        throw new LiteraryCircleValidationError(`Community post ${index + 1} has an invalid expiry date.`);
+      }
+    }
+  }
   return normalized;
+}
+
+export function projectLiteraryCircleCommunityForAffiliate(
+  settingsValue: LiteraryCircleSettings,
+  now = new Date().toISOString(),
+): LiteraryCircleSettings['community'] {
+  const settings = normalizeLiteraryCircleSettings(settingsValue);
+  if (!settings.enabled || !settings.community.enabled) {
+    return { enabled: false, title: '', description: '', posts: [] };
+  }
+  const parsedNow = Date.parse(now);
+  const nowMs = Number.isFinite(parsedNow) ? parsedNow : Date.now();
+  const posts = (settings.community.posts || [])
+    .filter(post => post.isPublished)
+    .filter(post => !post.publishedAt || Date.parse(post.publishedAt) <= nowMs)
+    .filter(post => !post.expiresAt || Date.parse(post.expiresAt) > nowMs)
+    .sort((left, right) => (
+      left.order - right.order
+      || (Date.parse(right.publishedAt || '') || 0) - (Date.parse(left.publishedAt || '') || 0)
+      || left.id.localeCompare(right.id)
+    ));
+  return {
+    ...settings.community,
+    posts
+  };
 }
 
 export function createLiteraryCircleMembership(options: {
@@ -659,8 +800,6 @@ export function buildLiteraryCircleDashboardSummary(options: {
     onboarding: membership.onboarding,
     introductoryPeriodActive: Number.isFinite(introEnd) && Date.parse(now) <= introEnd,
     commissionPolicyStatus: settings.commissionPolicy.status,
-    community: settings.enabled && settings.community.enabled
-      ? settings.community
-      : { enabled: false, title: '', description: '' }
+    community: projectLiteraryCircleCommunityForAffiliate(settings, now)
   };
 }

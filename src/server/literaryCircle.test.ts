@@ -10,6 +10,7 @@ import {
   isLiteraryCircleCommissionPolicyChange,
   literaryCirclePeriodKey,
   normalizeLiteraryCircleSettings,
+  projectLiteraryCircleCommunityForAffiliate,
   resolveAffiliateCommissionRate,
   resolveLiteraryCircleSettingsForTransaction,
   resolveLiteraryCircleTier,
@@ -118,6 +119,68 @@ describe('Literary Circle policy helpers', () => {
         ? { ...tier, proposedCommissionRate: 16 }
         : tier)
     })).toBe(true);
+  });
+
+  it('normalizes bounded private community posts and rejects unsafe writer input', () => {
+    const settings = validateLiteraryCircleSettings({
+      ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+      community: {
+        ...DEFAULT_LITERARY_CIRCLE_SETTINGS.community,
+        enabled: true,
+        posts: [{
+          id: 'release-preview-1',
+          type: 'release_preview',
+          title: '  A private first look  ',
+          body: '  Read the opening context before launch.  ',
+          isPublished: true,
+          order: 2,
+          publishedAt: '2026-10-16T00:00:00.000Z',
+          pieceId: 'piece-1',
+          ctaLabel: 'Read the piece',
+          ctaUrl: 'https://example.test/campaign'
+        }]
+      }
+    });
+
+    expect(settings.community.posts).toEqual([expect.objectContaining({
+      id: 'release-preview-1',
+      type: 'release_preview',
+      title: 'A private first look',
+      body: 'Read the opening context before launch.',
+      pieceId: 'piece-1',
+      ctaUrl: 'https://example.test/campaign'
+    })]);
+    expect(() => validateLiteraryCircleSettings({
+      ...settings,
+      community: {
+        ...settings.community,
+        posts: [{
+          ...settings.community.posts![0],
+          ctaUrl: 'javascript:alert(1)'
+        }]
+      }
+    })).toThrow(/valid HTTPS action URL/i);
+  });
+
+  it('projects only currently published community posts to approved affiliates', () => {
+    const settings = normalizeLiteraryCircleSettings({
+      ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+      community: {
+        ...DEFAULT_LITERARY_CIRCLE_SETTINGS.community,
+        enabled: true,
+        posts: [
+          { id: 'visible', type: 'announcement', title: 'Visible', body: 'Ready now', isPublished: true, order: 2 },
+          { id: 'draft', type: 'announcement', title: 'Draft', body: 'Writer only', isPublished: false, order: 0 },
+          { id: 'future', type: 'release_preview', title: 'Future', body: 'Not yet', isPublished: true, order: 0, publishedAt: '2026-11-01T00:00:00.000Z' },
+          { id: 'expired', type: 'announcement', title: 'Expired', body: 'Too late', isPublished: true, order: 1, expiresAt: '2026-10-01T00:00:00.000Z' }
+        ]
+      }
+    });
+
+    expect(projectLiteraryCircleCommunityForAffiliate(
+      settings,
+      '2026-10-16T00:00:00.000Z'
+    ).posts?.map(post => post.id)).toEqual(['visible']);
   });
 
   it('resolves delayed settlements against the immutable policy effective at transaction time', () => {
@@ -327,7 +390,15 @@ describe('Literary Circle membership helpers', () => {
         enabled: false,
         title: 'Private title',
         description: 'Private details',
-        whatsappInviteUrl: 'https://whatsapp.com/channel/0029Vprivate'
+        whatsappInviteUrl: 'https://whatsapp.com/channel/0029Vprivate',
+        posts: [{
+          id: 'private-draft',
+          type: 'announcement',
+          title: 'Private draft',
+          body: 'Do not disclose.',
+          isPublished: true,
+          order: 0
+        }]
       }
     });
     const summary = buildLiteraryCircleDashboardSummary({
@@ -337,6 +408,6 @@ describe('Literary Circle membership helpers', () => {
       now: '2026-10-16T08:00:00.000Z'
     });
 
-    expect(summary.community).toEqual({ enabled: false, title: '', description: '' });
+    expect(summary.community).toEqual({ enabled: false, title: '', description: '', posts: [] });
   });
 });

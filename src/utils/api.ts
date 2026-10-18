@@ -40,6 +40,7 @@ import {
   ReaderSubscriptionSummary,
   SubscriptionPlan,
   AffiliateLiteraryCircleMembership,
+  LiteraryCircleDashboardSummary,
   LiteraryCircleOnboardingStatus,
   LiteraryCircleSettings,
   LiteraryCircleComplimentaryAccessStatus
@@ -2419,6 +2420,22 @@ export const api = {
       '/api/affiliate/literary-circle/library',
       { headers: { 'x-affiliate-token': token } },
       'The Literary Circle library could not be loaded. Please retry.'
+    );
+  },
+
+  async getAffiliateLiteraryCircleCommunity(): Promise<{
+    success: boolean;
+    literaryCircle: LiteraryCircleDashboardSummary;
+  }> {
+    const token = getAffiliateToken();
+    if (!token) throw new Error('Please log in to open the private Literary Circle community.');
+    return safeFetchJson(
+      '/api/affiliate/literary-circle/community',
+      {
+        cache: 'no-store',
+        headers: { 'x-affiliate-token': token }
+      },
+      'The private Literary Circle community could not be loaded. Please retry.'
     );
   },
 
