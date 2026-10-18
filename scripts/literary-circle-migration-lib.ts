@@ -4,12 +4,13 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 2 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 3 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = ['ink-and-witness-narratives'] as const;
 
 const LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID = 'literary_circle_resources';
+const AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID = 'affiliate_notifications';
 const LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY = 'literary_circle_resource_assets';
 
 export interface FirebaseTarget {
@@ -177,7 +178,12 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
     collection: 'site_configs',
     fileName: 'affiliate_site_configs.json',
     scope: 'explicit_documents',
-    documentIds: ['affiliate_settings', 'affiliate_literary_circle', LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID],
+    documentIds: [
+      'affiliate_settings',
+      'affiliate_literary_circle',
+      LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID,
+      AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID
+    ],
     sumFields: EMPTY_SUM_FIELDS
   },
   {

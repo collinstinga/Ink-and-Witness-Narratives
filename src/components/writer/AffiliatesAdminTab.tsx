@@ -29,7 +29,8 @@ import {
   AlertTriangle,
   History,
   Tag,
-  Images
+  Images,
+  BellRing
 } from 'lucide-react';
 import { 
   AdminAffiliatesSummary, 
@@ -40,6 +41,9 @@ import {
   AffiliateSettings, 
   AffiliateAuditLogEntry,
   Article,
+  AffiliateNotificationEligibilitySummary,
+  LiteraryCircleNotificationEventType,
+  LiteraryCircleNotificationSettings,
   LiteraryCircleResourceLibrary,
   LiteraryCircleSettings
 } from '../../types.js';
@@ -52,11 +56,13 @@ import {
 } from './LiteraryCircleAdminPanel.js';
 import { LiteraryCircleResourcesAdmin } from './LiteraryCircleResourcesAdmin.js';
 
+const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
+
 interface AffiliatesAdminTabProps {
   articles: Article[];
 }
 
-type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'resources' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
+type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'resources' | 'notifications' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
 
 export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
@@ -125,6 +131,14 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [savingResourceLibrary, setSavingResourceLibrary] = useState(false);
   const [uploadingResourceId, setUploadingResourceId] = useState<string>();
   const resourceRequestIdRef = useRef(0);
+  const [notificationSettings, setNotificationSettings] = useState<LiteraryCircleNotificationSettings | null>(null);
+  const [notificationSettingsLoading, setNotificationSettingsLoading] = useState(false);
+  const [notificationSettingsAttempted, setNotificationSettingsAttempted] = useState(false);
+  const [notificationSettingsError, setNotificationSettingsError] = useState('');
+  const [notificationProviderConfigured, setNotificationProviderConfigured] = useState(false);
+  const [savingNotificationSettings, setSavingNotificationSettings] = useState(false);
+  const [checkingNotificationEligibility, setCheckingNotificationEligibility] = useState(false);
+  const notificationRequestIdRef = useRef(0);
 
   const updateSettingsForm = (patch: Partial<AffiliateSettings>) => {
     settingsDirtyRef.current = true;
@@ -212,6 +226,68 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       void loadResourceLibrary();
     }
   }, [activeSubTab, resourceLibrary, resourceLibraryAttempted, resourceLibraryLoading]);
+
+  const loadNotificationSettings = async () => {
+    const requestId = ++notificationRequestIdRef.current;
+    setNotificationSettingsAttempted(true);
+    setNotificationSettingsLoading(true);
+    setNotificationSettingsError('');
+    try {
+      const response = await api.getAdminAffiliateNotificationSettings();
+      if (requestId !== notificationRequestIdRef.current) return;
+      setNotificationSettings(response.settings);
+      setNotificationProviderConfigured(response.providerConfigured);
+    } catch (loadError) {
+      if (requestId !== notificationRequestIdRef.current) return;
+      setNotificationSettingsError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Partner notification settings could not be loaded.',
+      );
+    } finally {
+      if (requestId === notificationRequestIdRef.current) setNotificationSettingsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      activeSubTab === 'notifications'
+      && !notificationSettings
+      && !notificationSettingsLoading
+      && !notificationSettingsAttempted
+    ) {
+      void loadNotificationSettings();
+    }
+  }, [activeSubTab, notificationSettings, notificationSettingsAttempted, notificationSettingsLoading]);
+
+  const handleSaveNotificationSettings = async (
+    nextSettings: LiteraryCircleNotificationSettings,
+  ): Promise<LiteraryCircleNotificationSettings> => {
+    setSavingNotificationSettings(true);
+    setNotificationSettingsError('');
+    try {
+      const response = await api.updateAdminAffiliateNotificationSettings(nextSettings);
+      setNotificationSettings(response.settings);
+      setNotificationProviderConfigured(response.providerConfigured);
+      return response.settings;
+    } finally {
+      setSavingNotificationSettings(false);
+    }
+  };
+
+  const handleCheckNotificationEligibility = async (
+    eventType: LiteraryCircleNotificationEventType,
+    nextSettings: LiteraryCircleNotificationSettings,
+  ): Promise<AffiliateNotificationEligibilitySummary> => {
+    setCheckingNotificationEligibility(true);
+    setNotificationSettingsError('');
+    try {
+      const response = await api.getAdminAffiliateNotificationEligibility(eventType, nextSettings);
+      return response.summary;
+    } finally {
+      setCheckingNotificationEligibility(false);
+    }
+  };
 
   const handleSaveResourceLibrary = async (nextLibrary: LiteraryCircleResourceLibrary) => {
     setSavingResourceLibrary(true);
@@ -666,6 +742,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveSubTab('notifications')}
+          className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+            activeSubTab === 'notifications' ? 'bg-violet-950 text-violet-200 border border-violet-700/80 shadow-sm' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <BellRing className="w-3.5 h-3.5" />
+          <span>Partner Notifications</span>
+        </button>
+
+        <button
           onClick={() => setActiveSubTab('commissions')}
           className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
             activeSubTab === 'commissions' ? 'bg-cyan-950 text-cyan-300 border border-cyan-700/80 shadow-sm' : 'text-slate-400 hover:text-slate-200'
@@ -1096,6 +1182,50 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 <button
                   type="button"
                   onClick={() => void loadResourceLibrary()}
+                  className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl border border-amber-300/30 bg-amber-400/10 px-4 py-2 font-mono text-xs font-bold text-amber-100"
+                >
+                  <RefreshCw aria-hidden="true" className="h-4 w-4" /> Retry
+                </button>
+              </div>
+            )
+          )}
+
+          {/* PREVIEW-ONLY LITERARY CIRCLE PARTNER NOTIFICATIONS */}
+          {activeSubTab === 'notifications' && (
+            notificationSettingsLoading ? (
+              <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-violet-300/20 bg-violet-950/10 text-sm text-violet-200">
+                <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                Loading partner notification settings…
+              </div>
+            ) : notificationSettings ? (
+              <div className="space-y-3">
+                {notificationSettingsError && (
+                  <div role="alert" className="rounded-xl border border-amber-400/30 bg-amber-950/20 p-3 text-sm text-amber-100">
+                    {notificationSettingsError}
+                  </div>
+                )}
+                <React.Suspense fallback={(
+                  <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-violet-300/20 bg-violet-950/10 text-sm text-violet-200">
+                    <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                    Opening the partner notification editor…
+                  </div>
+                )}>
+                  <AffiliateNotificationsAdmin
+                    settings={notificationSettings}
+                    providerConfigured={notificationProviderConfigured}
+                    saving={savingNotificationSettings}
+                    checking={checkingNotificationEligibility}
+                    onSave={handleSaveNotificationSettings}
+                    onCheckEligibility={handleCheckNotificationEligibility}
+                  />
+                </React.Suspense>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-amber-700/60 bg-amber-950/20 p-6 text-sm text-amber-200">
+                <p>{notificationSettingsError || 'Partner notification settings could not be loaded.'}</p>
+                <button
+                  type="button"
+                  onClick={() => void loadNotificationSettings()}
                   className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl border border-amber-300/30 bg-amber-400/10 px-4 py-2 font-mono text-xs font-bold text-amber-100"
                 >
                   <RefreshCw aria-hidden="true" className="h-4 w-4" /> Retry

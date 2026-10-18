@@ -41,6 +41,9 @@ import {
   SubscriptionPlan,
   AffiliateLiteraryCircleMembership,
   LiteraryCircleDashboardSummary,
+  AffiliateNotificationEligibilitySummary,
+  LiteraryCircleNotificationEventType,
+  LiteraryCircleNotificationSettings,
   LiteraryCircleOnboardingStatus,
   LiteraryCircleResourceLibrary,
   LiteraryCircleSettings,
@@ -2701,6 +2704,68 @@ export const api = {
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load Literary Circle promotional resources.'
+    );
+  },
+
+  async getAdminAffiliateNotificationSettings(): Promise<{
+    success: boolean;
+    settings: LiteraryCircleNotificationSettings;
+    providerConfigured: boolean;
+    deliveryAvailable: false;
+  }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/notifications',
+      {
+        cache: 'no-store',
+        headers: { 'x-admin-token': activeToken || '' }
+      },
+      'Failed to load partner notification settings.'
+    );
+  },
+
+  async updateAdminAffiliateNotificationSettings(
+    settings: LiteraryCircleNotificationSettings
+  ): Promise<{
+    success: boolean;
+    settings: LiteraryCircleNotificationSettings;
+    providerConfigured: boolean;
+    deliveryAvailable: false;
+    message: string;
+  }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/notifications',
+      {
+        method: 'PUT',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify({ settings, expectedRevision: settings.revision })
+      },
+      'Failed to save partner notification settings.'
+    );
+  },
+
+  async getAdminAffiliateNotificationEligibility(
+    eventType: LiteraryCircleNotificationEventType,
+    settings?: LiteraryCircleNotificationSettings
+  ): Promise<{ success: boolean; summary: AffiliateNotificationEligibilitySummary }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/notifications/eligibility',
+      {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify({ eventType, ...(settings ? { settings } : {}) })
+      },
+      'Failed to check partner notification eligibility.'
     );
   },
 

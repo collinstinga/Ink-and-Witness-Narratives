@@ -11,6 +11,7 @@ import { GoogleGenAI } from "@google/genai";
 import { HomepageSaveConflictError, store } from "./src/server/store.js";
 import {
   AnalyticsTimePeriod,
+  AffiliatePublicProfile,
   Article,
   ContentBundle,
   ContentCollection,
@@ -21,10 +22,12 @@ import {
   NewsletterCampaignStatus,
   NewsletterSubscriber,
   PaymentTransaction,
+  LiteraryCircleNotificationEventType,
   SubscriptionPlan,
   User,
   UserRecord
 } from "./src/types.js";
+import { getAllFirestoreDocs } from "./src/server/db.js";
 import {
   HOMEPAGE_SECTION_IDS,
   isHomepageSectionId,
@@ -67,6 +70,15 @@ import {
   removeLiteraryCircleResourceImage,
   saveLiteraryCircleResourceLibrary
 } from "./src/server/literaryCircleResources.js";
+import {
+  AffiliateNotificationConflictError,
+  AffiliateNotificationValidationError,
+  AFFILIATE_NOTIFICATION_EVENT_TYPES,
+  getAffiliateNotificationSettingsFresh,
+  saveAffiliateNotificationSettings,
+  summarizeAffiliateNotificationEligibility,
+  validateAffiliateNotificationSettings
+} from "./src/server/affiliateNotifications.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
   AFFILIATE_CLICK_DEDUP_COOKIE_NAME,
@@ -6674,6 +6686,104 @@ ${currentDraft || prompt}
 
   app.post("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
   app.put("/api/admin/affiliates/settings", requireAdminAuth, handleAdminSettings);
+
+  // Admin: preview-only partner notification configuration. This is kept in
+  // a separate revisioned document from reader newsletter campaigns and from
+  // financially effective affiliate settings. These routes cannot send or
+  // enqueue email; delivery is intentionally gated until consent, explicit
+  // approvals and a deterministic outbox have been migrated.
+  app.get("/api/admin/affiliates/notifications", requireAdminAuth, async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const settings = await getAffiliateNotificationSettingsFresh();
+      return res.json({
+        success: true,
+        settings,
+        providerConfigured: isNewsletterProviderConfigured(),
+        deliveryAvailable: false
+      });
+    } catch (err) {
+      console.error('[Affiliate Notifications] Failed to load preview settings.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Partner notification settings could not be loaded right now. Please retry.'
+      });
+    }
+  });
+
+  app.put("/api/admin/affiliates/notifications", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const allowedKeys = new Set(['settings', 'expectedRevision']);
+      if (Object.keys(req.body || {}).some(key => !allowedKeys.has(key))) {
+        return res.status(400).json({ success: false, error: 'Partner notification request contains unsupported fields.' });
+      }
+      const result = await saveAffiliateNotificationSettings(
+        req.body?.settings,
+        `Admin (${(req as any).user?.name || 'Writer'})`,
+        req.body?.expectedRevision
+      );
+      store.affiliates.rememberCommittedAudit(result.audit);
+      return res.json({
+        success: true,
+        settings: result.settings,
+        providerConfigured: isNewsletterProviderConfigured(),
+        deliveryAvailable: false,
+        message: 'Partner notification templates saved in preview-only mode.'
+      });
+    } catch (err: any) {
+      if (err instanceof AffiliateNotificationConflictError) {
+        return res.status(409).json({ success: false, code: 'AFFILIATE_NOTIFICATION_SETTINGS_CONFLICT', error: err.message });
+      }
+      if (err instanceof AffiliateNotificationValidationError) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      console.error('[Affiliate Notifications] Failed to save preview settings.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Partner notification settings could not be saved right now. Please retry.'
+      });
+    }
+  });
+
+  app.post("/api/admin/affiliates/notifications/eligibility", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const allowedKeys = new Set(['eventType', 'settings']);
+      if (Object.keys(req.body || {}).some(key => !allowedKeys.has(key))) {
+        return res.status(400).json({ success: false, error: 'Eligibility request contains unsupported fields.' });
+      }
+      const eventType = req.body?.eventType as LiteraryCircleNotificationEventType;
+      if (!AFFILIATE_NOTIFICATION_EVENT_TYPES.includes(eventType)) {
+        return res.status(400).json({ success: false, error: 'A supported partner notification event is required.' });
+      }
+      const settings = req.body?.settings
+        ? validateAffiliateNotificationSettings(req.body.settings)
+        : await getAffiliateNotificationSettingsFresh();
+      const template = settings.templates.find(candidate => candidate.eventType === eventType);
+      if (!template) {
+        return res.status(400).json({ success: false, error: 'The selected partner notification template is unavailable.' });
+      }
+      const affiliates = await getAllFirestoreDocs<AffiliatePublicProfile>('affiliates');
+      const summary = summarizeAffiliateNotificationEligibility(affiliates, template);
+      return res.json({ success: true, summary });
+    } catch (err: any) {
+      if (err instanceof AffiliateNotificationValidationError) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      console.error('[Affiliate Notifications] Failed to calculate eligibility.', err);
+      return res.status(503).json({
+        success: false,
+        error: 'Partner notification eligibility could not be checked right now. Please retry.'
+      });
+    }
+  });
 
   // Admin: a bounded, independently revisioned promotional-resource library.
   // Keeping it outside the commission-policy document prevents image/editor

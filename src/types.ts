@@ -1211,6 +1211,16 @@ export type LiteraryCircleComplimentaryAccessStatus = 'active' | 'suspended' | '
 export type LiteraryCircleTierSource = 'default' | 'monthly_performance' | 'manual';
 export type LiteraryCircleOnboardingStatus = 'not_started' | 'in_progress' | 'completed' | 'dismissed';
 export type LiteraryCircleCommissionPolicyStatus = 'draft' | 'active';
+export type LiteraryCircleNotificationEventType =
+  | 'activation'
+  | 'new_release'
+  | 'upcoming_campaign'
+  | 'new_commission'
+  | 'tier_upgrade'
+  | 'inactivity_reminder'
+  | 'exclusive_opportunity';
+export type LiteraryCircleNotificationDeliveryMode = 'preview_only';
+export type AffiliateMarketingConsentStatus = 'unknown' | 'granted' | 'denied';
 export type LiteraryCircleCommunityPostType =
   | 'announcement'
   | 'release_preview'
@@ -1261,6 +1271,73 @@ export interface LiteraryCircleResourceLibrary {
   items: LiteraryCirclePromotionalResource[];
   updatedAt?: string;
   updatedBy?: string;
+}
+
+export interface LiteraryCircleNotificationEligibility {
+  foundingMembersOnly: boolean;
+  tierIds: string[];
+  requireComplimentaryAccess: boolean;
+}
+
+export interface LiteraryCircleNotificationTiming {
+  /** Delay after the source event. */
+  delayMinutes: number;
+  /** Campaign-only lead time before the configured start. */
+  leadTimeHours?: number;
+  /** Inactivity-only number of quiet days before eligibility. */
+  inactivityDays?: number;
+  /** Minimum days before another inactivity reminder can become eligible. */
+  cooldownDays?: number;
+}
+
+export interface LiteraryCircleNotificationTemplate {
+  eventType: LiteraryCircleNotificationEventType;
+  enabled: boolean;
+  subject: string;
+  preheader: string;
+  heading: string;
+  body: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+  timing: LiteraryCircleNotificationTiming;
+  eligibility: LiteraryCircleNotificationEligibility;
+}
+
+export interface LiteraryCircleNotificationSettings {
+  schemaVersion: 1;
+  /** Monotonic server-managed revision used to reject stale saves. */
+  revision: number;
+  enabled: boolean;
+  /** Intentionally restricted until consent, approval and outbox migration are complete. */
+  deliveryMode: LiteraryCircleNotificationDeliveryMode;
+  timezone: 'Africa/Nairobi';
+  templates: LiteraryCircleNotificationTemplate[];
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface AffiliateNotificationEligibilitySummary {
+  eventType: LiteraryCircleNotificationEventType;
+  total: number;
+  eligible: number;
+  excluded: number;
+  reasons: Record<string, number>;
+}
+
+export interface AffiliateNotificationPreferences {
+  schemaVersion: 1;
+  marketingConsent: AffiliateMarketingConsentStatus;
+  marketingConsentVersion?: string;
+  marketingConsentAt?: string;
+  marketingConsentSource?: 'affiliate_dashboard' | 'affiliate_onboarding' | 'writer_recorded';
+  releaseUpdates: boolean;
+  campaignUpdates: boolean;
+  inactivityReminders: boolean;
+  exclusiveOpportunities: boolean;
+  commissionAlerts: boolean;
+  tierAlerts: boolean;
+  allMarketingOptOut: boolean;
+  updatedAt?: string;
 }
 
 export interface LiteraryCircleCommunityPost {
@@ -1370,6 +1447,9 @@ export interface AffiliateAccount {
   phone: string;
   passwordHash?: string;
   status: AffiliateStatus;
+  /** Explicit writer approval; status alone is not proof of approval. */
+  approvedAt?: string;
+  approvedBy?: string;
   customCommissionRate?: number | null; // null => inherits global default %
   commissionRate?: number; // active calculated commission %
   payoutMethod: AffiliatePayoutMethod;
@@ -1397,6 +1477,7 @@ export interface AffiliateAccount {
   lastVerifiedSaleAt?: string;
   lastDashboardAt?: string;
   literaryCircle?: AffiliateLiteraryCircleMembership;
+  notificationPreferences?: AffiliateNotificationPreferences;
   /** Private revocation generation. Never include this in browser responses. */
   sessionVersion?: string;
 }
@@ -1519,7 +1600,7 @@ export interface AffiliateAuditLogEntry {
   timestamp: string;
   actor: string;
   action: string;
-  targetType: 'affiliate' | 'commission' | 'payout' | 'settings' | 'campaign' | 'link' | 'resource';
+  targetType: 'affiliate' | 'commission' | 'payout' | 'settings' | 'campaign' | 'link' | 'resource' | 'notification';
   targetId?: string;
   summary: string;
   previousValue?: any;

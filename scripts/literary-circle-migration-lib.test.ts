@@ -205,6 +205,11 @@ describe('Literary Circle migration safety helpers', () => {
           { id: 'draft-resource', assetId: 'asset-private', isPublished: false }
         ]
       }],
+      ['site_configs/affiliate_notifications', {
+        schemaVersion: 1,
+        revision: 2,
+        deliveryMode: 'preview_only'
+      }],
       ['uploaded_assets/asset-public', { accessScope: 'public', dataUrl: 'data:image/png;base64,cHVibGlj' }],
       ['uploaded_assets/asset-private', {
         accessScope: 'literary_circle_private',
@@ -215,6 +220,8 @@ describe('Literary Circle migration safety helpers', () => {
 
     expect(payloads.get('affiliate_site_configs')?.documents.map(document => document.id))
       .toContain('literary_circle_resources');
+    expect(payloads.get('affiliate_site_configs')?.documents.map(document => document.id))
+      .toContain('affiliate_notifications');
     expect(payloads.get('literary_circle_resource_assets')?.documents.map(document => document.id))
       .toEqual(['asset-private', 'asset-public']);
   });
@@ -239,7 +246,7 @@ describe('Literary Circle migration safety helpers', () => {
       target,
       expectedAffiliates: FOUNDING_AFFILIATE_COUNT
     });
-    expect(verified.manifest.schemaVersion).toBe(2);
+    expect(verified.manifest.schemaVersion).toBe(3);
     expect(verified.manifest.contentSha256).toBe(written.manifest.contentSha256);
     expect(verified.payloads.get('literary_circle_resource_assets')?.documents.map(document => document.id))
       .toEqual(['asset-private', 'asset-public']);

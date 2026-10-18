@@ -56,9 +56,11 @@ The snapshot contains every document from `affiliates`,
 `affiliate_campaigns`, `affiliate_audit`, `affiliate_codes`,
 `affiliate_emails`, `affiliate_commission_outbox`, and
 `affiliate_attribution_claims`; only affiliate-attributed documents from
-`transactions`; and the `affiliate_settings` and
-`affiliate_literary_circle` documents from `site_configs`. It also includes the
-`site_configs/literary_circle_resources` document when present and exactly every
+`transactions`; and the `affiliate_settings`, `affiliate_literary_circle`,
+`affiliate_notifications`, and `literary_circle_resources` documents from
+`site_configs` when present. Backup schema version 3 includes the preview-only
+affiliate-notification configuration without treating it as subscriber consent
+or a delivery ledger. It also includes exactly every
 `uploaded_assets` document referenced by an `items[].assetId` in that resource
 library, including draft, expired, and private resource artwork. The backup
 aborts if any referenced asset document is missing.
