@@ -94,6 +94,50 @@ describe('LiteraryCircleAdminPanel', () => {
     expect(markup).toContain('Stable ID: campaign-draft');
   });
 
+  it('shows a privacy-bounded monthly performance ledger with recorded snapshots', () => {
+    const markup = renderToStaticMarkup(
+      <LiteraryCircleAdminPanel
+        settings={DEFAULT_LITERARY_CIRCLE_SETTINGS}
+        affiliates={[affiliate]}
+        performanceReports={[{
+          affiliateId: affiliate.id,
+          affiliateCode: affiliate.affiliateCode,
+          affiliateName: affiliate.name,
+          periods: [{
+            periodKey: '2026-10',
+            startsAt: '2026-09-30T21:00:00.000Z',
+            endsAt: '2026-10-31T20:59:59.999Z',
+            isCurrent: true,
+            verifiedSales: 2,
+            qualifyingSales: 2,
+            grossSalesKes: 500,
+            commissionEarnedKes: 75,
+            retainedRevenueKes: 425,
+            pieceSales: 2,
+            bundleSales: 0,
+            subscriptionSales: 0,
+            reversedOrRejectedSales: 0,
+            qualifiedTier: DEFAULT_LITERARY_CIRCLE_SETTINGS.tiers[0],
+            qualificationMode: 'projected',
+            policyVersion: 1,
+            recordedTierIds: ['literary-partner'],
+            recordedPolicyVersions: [1],
+          }],
+        }]}
+        savingSettings={false}
+        onSaveSettings={vi.fn(async settings => settings)}
+        onUpdateMembership={vi.fn(async () => undefined)}
+      />,
+    );
+
+    expect(markup).toContain('Monthly performance ledger');
+    expect(markup).toContain('KES 500');
+    expect(markup).toContain('KES 75');
+    expect(markup).toContain('Tier: literary-partner');
+    expect(markup).toContain('Policy: v1');
+    expect(markup).not.toContain(affiliate.email);
+  });
+
   it('distinguishes financial policy changes from ordinary programme copy edits', () => {
     expect(isFinancialLiteraryCirclePolicyChange(
       DEFAULT_LITERARY_CIRCLE_SETTINGS,

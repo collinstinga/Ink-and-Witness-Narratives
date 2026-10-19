@@ -435,6 +435,16 @@ describe('affiliate store Literary Circle integration', () => {
     expect(summary.affiliatesWithLifetimeSales).toBe(2);
     expect(summary.affiliatesWithoutSales).toBe(0);
     expect(summary.literaryCircleSettings?.defaultTierId).toBe('literary-partner');
+    expect(summary.literaryCirclePerformance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        affiliateId: first.id,
+        periods: expect.arrayContaining([expect.objectContaining({ verifiedSales: 1, grossSalesKes: 500 })]),
+      }),
+      expect.objectContaining({
+        affiliateId: second.id,
+        periods: expect.arrayContaining([expect.objectContaining({ verifiedSales: 1, grossSalesKes: 500 })]),
+      }),
+    ]));
   });
 
   it('atomically updates access, manual tier and additive founding recognition', async () => {

@@ -97,6 +97,52 @@ describe('LiteraryCircleMembershipOverview', () => {
     expect(markup).not.toContain('chat.whatsapp.com/hidden');
   });
 
+  it('renders bounded historical performance without changing recorded earnings', () => {
+    const markup = renderToStaticMarkup(
+      <LiteraryCircleMembershipOverview
+        summary={summary({
+          performancePeriods: [{
+            periodKey: '2026-10',
+            startsAt: '2026-09-30T21:00:00.000Z',
+            endsAt: '2026-10-31T20:59:59.999Z',
+            isCurrent: true,
+            verifiedSales: 4,
+            qualifyingSales: 3,
+            grossSalesKes: 1400,
+            commissionEarnedKes: 280,
+            retainedRevenueKes: 1120,
+            pieceSales: 3,
+            bundleSales: 1,
+            subscriptionSales: 0,
+            reversedOrRejectedSales: 1,
+            qualifiedTier: {
+              id: 'literary-partner',
+              name: 'Literary Partner',
+              description: 'Default tier',
+              rank: 1,
+              monthlyVerifiedSalesThreshold: 0,
+              proposedCommissionRate: 15,
+              enabled: true,
+            },
+            qualificationMode: 'projected',
+            policyVersion: 2,
+            recordedTierIds: ['literary-partner'],
+            recordedPolicyVersions: [1],
+          }],
+        })}
+        affiliateName="Amina"
+        activeCommissionRate={15}
+      />,
+    );
+
+    expect(markup).toContain('Six-month performance record');
+    expect(markup).toContain('4');
+    expect(markup).toContain('3 qualifying');
+    expect(markup).toContain('KES 1,400');
+    expect(markup).toContain('KES 280');
+    expect(markup).toContain('projected');
+  });
+
   it('allows only secure external community invitation links', () => {
     expect(getSafeCommunityInviteUrl('javascript:alert(1)')).toBeNull();
     expect(getSafeCommunityInviteUrl('http://chat.whatsapp.com/insecure')).toBeNull();

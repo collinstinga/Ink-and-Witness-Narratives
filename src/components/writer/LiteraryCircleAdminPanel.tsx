@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  BarChart3,
   BookOpen,
   Crown,
   Plus,
@@ -12,6 +13,7 @@ import {
 
 import type {
   AffiliatePublicProfile,
+  LiteraryCircleAffiliatePerformanceReport,
   LiteraryCircleCommunityPost,
   LiteraryCircleComplimentaryAccessStatus,
   LiteraryCircleSettings,
@@ -28,6 +30,7 @@ export interface LiteraryCircleMembershipAdminPatch {
 interface LiteraryCircleAdminPanelProps {
   settings: LiteraryCircleSettings;
   affiliates: AffiliatePublicProfile[];
+  performanceReports?: LiteraryCircleAffiliatePerformanceReport[];
   savingSettings: boolean;
   savingAffiliateId?: string;
   onSaveSettings: (
@@ -42,6 +45,13 @@ interface LiteraryCircleAdminPanelProps {
 
 function cloneSettings(settings: LiteraryCircleSettings): LiteraryCircleSettings {
   return JSON.parse(JSON.stringify(settings)) as LiteraryCircleSettings;
+}
+
+function performancePeriodLabel(periodKey: string): string {
+  const parsed = new Date(`${periodKey}-01T00:00:00+03:00`);
+  return Number.isFinite(parsed.getTime())
+    ? parsed.toLocaleDateString('en-KE', { month: 'long', year: 'numeric', timeZone: 'Africa/Nairobi' })
+    : periodKey;
 }
 
 export function isoToLocalDateTime(value?: string): string {
@@ -111,6 +121,13 @@ export function isFinancialLiteraryCirclePolicyChange(
 }
 
 const fieldClass = 'min-h-11 w-full rounded-xl border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20';
+
+const PerformanceMetric: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <article className="rounded-xl border border-cyan-300/15 bg-slate-950/45 p-3">
+    <p className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">{label}</p>
+    <p className="mt-1 font-serif text-lg font-bold text-cyan-100">{value}</p>
+  </article>
+);
 
 const MembershipRow: React.FC<{
   affiliate: AffiliatePublicProfile;
@@ -249,6 +266,7 @@ const MembershipRow: React.FC<{
 export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> = ({
   settings,
   affiliates,
+  performanceReports = [],
   savingSettings,
   savingAffiliateId,
   onSaveSettings,
@@ -258,6 +276,13 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const availablePerformancePeriods = useMemo(
+    () => [...new Set(performanceReports.flatMap(report => report.periods.map(period => period.periodKey)))].sort().reverse(),
+    [performanceReports],
+  );
+  const [selectedPerformancePeriod, setSelectedPerformancePeriod] = useState(
+    () => availablePerformancePeriods[0] || '',
+  );
 
   useEffect(() => {
     if (!dirty) setDraft(cloneSettings(settings));
@@ -267,6 +292,30 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
     () => [...affiliates].sort((left, right) => left.name.localeCompare(right.name)),
     [affiliates],
   );
+  const selectedPerformanceRows = useMemo(() => performanceReports.flatMap(report => {
+    const period = report.periods.find(candidate => candidate.periodKey === selectedPerformancePeriod);
+    return period ? [{ report, period }] : [];
+  }).sort((left, right) => (
+    right.period.verifiedSales - left.period.verifiedSales
+    || right.period.grossSalesKes - left.period.grossSalesKes
+    || left.report.affiliateName.localeCompare(right.report.affiliateName)
+  )), [performanceReports, selectedPerformancePeriod]);
+  const selectedPerformanceTotals = useMemo(() => selectedPerformanceRows.reduce((totals, row) => ({
+    verifiedSales: totals.verifiedSales + row.period.verifiedSales,
+    grossSalesKes: totals.grossSalesKes + row.period.grossSalesKes,
+    commissionEarnedKes: totals.commissionEarnedKes + row.period.commissionEarnedKes,
+    retainedRevenueKes: totals.retainedRevenueKes + row.period.retainedRevenueKes,
+  }), { verifiedSales: 0, grossSalesKes: 0, commissionEarnedKes: 0, retainedRevenueKes: 0 }), [selectedPerformanceRows]);
+
+  useEffect(() => {
+    if (!availablePerformancePeriods.length) {
+      if (selectedPerformancePeriod) setSelectedPerformancePeriod('');
+      return;
+    }
+    if (!availablePerformancePeriods.includes(selectedPerformancePeriod)) {
+      setSelectedPerformancePeriod(availablePerformancePeriods[0]);
+    }
+  }, [availablePerformancePeriods, selectedPerformancePeriod]);
 
   const updateDraft = (next: LiteraryCircleSettings) => {
     setDraft(next);
@@ -637,6 +686,83 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
           <Save aria-hidden="true" className="h-4 w-4" /> {savingSettings ? 'Saving…' : dirty ? 'Save Literary Circle settings' : 'Settings saved'}
         </button>
       </div>
+
+      {availablePerformancePeriods.length ? (
+        <section className="rounded-2xl border border-cyan-300/20 bg-cyan-950/10 p-4 sm:p-6" aria-labelledby="literary-circle-performance-heading">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="flex items-start gap-3">
+              <BarChart3 aria-hidden="true" className="mt-1 h-5 w-5 shrink-0 text-cyan-300" />
+              <div>
+                <h3 id="literary-circle-performance-heading" className="font-serif text-xl font-bold text-white">Monthly performance ledger</h3>
+                <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-400">
+                  Read-only verified-sale reporting in Africa/Nairobi calendar months. Reversed and rejected commissions never inflate totals; recorded transaction tiers and policy versions remain unchanged.
+                </p>
+              </div>
+            </div>
+            <label className="text-xs font-semibold text-slate-300">
+              Reporting month
+              <select
+                className={`${fieldClass} mt-1.5 min-w-56`}
+                value={selectedPerformancePeriod}
+                onChange={event => setSelectedPerformancePeriod(event.target.value)}
+              >
+                {availablePerformancePeriods.map(periodKey => (
+                  <option key={periodKey} value={periodKey}>{performancePeriodLabel(periodKey)}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <PerformanceMetric label="Verified sales" value={selectedPerformanceTotals.verifiedSales.toLocaleString()} />
+            <PerformanceMetric label="Gross affiliate sales" value={`KES ${selectedPerformanceTotals.grossSalesKes.toLocaleString()}`} />
+            <PerformanceMetric label="Commissions recorded" value={`KES ${selectedPerformanceTotals.commissionEarnedKes.toLocaleString()}`} />
+            <PerformanceMetric label="Retained before other costs" value={`KES ${selectedPerformanceTotals.retainedRevenueKes.toLocaleString()}`} />
+          </div>
+
+          <div className="mt-4 overflow-x-auto rounded-xl border border-slate-700/80">
+            <table className="min-w-[920px] w-full text-left text-xs">
+              <thead className="bg-slate-950/80 font-mono text-[10px] uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th className="px-3 py-2.5">Partner</th>
+                  <th className="px-3 py-2.5 text-right">Verified</th>
+                  <th className="px-3 py-2.5 text-right">Gross</th>
+                  <th className="px-3 py-2.5 text-right">Commission</th>
+                  <th className="px-3 py-2.5">Performance tier</th>
+                  <th className="px-3 py-2.5">Recorded snapshots</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 bg-slate-950/35">
+                {selectedPerformanceRows.map(({ report, period }) => (
+                  <tr key={report.affiliateId}>
+                    <td className="px-3 py-3">
+                      <span className="font-semibold text-slate-100">{report.affiliateName}</span>
+                      <span className="ml-2 font-mono text-[10px] text-cyan-300">{report.affiliateCode}</span>
+                      {report.manuallyAssignedTierId && <span className="block text-[9px] text-amber-300">Manual assignment: {report.manuallyAssignedTierId}</span>}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono text-cyan-200">
+                      {period.verifiedSales}
+                      {period.qualifyingSales !== period.verifiedSales && <span className="block text-[9px] text-slate-500">{period.qualifyingSales} qualifying</span>}
+                      <span className="block text-[9px] text-slate-500">{period.pieceSales} pieces · {period.bundleSales} bundles · {period.subscriptionSales} passes</span>
+                      {period.reversedOrRejectedSales > 0 && <span className="block text-[9px] text-rose-300">{period.reversedOrRejectedSales} excluded</span>}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono text-slate-300">KES {period.grossSalesKes.toLocaleString()}</td>
+                    <td className="px-3 py-3 text-right font-mono font-bold text-emerald-300">KES {period.commissionEarnedKes.toLocaleString()}</td>
+                    <td className="px-3 py-3">
+                      <span className="font-semibold text-amber-100">{period.qualifiedTier.name}</span>
+                      <span className="ml-1 text-[9px] uppercase text-slate-500">{period.qualificationMode}</span>
+                    </td>
+                    <td className="px-3 py-3 font-mono text-[10px] text-slate-400">
+                      {period.recordedTierIds.length ? `Tier: ${period.recordedTierIds.join(', ')}` : 'No tier-rate sale'}
+                      <span className="block">{period.recordedPolicyVersions.length ? `Policy: v${period.recordedPolicyVersions.join(', v')}` : `Report rules: v${period.policyVersion}`}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       <section className="rounded-2xl border border-slate-700 bg-slate-900/60 p-4 sm:p-6">
         <div className="flex items-start gap-3">

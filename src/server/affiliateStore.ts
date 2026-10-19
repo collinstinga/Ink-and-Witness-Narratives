@@ -47,6 +47,7 @@ import {
 } from './affiliateSessionSecurity.js';
 import {
   buildLiteraryCircleDashboardSummary,
+  buildLiteraryCirclePerformancePeriods,
   countVerifiedSalesForPeriod,
   createLiteraryCircleCommissionPolicySnapshot,
   createLiteraryCircleMembership,
@@ -2539,6 +2540,21 @@ export const affiliateStore = {
       })
       .sort((a, b) => b.revenueKes - a.revenueKes)
       .slice(0, 10);
+    const performanceNow = new Date().toISOString();
+    const literaryCirclePerformance = affiliates.map(affiliate => ({
+      affiliateId: affiliate.id,
+      affiliateCode: affiliate.affiliateCode,
+      affiliateName: affiliate.name,
+      ...(affiliate.literaryCircle?.tier.source === 'manual'
+        ? { manuallyAssignedTierId: affiliate.literaryCircle.tier.id }
+        : {}),
+      periods: buildLiteraryCirclePerformancePeriods({
+        commissions: cachedCommissions.filter(commission => commission.affiliateId === affiliate.id),
+        settings: cachedLiteraryCircleSettings,
+        now: performanceNow,
+        periodCount: 6,
+      }),
+    }));
 
     return {
       totalAffiliates,
@@ -2563,6 +2579,7 @@ export const affiliateStore = {
       affiliatesWithLifetimeSales,
       affiliatesWithoutSales,
       literaryCircleSettings: normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings),
+      literaryCirclePerformance,
       topAffiliates
     };
   },

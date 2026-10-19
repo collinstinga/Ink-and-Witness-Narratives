@@ -8,6 +8,7 @@ import type {
   LiteraryCircleCommunityPostType,
   LiteraryCircleCommissionPolicySnapshot,
   LiteraryCircleDashboardSummary,
+  LiteraryCirclePerformancePeriod,
   LiteraryCircleSettings,
   LiteraryCircleTierDefinition
 } from '../types.js';
@@ -660,6 +661,116 @@ export function resolveLiteraryCircleTier(
     || DEFAULT_LITERARY_CIRCLE_SETTINGS.tiers[0];
 }
 
+function recentLiteraryCirclePeriodKeys(now: string, count: number): string[] {
+  const current = literaryCirclePeriodKey(now);
+  const match = /^(\d{4})-(\d{2})$/.exec(current);
+  if (!match) return [];
+  const keys: string[] = [];
+  let year = Number(match[1]);
+  let month = Number(match[2]);
+  for (let index = 0; index < count; index += 1) {
+    keys.push(`${year}-${String(month).padStart(2, '0')}`);
+    month -= 1;
+    if (month < 1) {
+      month = 12;
+      year -= 1;
+    }
+  }
+  return keys;
+}
+
+function literaryCirclePeriodBounds(periodKey: string): { startsAt: string; endsAt: string } | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(periodKey);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isSafeInteger(year) || year < 2000 || year > 2200 || month < 1 || month > 12) return null;
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const startsAt = new Date(`${year}-${String(month).padStart(2, '0')}-01T00:00:00+03:00`).toISOString();
+  const nextStartsAtMs = Date.parse(`${nextYear}-${String(nextMonth).padStart(2, '0')}-01T00:00:00+03:00`);
+  if (!Number.isFinite(Date.parse(startsAt)) || !Number.isFinite(nextStartsAtMs)) return null;
+  return { startsAt, endsAt: new Date(nextStartsAtMs - 1).toISOString() };
+}
+
+function safeAmount(value: unknown): number {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+export function buildLiteraryCirclePerformancePeriods(options: {
+  commissions: AffiliateSaleCommission[];
+  settings: LiteraryCircleSettings;
+  now?: string;
+  periodCount?: number;
+}): LiteraryCirclePerformancePeriod[] {
+  const now = safeOptionalIso(options.now) || new Date().toISOString();
+  const periodCount = Math.min(24, Math.max(1, Math.trunc(Number(options.periodCount) || 6)));
+  const currentPeriodKey = literaryCirclePeriodKey(now);
+  const commissions = Array.isArray(options.commissions) ? options.commissions : [];
+  const periodKeys = recentLiteraryCirclePeriodKeys(now, periodCount);
+  const requestedPeriods = new Set(periodKeys);
+  const commissionsByPeriod = new Map<string, AffiliateSaleCommission[]>();
+  for (const commission of commissions) {
+    if (!Number.isFinite(Date.parse(commission.createdAt))) continue;
+    const periodKey = literaryCirclePeriodKey(commission.createdAt);
+    if (!requestedPeriods.has(periodKey)) continue;
+    const existing = commissionsByPeriod.get(periodKey);
+    if (existing) existing.push(commission);
+    else commissionsByPeriod.set(periodKey, [commission]);
+  }
+
+  return periodKeys.flatMap(periodKey => {
+    const bounds = literaryCirclePeriodBounds(periodKey);
+    if (!bounds) return [];
+    const isCurrent = periodKey === currentPeriodKey;
+    const referenceAt = isCurrent ? now : bounds.endsAt;
+    const periodSettings = resolveLiteraryCircleSettingsForTransaction(options.settings, referenceAt);
+    const periodCommissions = commissionsByPeriod.get(periodKey) || [];
+    const verified = periodCommissions.filter(isVerifiedAffiliateCommission);
+    const qualifyingSales = countVerifiedSalesForPeriod(
+      verified,
+      periodKey,
+      periodSettings.qualificationEffectiveFrom,
+    );
+    const recordedTierIds = [...new Set(verified
+      .map(commission => commission.literaryCircleTierId)
+      .filter((value): value is string => typeof value === 'string' && Boolean(value)))]
+      .sort((left, right) => left.localeCompare(right));
+    const recordedPolicyVersions = [...new Set(verified
+      .map(commission => commission.literaryCirclePolicyVersion)
+      .filter((value): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0))]
+      .sort((left, right) => left - right);
+    const policyEffectiveAt = Date.parse(periodSettings.commissionPolicy.effectiveAt || '');
+    const qualificationMode = periodSettings.commissionPolicy.status === 'active'
+      && Number.isFinite(policyEffectiveAt)
+      && policyEffectiveAt <= Date.parse(referenceAt)
+      ? 'active' as const
+      : 'projected' as const;
+
+    return [{
+      periodKey,
+      startsAt: bounds.startsAt,
+      endsAt: bounds.endsAt,
+      isCurrent,
+      verifiedSales: verified.length,
+      qualifyingSales,
+      grossSalesKes: verified.reduce((total, commission) => total + safeAmount(commission.saleAmountKes), 0),
+      commissionEarnedKes: verified.reduce((total, commission) => total + safeAmount(commission.commissionAmountKes), 0),
+      retainedRevenueKes: verified.reduce((total, commission) => total + safeAmount(commission.grossCreatorRevenueKes), 0),
+      pieceSales: verified.filter(commission => !commission.purchaseKind || commission.purchaseKind === 'piece').length,
+      bundleSales: verified.filter(commission => commission.purchaseKind === 'bundle').length,
+      subscriptionSales: verified.filter(commission => commission.purchaseKind === 'subscription').length,
+      reversedOrRejectedSales: periodCommissions.filter(commission => commission.status === 'REVERSED' || commission.status === 'REJECTED').length,
+      qualifiedTier: resolveLiteraryCircleTier(periodSettings, qualifyingSales),
+      qualificationMode,
+      policyVersion: periodSettings.commissionPolicy.version,
+      recordedTierIds,
+      recordedPolicyVersions,
+    }];
+  });
+}
+
 export function shouldApplyLiteraryCircleCommissionPolicy(
   settingsValue: LiteraryCircleSettings,
   transactionAt: string
@@ -749,11 +860,14 @@ export function buildLiteraryCircleDashboardSummary(options: {
   const now = safeOptionalIso(options.now) || new Date().toISOString();
   const periodKey = literaryCirclePeriodKey(now);
   const verified = options.commissions.filter(isVerifiedAffiliateCommission);
-  const monthlyVerifiedSales = countVerifiedSalesForPeriod(
-    verified,
-    periodKey,
-    settings.qualificationEffectiveFrom
-  );
+  const performancePeriods = buildLiteraryCirclePerformancePeriods({
+    commissions: options.commissions,
+    settings,
+    now,
+    periodCount: 6,
+  });
+  const monthlyVerifiedSales = performancePeriods.find(period => period.periodKey === periodKey)?.qualifyingSales
+    ?? countVerifiedSalesForPeriod(verified, periodKey, settings.qualificationEffectiveFrom);
   const calculatedTier = resolveLiteraryCircleTier(settings, monthlyVerifiedSales);
   const manuallyAssignedTier = options.affiliate.literaryCircle?.tier.source === 'manual'
     ? settings.tiers.find(tier => tier.enabled && tier.id === options.affiliate.literaryCircle?.tier.id)
@@ -800,6 +914,7 @@ export function buildLiteraryCircleDashboardSummary(options: {
     onboarding: membership.onboarding,
     introductoryPeriodActive: Number.isFinite(introEnd) && Date.parse(now) <= introEnd,
     commissionPolicyStatus: settings.commissionPolicy.status,
-    community: projectLiteraryCircleCommunityForAffiliate(settings, now)
+    community: projectLiteraryCircleCommunityForAffiliate(settings, now),
+    performancePeriods,
   };
 }

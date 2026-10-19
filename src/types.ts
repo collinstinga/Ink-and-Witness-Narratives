@@ -1641,6 +1641,35 @@ export interface AffiliateDashboardStats {
   literaryCircle?: LiteraryCircleDashboardSummary;
 }
 
+export interface LiteraryCirclePerformancePeriod {
+  periodKey: string;
+  startsAt: string;
+  endsAt: string;
+  isCurrent: boolean;
+  verifiedSales: number;
+  qualifyingSales: number;
+  grossSalesKes: number;
+  commissionEarnedKes: number;
+  retainedRevenueKes: number;
+  pieceSales: number;
+  bundleSales: number;
+  subscriptionSales: number;
+  reversedOrRejectedSales: number;
+  qualifiedTier: LiteraryCircleTierDefinition;
+  qualificationMode: 'active' | 'projected';
+  policyVersion: number;
+  recordedTierIds: string[];
+  recordedPolicyVersions: number[];
+}
+
+export interface LiteraryCircleAffiliatePerformanceReport {
+  affiliateId: string;
+  affiliateCode: string;
+  affiliateName: string;
+  manuallyAssignedTierId?: string;
+  periods: LiteraryCirclePerformancePeriod[];
+}
+
 export interface LiteraryCircleDashboardSummary {
   enabled: boolean;
   foundingMember: boolean;
@@ -1655,6 +1684,7 @@ export interface LiteraryCircleDashboardSummary {
   introductoryPeriodActive: boolean;
   commissionPolicyStatus: LiteraryCircleCommissionPolicyStatus;
   community: LiteraryCircleSettings['community'];
+  performancePeriods?: LiteraryCirclePerformancePeriod[];
 }
 
 export interface AdminAffiliatesSummary {
@@ -1680,6 +1710,7 @@ export interface AdminAffiliatesSummary {
   affiliatesWithLifetimeSales?: number;
   affiliatesWithoutSales?: number;
   literaryCircleSettings?: LiteraryCircleSettings;
+  literaryCirclePerformance?: LiteraryCircleAffiliatePerformanceReport[];
   topAffiliates: {
     id: string;
     name: string;

@@ -3,6 +3,7 @@ import type { AffiliateAccount, AffiliateSaleCommission } from '../types.js';
 import {
   DEFAULT_LITERARY_CIRCLE_SETTINGS,
   buildLiteraryCircleDashboardSummary,
+  buildLiteraryCirclePerformancePeriods,
   countVerifiedSalesForPeriod,
   createLiteraryCircleCommissionPolicySnapshot,
   createLiteraryCircleMembership,
@@ -119,6 +120,116 @@ describe('Literary Circle policy helpers', () => {
         ? { ...tier, proposedCommissionRate: 16 }
         : tier)
     })).toBe(true);
+  });
+
+  it('builds non-retroactive Nairobi-month performance periods from verified commission snapshots', () => {
+    const versionOneSettings = normalizeLiteraryCircleSettings({
+      ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+      qualificationEffectiveFrom: '2026-09-01T00:00:00+03:00',
+      tiers: DEFAULT_LITERARY_CIRCLE_SETTINGS.tiers.map(tier => tier.id === 'literary-ambassador'
+        ? { ...tier, monthlyVerifiedSalesThreshold: 3 }
+        : tier),
+      commissionPolicy: {
+        status: 'active',
+        version: 1,
+        effectiveAt: '2026-09-01T00:00:00+03:00',
+        subscriptionRenewalsEligible: false,
+      },
+    });
+    const versionOneSnapshot = createLiteraryCircleCommissionPolicySnapshot(versionOneSettings, {
+      effectiveAt: '2026-09-01T00:00:00+03:00',
+      confirmedAt: '2026-08-31T12:00:00.000Z',
+      confirmedBy: 'Writer',
+    });
+    const currentSettings = normalizeLiteraryCircleSettings({
+      ...versionOneSettings,
+      qualificationEffectiveFrom: '2026-10-01T00:00:00+03:00',
+      tiers: versionOneSettings.tiers.map(tier => tier.id === 'literary-ambassador'
+        ? { ...tier, monthlyVerifiedSalesThreshold: 2 }
+        : tier),
+      commissionPolicy: {
+        status: 'active',
+        version: 2,
+        effectiveAt: '2026-10-01T00:00:00+03:00',
+        subscriptionRenewalsEligible: false,
+      },
+      commissionPolicyHistory: [versionOneSnapshot],
+    });
+    const commissions = [
+      ...Array.from({ length: 3 }, (_, index) => ({
+        ...commission(`sep-${index}`, `2026-09-${String(index + 1).padStart(2, '0')}T08:00:00.000Z`),
+        literaryCircleTierId: 'literary-ambassador',
+        literaryCirclePolicyVersion: 1,
+      })),
+      { ...commission('sep-reversed', '2026-09-10T08:00:00.000Z', 'REVERSED'), saleAmountKes: 900, commissionAmountKes: 135 },
+      { ...commission('oct-piece', '2026-10-02T08:00:00.000Z'), literaryCircleTierId: 'literary-partner', literaryCirclePolicyVersion: 2 },
+      { ...commission('oct-bundle', '2026-10-03T08:00:00.000Z'), purchaseKind: 'bundle' as const, saleAmountKes: 500, commissionAmountKes: 100, grossCreatorRevenueKes: 400, literaryCircleTierId: 'literary-ambassador', literaryCirclePolicyVersion: 2 },
+    ];
+    const before = JSON.parse(JSON.stringify(commissions));
+
+    const periods = buildLiteraryCirclePerformancePeriods({
+      commissions,
+      settings: currentSettings,
+      now: '2026-10-16T08:00:00.000Z',
+      periodCount: 2,
+    });
+
+    expect(periods.map(period => period.periodKey)).toEqual(['2026-10', '2026-09']);
+    expect(periods[0]).toMatchObject({
+      verifiedSales: 2,
+      qualifyingSales: 2,
+      grossSalesKes: 600,
+      commissionEarnedKes: 115,
+      retainedRevenueKes: 485,
+      pieceSales: 1,
+      bundleSales: 1,
+      qualifiedTier: { id: 'literary-ambassador' },
+      qualificationMode: 'active',
+      policyVersion: 2,
+      recordedTierIds: ['literary-ambassador', 'literary-partner'],
+      recordedPolicyVersions: [2],
+    });
+    expect(periods[1]).toMatchObject({
+      verifiedSales: 3,
+      qualifyingSales: 3,
+      grossSalesKes: 300,
+      commissionEarnedKes: 45,
+      reversedOrRejectedSales: 1,
+      qualifiedTier: { id: 'literary-ambassador' },
+      policyVersion: 1,
+      recordedPolicyVersions: [1],
+    });
+    expect(commissions).toEqual(before);
+  });
+
+  it('separates verified achievement from prospective qualification and crosses year boundaries safely', () => {
+    const settings = normalizeLiteraryCircleSettings({
+      ...DEFAULT_LITERARY_CIRCLE_SETTINGS,
+      qualificationEffectiveFrom: '2026-01-10T00:00:00+03:00',
+      commissionPolicy: {
+        status: 'active',
+        version: 3,
+        effectiveAt: '2026-01-10T00:00:00+03:00',
+        subscriptionRenewalsEligible: false,
+      },
+    });
+    const periods = buildLiteraryCirclePerformancePeriods({
+      settings,
+      commissions: [
+        commission('before-qualification', '2026-01-05T08:00:00.000Z'),
+        commission('after-qualification', '2026-01-12T08:00:00.000Z'),
+      ],
+      now: '2026-01-20T08:00:00.000Z',
+      periodCount: 2,
+    });
+
+    expect(periods.map(period => period.periodKey)).toEqual(['2026-01', '2025-12']);
+    expect(periods[0]).toMatchObject({
+      verifiedSales: 2,
+      qualifyingSales: 1,
+      qualificationMode: 'active',
+      policyVersion: 3,
+    });
   });
 
   it('normalizes bounded private community posts and rejects unsafe writer input', () => {
@@ -363,6 +474,12 @@ describe('Literary Circle membership helpers', () => {
     expect(summary.lifetimeVerifiedSales).toBe(10);
     expect(summary.currentTier.id).toBe('literary-ambassador');
     expect(summary.salesToNextTier).toBe(20);
+    expect(summary.performancePeriods?.[0]).toMatchObject({
+      periodKey: '2026-10',
+      verifiedSales: 10,
+      qualifyingSales: 10,
+      reversedOrRejectedSales: 1,
+    });
   });
 
   it('never presents an unmigrated legacy affiliate as having complimentary access', () => {

@@ -7616,8 +7616,9 @@ ${sitemapEntries.join("\n")}
   return app;
 }
 
-// Local/AI Studio runtime. On Vercel the Express app is imported by api/[...path].
-if (!process.env.VERCEL) {
+// Local/AI Studio runtime. On Vercel and in tests the Express app is imported
+// without binding the module to the default development port.
+if (!process.env.VERCEL && process.env.NODE_ENV !== "test") {
   createApp().then((app) => {
     const PORT = Number(process.env.PORT) || 3000;
     http.createServer(app).listen(PORT, "0.0.0.0", () => {

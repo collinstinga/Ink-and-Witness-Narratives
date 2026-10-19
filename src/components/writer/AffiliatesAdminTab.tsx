@@ -1205,6 +1205,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
               <LiteraryCircleAdminPanel
                 settings={literaryCircleSettings}
                 affiliates={summary?.affiliates || []}
+                performanceReports={summary?.literaryCirclePerformance || []}
                 savingSettings={savingLiteraryCircleSettings}
                 savingAffiliateId={savingLiteraryCircleAffiliateId}
                 onSaveSettings={handleSaveLiteraryCircleSettings}
