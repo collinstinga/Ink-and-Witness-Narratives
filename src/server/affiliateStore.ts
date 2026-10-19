@@ -1188,6 +1188,13 @@ export const affiliateStore = {
 
     const id = `aff_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
+    const requestedStatus = data.status || 'active';
+    const requestedApprovalAt = typeof data.approvedAt === 'string' && Number.isFinite(Date.parse(data.approvedAt))
+      ? new Date(data.approvedAt).toISOString()
+      : undefined;
+    const requestedApprovalBy = typeof data.approvedBy === 'string' && data.approvedBy.trim()
+      ? data.approvedBy.trim().slice(0, 120)
+      : undefined;
     const passwordHash = String(data.passwordHash || '').trim();
     if (!isCurrentAffiliatePasswordHash(passwordHash)) {
       throw new Error('A current Argon2id affiliate credential is required.');
@@ -1200,7 +1207,10 @@ export const affiliateStore = {
       email,
       phone: (data.phone || '').trim(),
       passwordHash,
-      status: data.status || 'active',
+      status: requestedStatus,
+      ...(requestedStatus === 'active' && requestedApprovalAt && requestedApprovalBy
+        ? { approvedAt: requestedApprovalAt, approvedBy: requestedApprovalBy }
+        : {}),
       customCommissionRate: data.customCommissionRate !== undefined ? data.customCommissionRate : null,
       payoutMethod: data.payoutMethod || 'mpesa',
       payoutDetails: data.payoutDetails || {

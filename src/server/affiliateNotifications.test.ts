@@ -28,6 +28,7 @@ import {
   summarizeAffiliateNotificationEligibility,
   validateAffiliateNotificationSettings,
 } from './affiliateNotifications.js';
+import { AFFILIATE_MARKETING_DISCLOSURE_VERSION } from './affiliateNotificationPreferences.js';
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
@@ -187,8 +188,9 @@ describe('affiliate notification preview configuration', () => {
     const optedIn = affiliate({
       notificationPreferences: {
         schemaVersion: 1,
+        revision: 1,
         marketingConsent: 'granted',
-        marketingConsentVersion: '2026-10',
+        marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
         marketingConsentAt: '2026-10-01T00:00:00.000Z',
         marketingConsentSource: 'affiliate_dashboard',
         releaseUpdates: true,
@@ -210,6 +212,31 @@ describe('affiliate notification preview configuration', () => {
     expect(commissionSummary.eligible).toBe(1);
   });
 
+  it('fails closed for marketing consent recorded under an old disclosure', () => {
+    const release = template('new_release');
+    const staleConsent = affiliate({
+      notificationPreferences: {
+        schemaVersion: 1,
+        revision: 4,
+        marketingConsent: 'granted',
+        marketingConsentVersion: 'retired-disclosure',
+        marketingConsentAt: '2026-10-01T00:00:00.000Z',
+        marketingConsentSource: 'affiliate_dashboard',
+        releaseUpdates: true,
+        campaignUpdates: true,
+        inactivityReminders: true,
+        exclusiveOpportunities: true,
+        commissionAlerts: true,
+        tierAlerts: true,
+        allMarketingOptOut: false,
+      },
+    });
+
+    const summary = summarizeAffiliateNotificationEligibility([staleConsent], release);
+    expect(summary).toMatchObject({ eligible: 0, excluded: 1 });
+    expect(summary.reasons.marketing_consent_or_preference_missing).toBe(1);
+  });
+
   it('applies founding, tier and complimentary access filters without changing affiliate state', () => {
     const inactivity = template('inactivity_reminder');
     inactivity.eligibility = {
@@ -220,6 +247,7 @@ describe('affiliate notification preview configuration', () => {
     const optedIn = affiliate({
       notificationPreferences: {
         schemaVersion: 1,
+        revision: 1,
         marketingConsent: 'granted',
         releaseUpdates: true,
         campaignUpdates: true,

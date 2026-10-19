@@ -97,6 +97,27 @@ migration marker. It does not alter commission or payout ledgers. Restoration
 is an operator-controlled Firestore procedure; this change does not include an
 automatic restore command.
 
+## Approval and communication-preference checkpoint
+
+Affiliate documents may now contain additive `approvedAt`, `approvedBy`, and
+`notificationPreferences` fields. They are already covered by the verbatim
+`affiliates` backup and equality checks, so backup schema version 3 remains
+valid. Missing preference data means unknown consent and no optional marketing;
+accepted programme terms must never be promoted into marketing consent.
+
+Self-registered accounts are created as `pending` and receive no session until
+the writer explicitly approves them. Do not bulk-convert legacy `active` status
+into approval. Before a staging or eventual production approval pass, the
+writer must verify the exact nine-account identity set from the guarded backup.
+Approval, preference saves, and signed marketing opt-outs are transactional and
+audited; none of them enables notification delivery.
+
+Before any partner email renderer is activated, provision a protected
+`AFFILIATE_NOTIFICATION_SIGNING_SECRET` of at least 32 characters in the exact
+target environment. The code can safely fall back to the existing newsletter
+or session signing secret, but a dedicated secret gives cleaner rotation and
+incident isolation. Never place the value in source, a backup, logs, or chat.
+
 ## Commission policy continuity
 
 Tier commission settings remain proposals until the writer explicitly confirms

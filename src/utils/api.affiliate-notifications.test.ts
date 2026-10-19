@@ -16,6 +16,7 @@ describe('affiliate notification admin API client', () => {
   beforeEach(() => {
     const localStorage = new MemoryStorage();
     localStorage.setItem('ink_writer_session_active', '1');
+    localStorage.setItem('ink_affiliate_session_active', '1');
     vi.stubGlobal('localStorage', localStorage);
   });
 
@@ -78,5 +79,95 @@ describe('affiliate notification admin API client', () => {
     expect(url).toBe('/api/admin/affiliates/notifications/eligibility');
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body as string)).toEqual({ eventType: 'new_release', settings: current });
+  });
+
+  it('loads affiliate-owned preferences through the signed affiliate session', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        success: true,
+        preferences: { schemaVersion: 1, revision: 0, marketingConsent: 'unknown' },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.getAffiliateNotificationPreferences();
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/affiliate/notifications/preferences');
+    expect(init.cache).toBe('no-store');
+    expect(init.headers).toMatchObject({ 'x-affiliate-token': 'cookie-session' });
+  });
+
+  it('saves only consent and preference choices with the expected revision', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ success: true, preferences: { schemaVersion: 1, revision: 3 } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const input = {
+      expectedRevision: 2,
+      marketingConsent: true,
+      releaseUpdates: true,
+      campaignUpdates: false,
+      inactivityReminders: false,
+      exclusiveOpportunities: true,
+      commissionAlerts: true,
+      tierAlerts: true,
+    };
+
+    await api.updateAffiliateNotificationPreferences(input);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/affiliate/notifications/preferences');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body as string)).toEqual(input);
+    expect(JSON.stringify(input)).not.toMatch(/affiliateId|recipient|source|timestamp/i);
+  });
+
+  it('uses an empty body for explicit writer approval', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ success: true, affiliate: { id: 'aff-one', approvedAt: 'now' } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.approveAdminAffiliate('aff-one');
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/admin/affiliates/aff-one/approval');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({});
+  });
+
+  it('does not create a local affiliate session marker for a pending self-registration', async () => {
+    localStorage.removeItem('ink_affiliate_session_active');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 202,
+      headers: { get: () => 'application/json' },
+      json: async () => ({
+        success: true,
+        pendingApproval: true,
+        affiliate: { id: 'aff-pending', status: 'pending' },
+        message: 'Awaiting approval',
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.affiliateRegister({
+      name: 'Pending Partner',
+      email: 'pending@example.com',
+      phone: '+254700000000',
+      password: 'StrongPassword!2',
+      payoutMethod: 'mpesa',
+      payoutDetails: {},
+      acceptedTerms: true,
+    });
+
+    expect(localStorage.getItem('ink_affiliate_session_active')).toBeNull();
   });
 });

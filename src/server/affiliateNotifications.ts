@@ -9,6 +9,8 @@ import type {
   LiteraryCircleNotificationTemplate,
 } from '../types.js';
 import { getDb, getFirestoreDoc, sanitizeForFirestore } from './db.js';
+import { normalizeAffiliateNotificationPreferences } from './affiliateNotificationPreferences.js';
+import { hasValidAffiliateWriterApproval } from './affiliateApproval.js';
 
 export const AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID = 'affiliate_notifications';
 export const AFFILIATE_NOTIFICATION_SCHEMA_VERSION = 1 as const;
@@ -489,7 +491,9 @@ export async function saveAffiliateNotificationSettings(
 }
 
 function preferenceAllows(affiliate: AffiliatePublicProfile, eventType: LiteraryCircleNotificationEventType): boolean {
-  const preferences = affiliate.notificationPreferences;
+  const preferences = affiliate.notificationPreferences
+    ? normalizeAffiliateNotificationPreferences(affiliate.notificationPreferences)
+    : undefined;
   if (MARKETING_EVENTS.has(eventType)) {
     if (!preferences || preferences.marketingConsent !== 'granted' || preferences.allMarketingOptOut) return false;
     if (eventType === 'new_release') return preferences.releaseUpdates;
@@ -511,7 +515,7 @@ export function summarizeAffiliateNotificationEligibility(
   const exclude = (reason: string) => { reasons[reason] = (reasons[reason] || 0) + 1; };
   for (const affiliate of affiliates) {
     if (affiliate.status !== 'active') { exclude('account_not_active'); continue; }
-    if (!affiliate.approvedAt) { exclude('writer_approval_missing'); continue; }
+    if (!hasValidAffiliateWriterApproval(affiliate)) { exclude('writer_approval_missing'); continue; }
     if (!EMAIL_PATTERN.test(String(affiliate.email || '').trim().toLowerCase()) || affiliate.email.length > 254) { exclude('valid_email_missing'); continue; }
     if (affiliate.acceptedTerms !== true) { exclude('terms_not_accepted'); continue; }
     if (!affiliate.literaryCircle) { exclude('literary_circle_membership_missing'); continue; }

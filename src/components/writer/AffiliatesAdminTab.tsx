@@ -64,6 +64,13 @@ interface AffiliatesAdminTabProps {
 
 type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'resources' | 'notifications' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
 
+function hasWriterApproval(affiliate: AffiliateAccount): boolean {
+  return typeof affiliate.approvedAt === 'string'
+    && Number.isFinite(Date.parse(affiliate.approvedAt))
+    && typeof affiliate.approvedBy === 'string'
+    && Boolean(affiliate.approvedBy.trim());
+}
+
 export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
 }) => {
@@ -124,6 +131,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [literaryCircleSettings, setLiteraryCircleSettings] = useState<LiteraryCircleSettings | null>(null);
   const [savingLiteraryCircleSettings, setSavingLiteraryCircleSettings] = useState(false);
   const [savingLiteraryCircleAffiliateId, setSavingLiteraryCircleAffiliateId] = useState<string>();
+  const [approvingAffiliateId, setApprovingAffiliateId] = useState<string>();
   const [resourceLibrary, setResourceLibrary] = useState<LiteraryCircleResourceLibrary | null>(null);
   const [resourceLibraryLoading, setResourceLibraryLoading] = useState(false);
   const [resourceLibraryAttempted, setResourceLibraryAttempted] = useState(false);
@@ -403,6 +411,13 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       alert("Name is required.");
       return;
     }
+    if (
+      editAffStatus === 'active'
+      && !hasWriterApproval(showEditAffiliateModal)
+      && !window.confirm(`Confirm that you reviewed and approve ${showEditAffiliateModal.name} for active Literary Circle access?`)
+    ) {
+      return;
+    }
 
     setSavingEditAff(true);
     try {
@@ -429,6 +444,12 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
 
   const handleToggleStatus = async (aff: AffiliateAccount) => {
     const nextStatus = aff.status === 'active' ? 'suspended' : 'active';
+    if (nextStatus === 'active') {
+      const promptMessage = hasWriterApproval(aff)
+        ? `Reactivate ${aff.name}'s affiliate account?`
+        : `Confirm that you reviewed and approve ${aff.name} (${aff.affiliateCode}) for active Literary Circle access?`;
+      if (!window.confirm(promptMessage)) return;
+    }
     const reason = nextStatus === 'suspended' ? prompt("Reason for suspension (optional):") || undefined : undefined;
     
     try {
@@ -436,6 +457,29 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       loadSummary(true);
     } catch (err: any) {
       alert(`Failed to update status: ${err.message}`);
+    }
+  };
+
+  const handleApproveAffiliate = async (aff: AffiliateAccount) => {
+    if (aff.status === 'suspended') {
+      window.alert('Reactivate this suspended affiliate through the status control before confirming writer approval.');
+      return;
+    }
+    if (!window.confirm(`Confirm that you have reviewed and approved ${aff.name} (${aff.affiliateCode}) for the Literary Circle?`)) return;
+    setApprovingAffiliateId(aff.id);
+    setError('');
+    try {
+      const response = await api.approveAdminAffiliate(aff.id);
+      setSummary(current => current ? {
+        ...current,
+        affiliates: current.affiliates.map(candidate => candidate.id === aff.id ? response.affiliate : candidate),
+      } : current);
+      setSuccessMsg(response.message);
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (approvalError) {
+      setError(approvalError instanceof Error ? approvalError.message : 'Writer approval could not be saved.');
+    } finally {
+      setApprovingAffiliateId(undefined);
     }
   };
 
@@ -1030,6 +1074,14 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                           <td className="p-3 font-medium text-slate-100">
                             <div>{aff.name}</div>
                             <div className="text-[10px] text-slate-500 font-sans">{aff.email}</div>
+                            <div className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                              hasWriterApproval(aff)
+                                ? 'border border-emerald-800 bg-emerald-950/60 text-emerald-300'
+                                : 'border border-amber-800 bg-amber-950/60 text-amber-300'
+                            }`}>
+                              <ShieldCheck className="h-2.5 w-2.5" />
+                              {hasWriterApproval(aff) ? 'Writer approved' : 'Approval required'}
+                            </div>
                           </td>
                           <td className="p-3">
                             <span className="px-2 py-0.5 rounded bg-cyan-950 border border-cyan-800 text-cyan-300 text-[11px] font-bold">
@@ -1089,6 +1141,20 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                           </td>
                           <td className="p-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
+                              {!hasWriterApproval(aff) && (
+                                <button
+                                  type="button"
+                                  disabled={approvingAffiliateId === aff.id || aff.status === 'suspended'}
+                                  onClick={() => void handleApproveAffiliate(aff)}
+                                  className="p-1.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-800/80 text-emerald-300 hover:text-white cursor-pointer transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                                  title={aff.status === 'suspended' ? 'Reactivate before approving' : 'Confirm explicit writer approval'}
+                                  aria-label={`Confirm writer approval for ${aff.name}`}
+                                >
+                                  {approvingAffiliateId === aff.id
+                                    ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                    : <ShieldCheck className="w-3.5 h-3.5" />}
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleOpenEditAffiliate(aff)}
                                 className="p-1.5 rounded-lg bg-cyan-950/60 hover:bg-cyan-900 border border-cyan-800/80 text-cyan-300 hover:text-white cursor-pointer transition-colors"

@@ -79,6 +79,21 @@ import {
   summarizeAffiliateNotificationEligibility,
   validateAffiliateNotificationSettings
 } from "./src/server/affiliateNotifications.js";
+import {
+  AffiliateNotificationPreferencesConflictError,
+  AffiliateNotificationPreferencesNotFoundError,
+  AffiliateNotificationPreferencesValidationError,
+  AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+  getAffiliateNotificationPreferencesFresh,
+  optOutAffiliateMarketingByToken,
+  saveAffiliateNotificationPreferences
+} from "./src/server/affiliateNotificationPreferences.js";
+import {
+  AffiliateApprovalNotFoundError,
+  AffiliateApprovalValidationError,
+  approveAffiliateAccount,
+  hasValidAffiliateWriterApproval
+} from "./src/server/affiliateApproval.js";
 import { AFFILIATE_SESSION_MAX_AGE_MS } from "./src/server/affiliateSessionSecurity.js";
 import {
   AFFILIATE_CLICK_DEDUP_COOKIE_NAME,
@@ -1978,6 +1993,59 @@ export async function createApp() {
         return res.type('html').send(newsletterResultPage(
           'Email preferences updated',
           'Your request has been processed. Purchased pieces and reader access remain unchanged.'
+        ));
+      }
+      return res.status(202).json({ accepted: true });
+    }
+  );
+
+  app.get(
+    ['/affiliate/notifications/unsubscribe', '/api/affiliate/notifications/unsubscribe'],
+    newsletterCapabilityLimiter,
+    (req: Request, res: Response) => {
+      const token = typeof req.query.token === 'string' ? req.query.token : '';
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      res.type('html').send(newsletterCapabilityPage({
+        title: 'Manage Literary Circle email',
+        message: 'Stop optional release, campaign, re-engagement, and opportunity emails. Your affiliate account, catalogue access, referrals, commissions, and payouts will not be affected.',
+        action: '/api/affiliate/notifications/unsubscribe',
+        token,
+        buttonLabel: 'Stop optional emails'
+      }));
+    }
+  );
+
+  app.post(
+    '/api/affiliate/notifications/unsubscribe',
+    newsletterCapabilityLimiter,
+    publicWriteValidators.newsletterCapability,
+    async (req: Request, res: Response) => {
+      try {
+        const result = await optOutAffiliateMarketingByToken(req.body.token);
+        if (result.audit) store.affiliates.rememberCommittedAudit(result.audit);
+        if (result.affiliateId) await store.affiliates.getAffiliateByIdFresh(result.affiliateId);
+      } catch (error) {
+        console.error('[Affiliate Notifications] Signed marketing opt-out could not be persisted.', error);
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('CDN-Cache-Control', 'no-store');
+        res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+        if (Boolean(req.is('application/x-www-form-urlencoded'))) {
+          return res.status(503).type('html').send(newsletterResultPage(
+            'Please try again',
+            'Your email preference could not be saved just now. Please retry this link shortly.'
+          ));
+        }
+        return res.status(503).json({ accepted: false, error: 'Email preference could not be saved. Please retry.' });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+      if (Boolean(req.is('application/x-www-form-urlencoded'))) {
+        return res.type('html').send(newsletterResultPage(
+          'Email preferences updated',
+          'Optional Literary Circle marketing has been stopped. Your affiliate account, catalogue access, referrals, commissions, and payouts remain unchanged.'
         ));
       }
       return res.status(202).json({ accepted: true });
@@ -6066,30 +6134,17 @@ ${currentDraft || prompt}
         payoutMethod: payoutMethod || 'mpesa',
         payoutDetails: payoutDetails || { mpesaPhone: phone, mpesaName: name },
         affiliateCode: affiliateCode || preferredCode,
-        status: 'active',
+        status: 'pending',
         acceptedTerms: true,
         termsVersion: termsVersion || '2026.1',
         termsAcceptedAt: now
       }, 'Self-Registered');
 
-      let token: string;
-      try {
-        token = await store.affiliates.createAffiliateSession(newAffiliate);
-      } catch {
-        return res.status(503).json({
-          success: false,
-          accountCreated: true,
-          code: 'ACCOUNT_CREATED_SESSION_UNAVAILABLE',
-          error: "Your affiliate account was created, but sign-in is temporarily unavailable. Please use the login form with the password you just set."
-        });
-      }
-      setAffiliateSessionCookie(res, token);
-      const dashboard = store.affiliates.getAffiliateDashboard(newAffiliate.id);
-
-      res.json({
+      res.status(202).json({
         success: true,
-        affiliate: dashboard?.affiliate,
-        message: "Affiliate account created successfully! Welcome to the Ink & Witness affiliate team."
+        pendingApproval: true,
+        affiliate: sanitizeAffiliateForResponse(newAffiliate),
+        message: "Your application was received. Jake must approve the account before affiliate sign-in and Literary Circle access become available."
       });
     } catch (err: any) {
       console.error("Affiliate registration error:", err);
@@ -6469,6 +6524,63 @@ ${currentDraft || prompt}
   app.put("/api/affiliate/profile", requireAffiliateAuth, handleUpdateProfile);
   app.post("/api/affiliate/payout-settings", requireAffiliateAuth, handleUpdateProfile);
   app.put("/api/affiliate/payout-settings", requireAffiliateAuth, handleUpdateProfile);
+
+  app.get("/api/affiliate/notifications/preferences", requireAffiliateAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const affiliate = (req as any).affiliate;
+      const preferences = await getAffiliateNotificationPreferencesFresh(affiliate.id);
+      return res.json({
+        success: true,
+        preferences,
+        disclosureVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+        deliveryAvailable: false
+      });
+    } catch (err) {
+      if (err instanceof AffiliateNotificationPreferencesNotFoundError) {
+        return res.status(404).json({ success: false, error: err.message });
+      }
+      console.error('[Affiliate Notifications] Failed to load affiliate preferences.', err);
+      return res.status(503).json({ success: false, error: 'Notification preferences are temporarily unavailable.' });
+    }
+  });
+
+  app.put("/api/affiliate/notifications/preferences", requireAffiliateAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      const affiliate = (req as any).affiliate;
+      const result = await saveAffiliateNotificationPreferences(
+        affiliate.id,
+        req.body,
+        `Affiliate (${affiliate.name || affiliate.affiliateCode})`
+      );
+      store.affiliates.rememberCommittedAudit(result.audit);
+      await store.affiliates.getAffiliateByIdFresh(affiliate.id);
+      return res.json({
+        success: true,
+        preferences: result.preferences,
+        disclosureVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+        deliveryAvailable: false,
+        message: 'Notification preferences saved. Email delivery remains disabled during the safety rollout.'
+      });
+    } catch (err: any) {
+      if (err instanceof AffiliateNotificationPreferencesConflictError) {
+        return res.status(409).json({ success: false, code: 'AFFILIATE_NOTIFICATION_PREFERENCES_CONFLICT', error: err.message });
+      }
+      if (err instanceof AffiliateNotificationPreferencesValidationError) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      if (err instanceof AffiliateNotificationPreferencesNotFoundError) {
+        return res.status(404).json({ success: false, error: err.message });
+      }
+      console.error('[Affiliate Notifications] Failed to save affiliate preferences.', err);
+      return res.status(503).json({ success: false, error: 'Notification preferences could not be saved right now.' });
+    }
+  });
 
   // Affiliate: Change Password
   app.post("/api/affiliate/change-password", requireAffiliateAuth, async (req: Request, res: Response) => {
@@ -7079,6 +7191,8 @@ ${currentDraft || prompt}
         return res.status(400).json({ error: passwordValidation.error });
       }
       const passwordHash = await hashAffiliatePassword(password);
+      const requestedStatus = status || 'active';
+      const approvedAt = requestedStatus === 'active' ? new Date().toISOString() : undefined;
 
       const created = await store.affiliates.createAffiliate({
         name,
@@ -7091,7 +7205,8 @@ ${currentDraft || prompt}
         payoutDetails: payoutDetails || { mpesaPhone: phone, mpesaName: name },
         allowedPieceIds: allowedPieceIds || [],
         attributionDays: attributionDays !== undefined ? Number(attributionDays) : null,
-        status: status || 'active',
+        status: requestedStatus,
+        ...(approvedAt ? { approvedAt, approvedBy: 'Admin (Jake)' } : {}),
         notes
       }, 'Admin (Jake)');
 
@@ -7148,8 +7263,14 @@ ${currentDraft || prompt}
       let updated = Object.keys(profilePatch).length > 0
         ? store.affiliates.updateAffiliate(id, profilePatch, 'Admin (Jake)')
         : existing;
-      if (Object.prototype.hasOwnProperty.call(req.body, 'status') && req.body.status !== updated.status) {
-        updated = await store.affiliates.setAffiliateStatus(id, req.body.status, 'Admin (Jake)');
+      if (Object.prototype.hasOwnProperty.call(req.body, 'status')) {
+        if (req.body.status === 'active' && !hasValidAffiliateWriterApproval(updated)) {
+          const approval = await approveAffiliateAccount(id, 'Admin (Jake)', { allowSuspendedReactivation: true });
+          if (approval.audit) store.affiliates.rememberCommittedAudit(approval.audit);
+          updated = await store.affiliates.getAffiliateByIdFresh(id) || approval.affiliate;
+        } else if (req.body.status !== updated.status) {
+          updated = await store.affiliates.setAffiliateStatus(id, req.body.status, 'Admin (Jake)');
+        }
       }
       if (Object.prototype.hasOwnProperty.call(req.body, 'linksDisabled') && Boolean(req.body.linksDisabled) !== Boolean(updated.linksDisabled)) {
         updated = await store.affiliates.toggleAffiliateLinks(id, Boolean(req.body.linksDisabled), 'Admin (Jake)');
@@ -7180,7 +7301,16 @@ ${currentDraft || prompt}
     try {
       const { id } = req.params;
       const { status, reason } = req.body;
-      const updated = await store.affiliates.setAffiliateStatus(id, status, 'Admin (Jake)', reason);
+      const existing = await store.affiliates.getAffiliateByIdFresh(id);
+      if (!existing) return res.status(404).json({ error: 'Affiliate not found.' });
+      let updated;
+      if (status === 'active' && !hasValidAffiliateWriterApproval(existing)) {
+        const approval = await approveAffiliateAccount(id, 'Admin (Jake)', { allowSuspendedReactivation: true });
+        if (approval.audit) store.affiliates.rememberCommittedAudit(approval.audit);
+        updated = await store.affiliates.getAffiliateByIdFresh(id) || approval.affiliate;
+      } else {
+        updated = await store.affiliates.setAffiliateStatus(id, status, 'Admin (Jake)', reason);
+      }
       res.json({
         success: true,
         affiliate: sanitizeAffiliateForResponse(updated),
@@ -7343,6 +7473,35 @@ ${currentDraft || prompt}
       res.json(logs);
     } catch (err: any) {
       res.status(503).json({ success: false, error: "Audit logs are temporarily unavailable. Please retry." });
+    }
+  });
+
+  // Admin: explicit writer approval is separate from a legacy "active"
+  // status so old/self-registered accounts cannot become notification
+  // recipients through status alone.
+  app.post("/api/admin/affiliates/:id/approval", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    try {
+      if (Object.keys(req.body || {}).length > 0) {
+        return res.status(400).json({ success: false, error: 'Writer approval does not accept editable fields.' });
+      }
+      const result = await approveAffiliateAccount(req.params.id, `Admin (${(req as any).user?.name || 'Writer'})`);
+      if (result.audit) store.affiliates.rememberCommittedAudit(result.audit);
+      const fresh = await store.affiliates.getAffiliateByIdFresh(req.params.id);
+      return res.json({
+        success: true,
+        affiliate: sanitizeAffiliateForResponse(fresh || result.affiliate),
+        message: result.audit ? 'Writer approval confirmed.' : 'This affiliate was already approved.'
+      });
+    } catch (err: any) {
+      if (err instanceof AffiliateApprovalNotFoundError) {
+        return res.status(404).json({ success: false, error: err.message });
+      }
+      if (err instanceof AffiliateApprovalValidationError) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      console.error('[Affiliate Approval] Failed to confirm writer approval.', err);
+      return res.status(503).json({ success: false, error: 'Writer approval could not be saved right now. Please retry.' });
     }
   });
 

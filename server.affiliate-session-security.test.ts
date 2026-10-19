@@ -157,6 +157,16 @@ const resourceMocks = vi.hoisted(() => ({
   removeImage: vi.fn()
 }));
 
+const notificationPreferenceMocks = vi.hoisted(() => ({
+  getFresh: vi.fn(),
+  save: vi.fn(),
+  optOut: vi.fn(),
+}));
+
+const approvalMocks = vi.hoisted(() => ({
+  approve: vi.fn(),
+}));
+
 const affiliateErrorMocks = vi.hoisted(() => ({
   LiteraryCircleSettingsConflictError: class LiteraryCircleSettingsConflictError extends Error {
     constructor() {
@@ -230,6 +240,38 @@ vi.mock('./src/server/literaryCircleResources.js', () => ({
   LiteraryCircleResourcesValidationError: class LiteraryCircleResourcesValidationError extends Error {
     readonly code = 'LITERARY_CIRCLE_RESOURCES_INVALID';
   }
+}));
+vi.mock('./src/server/affiliateNotificationPreferences.js', () => ({
+  AFFILIATE_MARKETING_DISCLOSURE_VERSION: 'literary-circle-marketing-2026-10-v1',
+  AffiliateNotificationPreferencesConflictError: class AffiliateNotificationPreferencesConflictError extends Error {},
+  AffiliateNotificationPreferencesNotFoundError: class AffiliateNotificationPreferencesNotFoundError extends Error {},
+  AffiliateNotificationPreferencesValidationError: class AffiliateNotificationPreferencesValidationError extends Error {},
+  getAffiliateNotificationPreferencesFresh: notificationPreferenceMocks.getFresh,
+  saveAffiliateNotificationPreferences: notificationPreferenceMocks.save,
+  optOutAffiliateMarketingByToken: notificationPreferenceMocks.optOut,
+  normalizeAffiliateNotificationPreferences: (value: unknown) => value || {
+    schemaVersion: 1,
+    revision: 0,
+    marketingConsent: 'unknown',
+    releaseUpdates: false,
+    campaignUpdates: false,
+    inactivityReminders: false,
+    exclusiveOpportunities: false,
+    commissionAlerts: true,
+    tierAlerts: true,
+    allMarketingOptOut: true,
+  },
+}));
+vi.mock('./src/server/affiliateApproval.js', () => ({
+  AffiliateApprovalNotFoundError: class AffiliateApprovalNotFoundError extends Error {},
+  AffiliateApprovalValidationError: class AffiliateApprovalValidationError extends Error {},
+  approveAffiliateAccount: approvalMocks.approve,
+  hasValidAffiliateWriterApproval: (value: any) => Boolean(
+    value?.approvedAt
+    && Number.isFinite(Date.parse(value.approvedAt))
+    && typeof value?.approvedBy === 'string'
+    && value.approvedBy.trim()
+  ),
 }));
 vi.mock('./src/server/publicWriteSecurity.js', () => ({
   publicWriteValidators: new Proxy({}, {
@@ -430,6 +472,42 @@ describe('affiliate session route boundaries', () => {
       retainedShareableAsset: false,
       audit: { id: 'audit-resource-remove' }
     });
+    notificationPreferenceMocks.getFresh.mockResolvedValue({
+      schemaVersion: 1,
+      revision: 0,
+      marketingConsent: 'unknown',
+      releaseUpdates: false,
+      campaignUpdates: false,
+      inactivityReminders: false,
+      exclusiveOpportunities: false,
+      commissionAlerts: true,
+      tierAlerts: true,
+      allMarketingOptOut: true,
+    });
+    notificationPreferenceMocks.save.mockResolvedValue({
+      preferences: {
+        schemaVersion: 1,
+        revision: 1,
+        marketingConsent: 'denied',
+        releaseUpdates: false,
+        campaignUpdates: false,
+        inactivityReminders: false,
+        exclusiveOpportunities: false,
+        commissionAlerts: true,
+        tierAlerts: true,
+        allMarketingOptOut: true,
+      },
+      audit: { id: 'audit-notification-preferences' },
+    });
+    notificationPreferenceMocks.optOut.mockResolvedValue({ accepted: true, changed: false });
+    approvalMocks.approve.mockResolvedValue({
+      affiliate: {
+        ...privateAffiliate,
+        approvedAt: '2026-10-19T00:00:00.000Z',
+        approvedBy: 'Admin (Test Admin)',
+      },
+      audit: { id: 'audit-writer-approval' },
+    });
   });
 
   it('uses cacheable verification for GET and force-fresh verification for mutations', async () => {
@@ -510,8 +588,8 @@ describe('affiliate session route boundaries', () => {
     expect(response.headers.get('set-cookie')).toBeNull();
   });
 
-  it('reports registration partial success without inviting a duplicate account retry', async () => {
-    affiliateMocks.createAffiliateSession.mockRejectedValueOnce(new Error('session write failed'));
+  it('keeps self-registration pending and does not create an authenticated session before writer approval', async () => {
+    affiliateMocks.createAffiliate.mockResolvedValueOnce({ ...privateAffiliate, status: 'pending' });
     const response = await fetch(`${baseUrl}/api/affiliate/register`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -524,11 +602,119 @@ describe('affiliate session route boundaries', () => {
       })
     });
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(202);
     expect(await response.json()).toMatchObject({
-      success: false,
-      accountCreated: true,
-      code: 'ACCOUNT_CREATED_SESSION_UNAVAILABLE'
+      success: true,
+      pendingApproval: true,
+      affiliate: { status: 'pending' }
+    });
+    expect(affiliateMocks.createAffiliate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending' }),
+      'Self-Registered'
+    );
+    expect(affiliateMocks.createAffiliateSession).not.toHaveBeenCalled();
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('loads and saves notification choices for the authenticated affiliate identity', async () => {
+    const read = await fetch(`${baseUrl}/api/affiliate/notifications/preferences`, {
+      headers: { cookie: validCookie }
+    });
+    const update = {
+      expectedRevision: 0,
+      marketingConsent: false,
+      releaseUpdates: false,
+      campaignUpdates: false,
+      inactivityReminders: false,
+      exclusiveOpportunities: false,
+      commissionAlerts: true,
+      tierAlerts: true,
+    };
+    const write = await fetch(`${baseUrl}/api/affiliate/notifications/preferences`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        cookie: validCookie,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify(update)
+    });
+
+    expect(read.status).toBe(200);
+    expect(write.status).toBe(200);
+    expect(notificationPreferenceMocks.getFresh).toHaveBeenCalledWith(privateAffiliate.id);
+    expect(notificationPreferenceMocks.save).toHaveBeenCalledWith(
+      privateAffiliate.id,
+      update,
+      `Affiliate (${privateAffiliate.name})`
+    );
+    expect(affiliateMocks.rememberCommittedAudit).toHaveBeenCalledWith({ id: 'audit-notification-preferences' });
+  });
+
+  it('accepts a signed marketing opt-out without exposing affiliate identity', async () => {
+    notificationPreferenceMocks.optOut.mockResolvedValueOnce({
+      accepted: true,
+      changed: true,
+      affiliateId: privateAffiliate.id,
+      audit: { id: 'audit-signed-opt-out' },
+    });
+    const response = await fetch(`${baseUrl}/api/affiliate/notifications/unsubscribe`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ token: 'signed-capability' })
+    });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(202);
+    expect(body).toEqual({ accepted: true });
+    expect(JSON.stringify(body)).not.toContain(privateAffiliate.id);
+    expect(notificationPreferenceMocks.optOut).toHaveBeenCalledWith('signed-capability');
+    expect(affiliateMocks.rememberCommittedAudit).toHaveBeenCalledWith({ id: 'audit-signed-opt-out' });
+    expect(affiliateMocks.getAffiliateByIdFresh).toHaveBeenCalledWith(privateAffiliate.id);
+  });
+
+  it('requires an empty admin-only request for explicit writer approval', async () => {
+    const rejected = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}/approval`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({ approvedAt: 'attacker-controlled' })
+    });
+
+    expect(rejected.status).toBe(400);
+    expect(approvalMocks.approve).not.toHaveBeenCalled();
+
+    const approvedAffiliate = {
+      ...privateAffiliate,
+      approvedAt: '2026-10-19T00:00:00.000Z',
+      approvedBy: 'Admin (Test Admin)',
+    };
+    affiliateMocks.getAffiliateByIdFresh.mockResolvedValueOnce(approvedAffiliate);
+    const approved = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}/approval`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin'
+      },
+      body: JSON.stringify({})
+    });
+
+    expect(approved.status).toBe(200);
+    expect(approvalMocks.approve).toHaveBeenCalledWith(privateAffiliate.id, 'Admin (Test Admin)');
+    expect(await approved.json()).toMatchObject({
+      success: true,
+      affiliate: { approvedBy: 'Admin (Test Admin)' }
     });
   });
 

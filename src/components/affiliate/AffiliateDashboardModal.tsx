@@ -71,6 +71,10 @@ import {
 import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/affiliateTerms.js';
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 
+const AffiliateNotificationPreferencesPanel = React.lazy(
+  () => import('./AffiliateNotificationPreferencesPanel.js'),
+);
+
 interface AffiliateDashboardModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -2076,6 +2080,16 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         Your affiliate account is completely detached from Jake's Writers Portal and has zero administrative privileges over website content or reader transactions.
                       </p>
                     </div>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <React.Suspense fallback={(
+                      <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-violet-500/20 bg-slate-900/80 text-sm text-violet-200">
+                        <RefreshCw className="h-4 w-4 animate-spin" /> Opening communication preferences…
+                      </div>
+                    )}>
+                      <AffiliateNotificationPreferencesPanel />
+                    </React.Suspense>
                   </div>
                 </div>
               )}

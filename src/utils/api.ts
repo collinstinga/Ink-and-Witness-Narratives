@@ -42,6 +42,7 @@ import {
   AffiliateLiteraryCircleMembership,
   LiteraryCircleDashboardSummary,
   AffiliateNotificationEligibilitySummary,
+  AffiliateNotificationPreferences,
   LiteraryCircleNotificationEventType,
   LiteraryCircleNotificationSettings,
   LiteraryCircleOnboardingStatus,
@@ -2308,8 +2309,8 @@ export const api = {
     preferredCode?: string;
     acceptedTerms: boolean;
     termsVersion?: string;
-  }): Promise<{ success: boolean; affiliate: AffiliateAccount; message: string }> {
-    const result = await safeFetchJson<{ success: boolean; affiliate: AffiliateAccount; message: string }>(
+  }): Promise<{ success: boolean; pendingApproval?: boolean; affiliate: AffiliateAccount; message: string }> {
+    const result = await safeFetchJson<{ success: boolean; pendingApproval?: boolean; affiliate: AffiliateAccount; message: string }>(
       '/api/affiliate/register',
       {
         method: 'POST',
@@ -2318,7 +2319,7 @@ export const api = {
       },
       'Failed to register affiliate account. Please check your details and try again.'
     );
-    if (result.success) {
+    if (result.success && !result.pendingApproval) {
       setAffiliateToken('cookie-session');
     }
     return result;
@@ -2456,6 +2457,57 @@ export const api = {
         headers: { 'x-affiliate-token': token }
       },
       'Promotional resources could not be loaded. Please retry.'
+    );
+  },
+
+  async getAffiliateNotificationPreferences(): Promise<{
+    success: boolean;
+    preferences: AffiliateNotificationPreferences;
+    disclosureVersion: string;
+    deliveryAvailable: false;
+  }> {
+    const token = getAffiliateToken();
+    if (!token) throw new Error('Please log in to manage partner notification preferences.');
+    return safeFetchJson(
+      '/api/affiliate/notifications/preferences',
+      {
+        cache: 'no-store',
+        headers: { 'x-affiliate-token': token }
+      },
+      'Notification preferences could not be loaded. Please retry.'
+    );
+  },
+
+  async updateAffiliateNotificationPreferences(input: {
+    expectedRevision: number;
+    marketingConsent: boolean;
+    releaseUpdates: boolean;
+    campaignUpdates: boolean;
+    inactivityReminders: boolean;
+    exclusiveOpportunities: boolean;
+    commissionAlerts: boolean;
+    tierAlerts: boolean;
+  }): Promise<{
+    success: boolean;
+    preferences: AffiliateNotificationPreferences;
+    disclosureVersion: string;
+    deliveryAvailable: false;
+    message: string;
+  }> {
+    const token = getAffiliateToken();
+    if (!token) throw new Error('Please log in to manage partner notification preferences.');
+    return safeFetchJson(
+      '/api/affiliate/notifications/preferences',
+      {
+        method: 'PUT',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-affiliate-token': token
+        },
+        body: JSON.stringify(input)
+      },
+      'Notification preferences could not be saved. Please retry.'
     );
   },
 
@@ -2939,6 +2991,23 @@ export const api = {
         body: JSON.stringify(data)
       },
       'Failed to update affiliate.'
+    );
+  },
+
+  async approveAdminAffiliate(id: string): Promise<{ success: boolean; affiliate: AffiliatePublicProfile; message: string }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      `/api/admin/affiliates/${encodeURIComponent(id)}/approval`,
+      {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken || ''
+        },
+        body: JSON.stringify({})
+      },
+      'Failed to confirm writer approval.'
     );
   },
 

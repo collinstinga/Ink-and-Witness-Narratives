@@ -271,6 +271,10 @@ export const AffiliateAuthModal: React.FC<AffiliateAuthModalProps> = ({
 
       if (res.success && res.affiliate) {
         clearRegistrationDrafts();
+        if (res.pendingApproval) {
+          setSuccessMessage(res.message || 'Your application was received and is waiting for writer approval.');
+          return;
+        }
         setSuccessMessage('Account created successfully! Welcome to the Affiliate Programme.');
         setTimeout(() => {
           onSuccess(res.affiliate);

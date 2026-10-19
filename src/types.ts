@@ -1326,10 +1326,13 @@ export interface AffiliateNotificationEligibilitySummary {
 
 export interface AffiliateNotificationPreferences {
   schemaVersion: 1;
+  revision: number;
   marketingConsent: AffiliateMarketingConsentStatus;
   marketingConsentVersion?: string;
   marketingConsentAt?: string;
   marketingConsentSource?: 'affiliate_dashboard' | 'affiliate_onboarding' | 'writer_recorded';
+  marketingOptOutAt?: string;
+  marketingOptOutSource?: 'affiliate_dashboard' | 'signed_email_link';
   releaseUpdates: boolean;
   campaignUpdates: boolean;
   inactivityReminders: boolean;
