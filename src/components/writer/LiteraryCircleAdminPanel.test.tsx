@@ -9,6 +9,7 @@ import {
   isFinancialLiteraryCirclePolicyChange,
   isoToLocalDateTime,
   localDateTimeToIso,
+  resolvePerformancePeriodSelection,
 } from './LiteraryCircleAdminPanel.js';
 
 const affiliate: AffiliatePublicProfile = {
@@ -19,7 +20,12 @@ const affiliate: AffiliatePublicProfile = {
   phone: '254700000001',
   status: 'active',
   payoutMethod: 'mpesa',
-  payoutDetails: {},
+  payoutDetails: {
+    mpesaPhone: '254711222333',
+    mpesaName: 'Private Payout Name',
+    bankAccountNumber: '9988776655',
+    paypalEmail: 'private-payout@example.test',
+  },
   totalClicks: 4,
   uniqueVisitors: 3,
   totalSalesCount: 1,
@@ -54,6 +60,11 @@ describe('LiteraryCircleAdminPanel', () => {
     expect(markup).toContain('Add bulletin item');
     expect(markup).toContain('Drafts stay writer-only');
     expect(markup).not.toContain('partner@example.test');
+    expect(markup).not.toContain('254700000001');
+    expect(markup).not.toContain('254711222333');
+    expect(markup).not.toContain('Private Payout Name');
+    expect(markup).not.toContain('9988776655');
+    expect(markup).not.toContain('private-payout@example.test');
   });
 
   it('round-trips valid local date-time values and rejects invalid values', () => {
@@ -135,7 +146,23 @@ describe('LiteraryCircleAdminPanel', () => {
     expect(markup).toContain('KES 75');
     expect(markup).toContain('Tier: literary-partner');
     expect(markup).toContain('Policy: v1');
+    expect(markup).toContain('aria-label="Affiliate monthly performance table"');
+    expect(markup).toContain('<caption class="sr-only">');
+    expect(markup).toContain('scope="col"');
+    expect(markup).toContain('tabindex="0"');
     expect(markup).not.toContain(affiliate.email);
+    expect(markup).not.toContain(affiliate.phone);
+    expect(markup).not.toContain(affiliate.payoutDetails.mpesaPhone);
+    expect(markup).not.toContain(affiliate.payoutDetails.mpesaName);
+    expect(markup).not.toContain(affiliate.payoutDetails.bankAccountNumber);
+    expect(markup).not.toContain(affiliate.payoutDetails.paypalEmail);
+  });
+
+  it('preserves a selected reporting month and falls back safely as reports arrive or change', () => {
+    expect(resolvePerformancePeriodSelection([], '')).toBe('');
+    expect(resolvePerformancePeriodSelection(['2026-10', '2026-09'], '')).toBe('2026-10');
+    expect(resolvePerformancePeriodSelection(['2026-10', '2026-09'], '2026-09')).toBe('2026-09');
+    expect(resolvePerformancePeriodSelection(['2026-11', '2026-10'], '2026-09')).toBe('2026-11');
   });
 
   it('distinguishes financial policy changes from ordinary programme copy edits', () => {

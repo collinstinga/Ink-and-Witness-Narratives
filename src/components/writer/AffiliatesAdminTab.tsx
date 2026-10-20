@@ -30,7 +30,8 @@ import {
   History,
   Tag,
   Images,
-  BellRing
+  BellRing,
+  BarChart3
 } from 'lucide-react';
 import { 
   AdminAffiliatesSummary, 
@@ -57,12 +58,13 @@ import {
 import { LiteraryCircleResourcesAdmin } from './LiteraryCircleResourcesAdmin.js';
 
 const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
+const LiteraryCircleAnalyticsAdmin = React.lazy(() => import('./LiteraryCircleAnalyticsAdmin.js'));
 
 interface AffiliatesAdminTabProps {
   articles: Article[];
 }
 
-type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'resources' | 'notifications' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
+type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'analytics' | 'resources' | 'notifications' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
 
 function hasWriterApproval(affiliate: AffiliateAccount): boolean {
   return typeof affiliate.approvedAt === 'string'
@@ -776,6 +778,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveSubTab('analytics')}
+          className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+            activeSubTab === 'analytics' ? 'bg-cyan-950 text-cyan-200 border border-cyan-700/80 shadow-sm' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <BarChart3 aria-hidden="true" className="w-3.5 h-3.5" />
+          <span>Circle Analytics</span>
+        </button>
+
+        <button
           onClick={() => setActiveSubTab('resources')}
           className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
             activeSubTab === 'resources' ? 'bg-violet-950 text-violet-200 border border-violet-700/80 shadow-sm' : 'text-slate-400 hover:text-slate-200'
@@ -1216,6 +1228,21 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 Literary Circle settings could not be loaded. Refresh the control center before making programme changes.
               </div>
             )
+          )}
+
+          {/* AGGREGATE-ONLY LITERARY CIRCLE ANALYTICS */}
+          {activeSubTab === 'analytics' && (
+            <React.Suspense fallback={(
+              <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-cyan-300/20 bg-cyan-950/10 text-sm text-cyan-100">
+                <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
+                Opening verified affiliate analytics…
+              </div>
+            )}>
+              <LiteraryCircleAnalyticsAdmin
+                affiliates={summary?.affiliates || []}
+                articles={articles}
+              />
+            </React.Suspense>
           )}
 
           {/* WRITER-APPROVED PROMOTIONAL RESOURCE LIBRARY */}

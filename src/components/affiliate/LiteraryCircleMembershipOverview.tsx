@@ -211,36 +211,44 @@ export const LiteraryCircleMembershipOverview: React.FC<LiteraryCircleMembership
               Verified sales and recorded earnings stay historical. A projected label means the tier policy was not active for that period.
             </p>
           </div>
-          <div className="mt-4 overflow-x-auto rounded-xl border border-white/10">
+          <div
+            role="region"
+            aria-label="Six-month affiliate performance table"
+            tabIndex={0}
+            className="mt-4 overflow-x-auto rounded-xl border border-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+          >
             <table className="min-w-[680px] w-full text-left text-xs">
+              <caption className="sr-only">
+                Verified sales, gross sales, commission, and performance tier for the last six months.
+              </caption>
               <thead className="bg-black/25 font-mono text-[10px] uppercase tracking-wide text-slate-400">
                 <tr>
-                  <th className="px-3 py-2.5">Month</th>
-                  <th className="px-3 py-2.5 text-right">Verified</th>
-                  <th className="px-3 py-2.5 text-right">Gross sales</th>
-                  <th className="px-3 py-2.5 text-right">Commission</th>
-                  <th className="px-3 py-2.5">Performance tier</th>
+                  <th scope="col" className="px-3 py-2.5">Month</th>
+                  <th scope="col" className="px-3 py-2.5 text-right">Verified</th>
+                  <th scope="col" className="px-3 py-2.5 text-right">Gross sales</th>
+                  <th scope="col" className="px-3 py-2.5 text-right">Commission</th>
+                  <th scope="col" className="px-3 py-2.5">Performance tier</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/10 bg-slate-950/35">
                 {summary.performancePeriods.map(period => (
                   <tr key={period.periodKey}>
-                    <td className="px-3 py-3 font-semibold text-slate-200">
+                    <th scope="row" className="px-3 py-3 font-semibold text-slate-200">
                       {periodLabel(period.periodKey)}{period.isCurrent ? ' · Current' : ''}
-                    </td>
+                    </th>
                     <td className="px-3 py-3 text-right font-mono text-cyan-200">
                       {period.verifiedSales}
                       {period.qualifyingSales !== period.verifiedSales && (
-                        <span className="block text-[9px] text-slate-500">{period.qualifyingSales} qualifying</span>
+                        <span className="block text-[11px] text-slate-500">{period.qualifyingSales} qualifying</span>
                       )}
-                      <span className="block text-[9px] text-slate-500">{period.pieceSales} pieces · {period.bundleSales} bundles · {period.subscriptionSales} passes</span>
-                      {period.reversedOrRejectedSales > 0 && <span className="block text-[9px] text-rose-300">{period.reversedOrRejectedSales} excluded</span>}
+                      <span className="block text-[11px] text-slate-500">{period.pieceSales} pieces · {period.bundleSales} bundles · {period.subscriptionSales} passes</span>
+                      {period.reversedOrRejectedSales > 0 && <span className="block text-[11px] text-rose-300">{period.reversedOrRejectedSales} excluded</span>}
                     </td>
                     <td className="px-3 py-3 text-right font-mono text-slate-300">KES {period.grossSalesKes.toLocaleString()}</td>
                     <td className="px-3 py-3 text-right font-mono font-bold text-emerald-300">KES {period.commissionEarnedKes.toLocaleString()}</td>
                     <td className="px-3 py-3">
                       <span className="font-semibold text-amber-100">{period.qualifiedTier.name}</span>
-                      <span className="ml-1 text-[9px] uppercase tracking-wide text-slate-500">{period.qualificationMode}</span>
+                      <span className="ml-1 text-[11px] uppercase tracking-wide text-slate-500">{period.qualificationMode}</span>
                     </td>
                   </tr>
                 ))}

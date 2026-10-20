@@ -365,5 +365,19 @@ describe('affiliate analytics aggregate report', () => {
       conversionRate: null,
     });
     expect(JSON.stringify(report)).not.toContain('must-not-be-reflected@example.test');
+
+    const emptyWithoutProjection = buildAffiliateAnalyticsReport({
+      affiliates: [affiliate('affiliate-1', 'PARTNER1')],
+      commissions: [],
+      startDate: '2026-10-01',
+      endDate: '2026-10-31',
+    });
+    expect(emptyWithoutProjection.buyerMetrics).toMatchObject({
+      coverage: 'unavailable',
+      uniquePayingReaders: null,
+      newAffiliateAcquiredReaders: null,
+      repeatPurchases: null,
+      repeatPayingReaders: null,
+    });
   });
 });

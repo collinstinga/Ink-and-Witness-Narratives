@@ -145,3 +145,12 @@ address, or a browser fingerprint as a buyer identity. The Writer Portal must
 receive aggregate counts only; HMAC keys and source identities remain
 server-side. Click conversion must stay unavailable until the selected window's
 durable click-history coverage can be proven.
+
+The Writer Studio now has a local-only, aggregate analytics checkpoint that
+reuses the already-loaded affiliate, commission, and retained click ledgers.
+It performs no additional Firestore reads or writes. Buyer metrics therefore
+remain unavailable, and the capped 90-day click cache is labelled partial with
+conversion withheld. Do not connect the HMAC buyer projection to this route or
+hydrate the transaction ledger until a bounded staging rehearsal has proved
+privacy, idempotency, and quota cost. See
+`docs/checkpoints/2026-10-20-literary-circle-writer-analytics.md`.

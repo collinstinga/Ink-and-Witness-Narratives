@@ -55,6 +55,8 @@ import {
   LiteraryCircleSettingsConflictError,
   sanitizeAffiliateForResponse
 } from "./src/server/affiliateStore.js";
+import { AffiliateAnalyticsValidationError } from "./src/server/affiliateAnalytics.js";
+import { parseAffiliateAnalyticsQuery } from "./src/server/affiliateAnalyticsRequest.js";
 import {
   isAffiliateComplimentaryAccessActive,
   isLiteraryCircleCommissionPolicyChange,
@@ -6747,6 +6749,23 @@ ${currentDraft || prompt}
       res.json(summary);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch admin affiliates summary." });
+    }
+  });
+
+  // Admin: Aggregate-only affiliate analytics. This route deliberately uses
+  // the already-loaded ledgers and never hydrates customer transactions.
+  app.get("/api/admin/affiliates/analytics", requireAdminAuth, (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    try {
+      const options = parseAffiliateAnalyticsQuery(req.query as Record<string, unknown>);
+      res.json(store.affiliates.getAdminAffiliateAnalytics(options));
+    } catch (err) {
+      if (err instanceof AffiliateAnalyticsValidationError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      console.error('[AffiliateAnalytics] Failed to build writer report:', err);
+      res.status(500).json({ error: 'Affiliate analytics could not be loaded right now.' });
     }
   });
 

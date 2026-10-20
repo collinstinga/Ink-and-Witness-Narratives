@@ -445,6 +445,42 @@ describe('affiliate store Literary Circle integration', () => {
         periods: expect.arrayContaining([expect.objectContaining({ verifiedSales: 1, grossSalesKes: 500 })]),
       }),
     ]));
+
+    const databaseCallsBeforeAnalytics = {
+      reads: firestore.getAllDocs.mock.calls.length + firestore.getDoc.mock.calls.length,
+      writes: firestore.setDoc.mock.calls.length
+        + firestore.replaceDoc.mock.calls.length
+        + firestore.updateDoc.mock.calls.length
+        + firestore.deleteDoc.mock.calls.length
+        + firestore.runTransaction.mock.calls.length,
+    };
+    const analytics = affiliateStore.getAdminAffiliateAnalytics();
+    expect(analytics).toMatchObject({
+      totals: {
+        verifiedSales: 2,
+        grossSalesKes: 1000,
+        commissionsRecordedKes: 150,
+      },
+      buyerMetrics: {
+        coverage: 'unavailable',
+        uniquePayingReaders: null,
+      },
+      referralTraffic: {
+        coverage: 'partial',
+        reason: 'incomplete_history',
+        conversionRate: null,
+      },
+    });
+    expect(JSON.stringify(analytics)).not.toContain('circle-first@example.test');
+    expect(JSON.stringify(analytics)).not.toContain('254700000101');
+    expect({
+      reads: firestore.getAllDocs.mock.calls.length + firestore.getDoc.mock.calls.length,
+      writes: firestore.setDoc.mock.calls.length
+        + firestore.replaceDoc.mock.calls.length
+        + firestore.updateDoc.mock.calls.length
+        + firestore.deleteDoc.mock.calls.length
+        + firestore.runTransaction.mock.calls.length,
+    }).toEqual(databaseCallsBeforeAnalytics);
   });
 
   it('atomically updates access, manual tier and additive founding recognition', async () => {

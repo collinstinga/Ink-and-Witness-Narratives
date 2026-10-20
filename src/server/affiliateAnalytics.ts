@@ -2,6 +2,9 @@ import crypto from 'crypto';
 
 import type {
   AffiliateAccount,
+  AffiliateAnalyticsFilters,
+  AffiliateAnalyticsReport,
+  AffiliateAnalyticsWindow,
   AffiliateClickEvent,
   AffiliateSaleCommission,
   PaymentTransaction,
@@ -23,92 +26,7 @@ export class AffiliateAnalyticsValidationError extends Error {
   }
 }
 
-export interface AffiliateAnalyticsWindow {
-  startDate: string;
-  endDate: string;
-  startsAt: string;
-  endsAt: string;
-  days: number;
-  timeZone: typeof NAIROBI_TIME_ZONE;
-}
-
-export interface AffiliateAnalyticsFilters {
-  affiliateId?: string;
-  articleId?: string;
-  purchaseKind?: 'piece' | 'bundle' | 'subscription';
-  subscriptionPlanId?: string;
-  literaryCircleTierId?: string;
-}
-
-export interface AffiliateAnalyticsReport {
-  generatedAt: string;
-  window: AffiliateAnalyticsWindow;
-  filters: AffiliateAnalyticsFilters;
-  accounts: {
-    registered: number;
-    active: number;
-    pending: number;
-    suspended: number;
-    withLifetimeVerifiedSales: number;
-    withoutLifetimeVerifiedSales: number;
-    withVerifiedSalesInWindow: number;
-  };
-  totals: {
-    verifiedSales: number;
-    pieceSales: number;
-    bundleSales: number;
-    subscriptionSales: number;
-    grossSalesKes: number;
-    commissionsRecordedKes: number;
-    commissionsPaidKes: number;
-    retainedRevenueKes: number;
-  };
-  buyerMetrics: {
-    coverage: 'complete' | 'partial' | 'unavailable';
-    identifiedSales: number;
-    unidentifiedSales: number;
-    uniquePayingReaders: number | null;
-    newAffiliateAcquiredReaders: number | null;
-    repeatPurchases: number | null;
-    repeatPayingReaders: number | null;
-  };
-  referralTraffic: {
-    coverage: 'complete' | 'partial' | 'unavailable';
-    reason: 'complete' | 'not_provided' | 'incomplete_history' | 'unsupported_filter';
-    clicks: number | null;
-    knownUniqueVisitors: number | null;
-    clicksWithoutVisitorKey: number | null;
-    conversionRate: number | null;
-  };
-  monthly: Array<{
-    periodKey: string;
-    verifiedSales: number;
-    grossSalesKes: number;
-    commissionsRecordedKes: number;
-    retainedRevenueKes: number;
-  }>;
-  topAffiliates: Array<{
-    affiliateId: string;
-    affiliateCode: string;
-    affiliateName: string;
-    verifiedSales: number;
-    grossSalesKes: number;
-    commissionsRecordedKes: number;
-    retainedRevenueKes: number;
-  }>;
-  topOffers: Array<{
-    purchaseKind: 'piece' | 'bundle' | 'subscription';
-    offerId: string;
-    title: string;
-    verifiedSales: number;
-    grossSalesKes: number;
-  }>;
-  integrity: {
-    invalidRecordsExcluded: number;
-    unverifiedRecordsExcluded: number;
-    duplicateRecordsExcluded: number;
-  };
-}
+export type { AffiliateAnalyticsFilters, AffiliateAnalyticsReport, AffiliateAnalyticsWindow } from '../types.js';
 
 export interface AffiliateBuyerKeyProjection {
   keysByCommissionId: Record<string, string>;
@@ -518,6 +436,7 @@ export function buildAffiliateAnalyticsReport(options: {
   totals.commissionsPaidKes = roundKes(totals.commissionsPaidKes);
   totals.retainedRevenueKes = roundKes(totals.retainedRevenueKes);
 
+  const buyerProjectionProvided = options.buyerKeysByCommissionId !== undefined;
   const buyerKeys = options.buyerKeysByCommissionId || {};
   const selectedIdentities = selected.flatMap(commission => {
     const key = buyerKeys[commission.id];
@@ -547,11 +466,13 @@ export function buildAffiliateAnalyticsReport(options: {
     const first = earliestAffiliatePurchase.get(item.key);
     return first !== undefined && Date.parse(item.commission.createdAt) > first.createdAt;
   });
-  const buyerCoverage = selected.length === 0 || selectedIdentities.length === selected.length
-    ? 'complete' as const
-    : selectedIdentities.length > 0
-      ? 'partial' as const
-      : 'unavailable' as const;
+  const buyerCoverage = !buyerProjectionProvided
+    ? 'unavailable' as const
+    : selected.length === 0 || selectedIdentities.length === selected.length
+      ? 'complete' as const
+      : selectedIdentities.length > 0
+        ? 'partial' as const
+        : 'unavailable' as const;
 
   let referralTraffic: AffiliateAnalyticsReport['referralTraffic'];
   const clickFilterUnsupported = Boolean(filters.purchaseKind || filters.subscriptionPlanId || filters.literaryCircleTierId);

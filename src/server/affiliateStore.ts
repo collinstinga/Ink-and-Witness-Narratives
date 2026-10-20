@@ -19,8 +19,10 @@ import {
   AffiliateCampaign, 
   AffiliateSettings, 
   AffiliateAuditLogEntry, 
-  AffiliateDashboardStats, 
+  AffiliateDashboardStats,
   AdminAffiliatesSummary,
+  AffiliateAnalyticsFilters,
+  AffiliateAnalyticsReport,
   AffiliateStatus,
   CommissionStatus,
   PayoutStatus,
@@ -31,6 +33,7 @@ import {
   LiteraryCircleOnboardingStatus,
   LiteraryCircleSettings
 } from '../types.js';
+import { buildAffiliateAnalyticsReport } from './affiliateAnalytics.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
@@ -2582,6 +2585,26 @@ export const affiliateStore = {
       literaryCirclePerformance,
       topAffiliates
     };
+  },
+
+  getAdminAffiliateAnalytics(options: {
+    startDate?: string;
+    endDate?: string;
+    filters?: AffiliateAnalyticsFilters;
+    now?: Date;
+  } = {}): AffiliateAnalyticsReport {
+    return buildAffiliateAnalyticsReport({
+      affiliates: cachedAffiliates,
+      commissions: cachedCommissions,
+      clickEvents: cachedClicks,
+      // The local click ledger is retained for only 90 days and capped, so it
+      // must never be represented as complete historical coverage.
+      clickHistoryCompleteForWindow: false,
+      startDate: options.startDate,
+      endDate: options.endDate,
+      filters: options.filters,
+      now: options.now,
+    });
   },
 
   // SESSIONS

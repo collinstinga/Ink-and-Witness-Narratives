@@ -141,6 +141,10 @@ describe('LiteraryCircleMembershipOverview', () => {
     expect(markup).toContain('KES 1,400');
     expect(markup).toContain('KES 280');
     expect(markup).toContain('projected');
+    expect(markup).toContain('aria-label="Six-month affiliate performance table"');
+    expect(markup).toContain('<caption class="sr-only">');
+    expect(markup).toContain('scope="col"');
+    expect(markup).toContain('tabindex="0"');
   });
 
   it('allows only secure external community invitation links', () => {

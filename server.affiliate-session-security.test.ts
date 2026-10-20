@@ -131,6 +131,7 @@ const affiliateMocks = vi.hoisted(() => ({
   getCampaigns: vi.fn(),
   getAuditLogs: vi.fn(),
   getAuditLogsFresh: vi.fn(),
+  getAdminAffiliateAnalytics: vi.fn(),
   createAffiliate: vi.fn(),
   updateAffiliate: vi.fn(),
   updateAffiliateCredential: vi.fn(),
@@ -330,6 +331,7 @@ describe('affiliate session route boundaries', () => {
     affiliateMocks.getCampaigns.mockReturnValue([]);
     affiliateMocks.getAuditLogs.mockReturnValue([]);
     affiliateMocks.getAuditLogsFresh.mockResolvedValue([]);
+    affiliateMocks.getAdminAffiliateAnalytics.mockReturnValue({ report: 'aggregate-only' });
     affiliateMocks.createAffiliate.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.updateAffiliate.mockImplementation((_id, patch) => ({
       ...privateAffiliate,
@@ -997,6 +999,38 @@ describe('affiliate session route boundaries', () => {
     });
     expect(detailResponse.status).toBe(200);
     expect(affiliateMocks.getAffiliateById).toHaveBeenCalledWith(privateAffiliate.id);
+  });
+
+  it('keeps aggregate affiliate analytics writer-only, no-store, and query allow-listed', async () => {
+    const anonymous = await fetch(`${baseUrl}/api/admin/affiliates/analytics`);
+    expect(anonymous.status).toBe(401);
+    expect(affiliateMocks.getAdminAffiliateAnalytics).not.toHaveBeenCalled();
+
+    const response = await fetch(
+      `${baseUrl}/api/admin/affiliates/analytics?startDate=2026-10-01&endDate=2026-10-20&affiliateId=aff_test_1&purchaseKind=piece&readerEmail=private%40example.test&buyerKey=abk1_private`,
+      { headers: { cookie: `iw_session=${adminSessionToken}` } },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({ report: 'aggregate-only' });
+    expect(affiliateMocks.getAdminAffiliateAnalytics).toHaveBeenCalledWith({
+      startDate: '2026-10-01',
+      endDate: '2026-10-20',
+      filters: {
+        affiliateId: 'aff_test_1',
+        purchaseKind: 'piece',
+      },
+    });
+
+    affiliateMocks.getAdminAffiliateAnalytics.mockClear();
+    const invalid = await fetch(`${baseUrl}/api/admin/affiliates/analytics?purchaseKind=tip`, {
+      headers: { cookie: `iw_session=${adminSessionToken}` },
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({
+      error: 'Purchase type must be piece, bundle, or subscription.',
+    });
+    expect(affiliateMocks.getAdminAffiliateAnalytics).not.toHaveBeenCalled();
   });
 
   it('loads admin affiliate audits from the shared store and fails closed if that read is unavailable', async () => {

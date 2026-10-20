@@ -124,10 +124,18 @@ const fieldClass = 'min-h-11 w-full rounded-xl border border-slate-700 bg-slate-
 
 const PerformanceMetric: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <article className="rounded-xl border border-cyan-300/15 bg-slate-950/45 p-3">
-    <p className="font-mono text-[9px] font-bold uppercase tracking-wider text-slate-500">{label}</p>
+    <p className="font-mono text-[11px] font-bold uppercase tracking-wider text-slate-500">{label}</p>
     <p className="mt-1 font-serif text-lg font-bold text-cyan-100">{value}</p>
   </article>
 );
+
+export function resolvePerformancePeriodSelection(
+  availablePeriods: string[],
+  selectedPeriod: string,
+): string {
+  if (!availablePeriods.length) return '';
+  return availablePeriods.includes(selectedPeriod) ? selectedPeriod : availablePeriods[0];
+}
 
 const MembershipRow: React.FC<{
   affiliate: AffiliatePublicProfile;
@@ -308,13 +316,11 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
   }), { verifiedSales: 0, grossSalesKes: 0, commissionEarnedKes: 0, retainedRevenueKes: 0 }), [selectedPerformanceRows]);
 
   useEffect(() => {
-    if (!availablePerformancePeriods.length) {
-      if (selectedPerformancePeriod) setSelectedPerformancePeriod('');
-      return;
-    }
-    if (!availablePerformancePeriods.includes(selectedPerformancePeriod)) {
-      setSelectedPerformancePeriod(availablePerformancePeriods[0]);
-    }
+    const nextPeriod = resolvePerformancePeriodSelection(
+      availablePerformancePeriods,
+      selectedPerformancePeriod,
+    );
+    if (nextPeriod !== selectedPerformancePeriod) setSelectedPerformancePeriod(nextPeriod);
   }, [availablePerformancePeriods, selectedPerformancePeriod]);
 
   const updateDraft = (next: LiteraryCircleSettings) => {
@@ -720,37 +726,45 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
             <PerformanceMetric label="Retained before other costs" value={`KES ${selectedPerformanceTotals.retainedRevenueKes.toLocaleString()}`} />
           </div>
 
-          <div className="mt-4 overflow-x-auto rounded-xl border border-slate-700/80">
+          <div
+            role="region"
+            aria-label="Affiliate monthly performance table"
+            tabIndex={0}
+            className="mt-4 overflow-x-auto rounded-xl border border-slate-700/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+          >
             <table className="min-w-[920px] w-full text-left text-xs">
+              <caption className="sr-only">
+                Affiliate performance, earnings, tier qualification, and recorded policy snapshots for the selected month.
+              </caption>
               <thead className="bg-slate-950/80 font-mono text-[10px] uppercase tracking-wide text-slate-400">
                 <tr>
-                  <th className="px-3 py-2.5">Partner</th>
-                  <th className="px-3 py-2.5 text-right">Verified</th>
-                  <th className="px-3 py-2.5 text-right">Gross</th>
-                  <th className="px-3 py-2.5 text-right">Commission</th>
-                  <th className="px-3 py-2.5">Performance tier</th>
-                  <th className="px-3 py-2.5">Recorded snapshots</th>
+                  <th scope="col" className="px-3 py-2.5">Partner</th>
+                  <th scope="col" className="px-3 py-2.5 text-right">Verified</th>
+                  <th scope="col" className="px-3 py-2.5 text-right">Gross</th>
+                  <th scope="col" className="px-3 py-2.5 text-right">Commission</th>
+                  <th scope="col" className="px-3 py-2.5">Performance tier</th>
+                  <th scope="col" className="px-3 py-2.5">Recorded snapshots</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 bg-slate-950/35">
                 {selectedPerformanceRows.map(({ report, period }) => (
                   <tr key={report.affiliateId}>
-                    <td className="px-3 py-3">
+                    <th scope="row" className="px-3 py-3 text-left">
                       <span className="font-semibold text-slate-100">{report.affiliateName}</span>
                       <span className="ml-2 font-mono text-[10px] text-cyan-300">{report.affiliateCode}</span>
-                      {report.manuallyAssignedTierId && <span className="block text-[9px] text-amber-300">Manual assignment: {report.manuallyAssignedTierId}</span>}
-                    </td>
+                      {report.manuallyAssignedTierId && <span className="block text-[11px] text-amber-300">Manual assignment: {report.manuallyAssignedTierId}</span>}
+                    </th>
                     <td className="px-3 py-3 text-right font-mono text-cyan-200">
                       {period.verifiedSales}
-                      {period.qualifyingSales !== period.verifiedSales && <span className="block text-[9px] text-slate-500">{period.qualifyingSales} qualifying</span>}
-                      <span className="block text-[9px] text-slate-500">{period.pieceSales} pieces · {period.bundleSales} bundles · {period.subscriptionSales} passes</span>
-                      {period.reversedOrRejectedSales > 0 && <span className="block text-[9px] text-rose-300">{period.reversedOrRejectedSales} excluded</span>}
+                      {period.qualifyingSales !== period.verifiedSales && <span className="block text-[11px] text-slate-500">{period.qualifyingSales} qualifying</span>}
+                      <span className="block text-[11px] text-slate-500">{period.pieceSales} pieces · {period.bundleSales} bundles · {period.subscriptionSales} passes</span>
+                      {period.reversedOrRejectedSales > 0 && <span className="block text-[11px] text-rose-300">{period.reversedOrRejectedSales} excluded</span>}
                     </td>
                     <td className="px-3 py-3 text-right font-mono text-slate-300">KES {period.grossSalesKes.toLocaleString()}</td>
                     <td className="px-3 py-3 text-right font-mono font-bold text-emerald-300">KES {period.commissionEarnedKes.toLocaleString()}</td>
                     <td className="px-3 py-3">
                       <span className="font-semibold text-amber-100">{period.qualifiedTier.name}</span>
-                      <span className="ml-1 text-[9px] uppercase text-slate-500">{period.qualificationMode}</span>
+                      <span className="ml-1 text-[11px] uppercase text-slate-500">{period.qualificationMode}</span>
                     </td>
                     <td className="px-3 py-3 font-mono text-[10px] text-slate-400">
                       {period.recordedTierIds.length ? `Tier: ${period.recordedTierIds.join(', ')}` : 'No tier-rate sale'}

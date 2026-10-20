@@ -21,6 +21,8 @@ import {
   AffiliateSettings,
   AffiliateAuditLogEntry,
   AdminAffiliatesSummary,
+  AffiliateAnalyticsFilters,
+  AffiliateAnalyticsReport,
   ReaderLicense,
   UserLibraryResponse,
   HomepageConfig,
@@ -2726,6 +2728,33 @@ export const api = {
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load affiliates summary.'
+    );
+  },
+
+  async getAdminAffiliateAnalytics(
+    options: AffiliateAnalyticsFilters & { startDate?: string; endDate?: string } = {}
+  ): Promise<AffiliateAnalyticsReport> {
+    const activeToken = getWriterToken();
+    const query = new URLSearchParams();
+    const append = (key: string, value: string | undefined) => {
+      const normalized = value?.trim();
+      if (normalized) query.set(key, normalized);
+    };
+    append('startDate', options.startDate);
+    append('endDate', options.endDate);
+    append('affiliateId', options.affiliateId);
+    append('articleId', options.articleId);
+    append('purchaseKind', options.purchaseKind);
+    append('subscriptionPlanId', options.subscriptionPlanId);
+    append('literaryCircleTierId', options.literaryCircleTierId);
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return safeFetchJson<AffiliateAnalyticsReport>(
+      `/api/admin/affiliates/analytics${suffix}`,
+      {
+        cache: 'no-store',
+        headers: { 'x-admin-token': activeToken || '' }
+      },
+      'Failed to load affiliate analytics.'
     );
   },
 

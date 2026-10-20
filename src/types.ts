@@ -1687,6 +1687,94 @@ export interface LiteraryCircleDashboardSummary {
   performancePeriods?: LiteraryCirclePerformancePeriod[];
 }
 
+export interface AffiliateAnalyticsWindow {
+  startDate: string;
+  endDate: string;
+  startsAt: string;
+  endsAt: string;
+  days: number;
+  timeZone: 'Africa/Nairobi';
+}
+
+export interface AffiliateAnalyticsFilters {
+  affiliateId?: string;
+  articleId?: string;
+  purchaseKind?: 'piece' | 'bundle' | 'subscription';
+  subscriptionPlanId?: string;
+  literaryCircleTierId?: string;
+}
+
+/** Aggregate-only writer analytics. This response intentionally contains no reader identifiers. */
+export interface AffiliateAnalyticsReport {
+  generatedAt: string;
+  window: AffiliateAnalyticsWindow;
+  filters: AffiliateAnalyticsFilters;
+  accounts: {
+    registered: number;
+    active: number;
+    pending: number;
+    suspended: number;
+    withLifetimeVerifiedSales: number;
+    withoutLifetimeVerifiedSales: number;
+    withVerifiedSalesInWindow: number;
+  };
+  totals: {
+    verifiedSales: number;
+    pieceSales: number;
+    bundleSales: number;
+    subscriptionSales: number;
+    grossSalesKes: number;
+    commissionsRecordedKes: number;
+    commissionsPaidKes: number;
+    retainedRevenueKes: number;
+  };
+  buyerMetrics: {
+    coverage: 'complete' | 'partial' | 'unavailable';
+    identifiedSales: number;
+    unidentifiedSales: number;
+    uniquePayingReaders: number | null;
+    newAffiliateAcquiredReaders: number | null;
+    repeatPurchases: number | null;
+    repeatPayingReaders: number | null;
+  };
+  referralTraffic: {
+    coverage: 'complete' | 'partial' | 'unavailable';
+    reason: 'complete' | 'not_provided' | 'incomplete_history' | 'unsupported_filter';
+    clicks: number | null;
+    knownUniqueVisitors: number | null;
+    clicksWithoutVisitorKey: number | null;
+    conversionRate: number | null;
+  };
+  monthly: Array<{
+    periodKey: string;
+    verifiedSales: number;
+    grossSalesKes: number;
+    commissionsRecordedKes: number;
+    retainedRevenueKes: number;
+  }>;
+  topAffiliates: Array<{
+    affiliateId: string;
+    affiliateCode: string;
+    affiliateName: string;
+    verifiedSales: number;
+    grossSalesKes: number;
+    commissionsRecordedKes: number;
+    retainedRevenueKes: number;
+  }>;
+  topOffers: Array<{
+    purchaseKind: 'piece' | 'bundle' | 'subscription';
+    offerId: string;
+    title: string;
+    verifiedSales: number;
+    grossSalesKes: number;
+  }>;
+  integrity: {
+    invalidRecordsExcluded: number;
+    unverifiedRecordsExcluded: number;
+    duplicateRecordsExcluded: number;
+  };
+}
+
 export interface AdminAffiliatesSummary {
   totalAffiliates: number;
   activeAffiliates: number;
