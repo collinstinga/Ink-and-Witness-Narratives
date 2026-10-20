@@ -154,3 +154,14 @@ conversion withheld. Do not connect the HMAC buyer projection to this route or
 hydrate the transaction ledger until a bounded staging rehearsal has proved
 privacy, idempotency, and quota cost. See
 `docs/checkpoints/2026-10-20-literary-circle-writer-analytics.md`.
+
+The next local-only checkpoint adds privacy-safe durable-click primitives but
+does not connect them to a route, cookie, Firestore collection, counter, or
+analytics response. A future visitor pseudonym is derived from a signed random
+nonce rather than an IP address or browser fingerprint. The v2 event validator
+also rejects unknown/private request fields and minimises referrers to their
+origin. Runtime integration requires a protected staging
+`AFFILIATE_CLICK_ANALYTICS_SECRET`, an activation marker, bounded query proof,
+an explicit retention decision, and transaction-level idempotency. Existing
+legacy `affiliate_clicks` documents must be preserved verbatim. See
+`docs/checkpoints/2026-10-20-literary-circle-durable-click-primitives.md`.
