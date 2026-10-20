@@ -128,3 +128,20 @@ against the highest policy version that was effective when the transaction
 occurred; completed commission records remain immutable. Subscription renewals
 fail closed unless the effective snapshot explicitly permits renewal
 commission.
+
+## Privacy-preserving affiliate analytics checkpoint
+
+The local branch contains server-only analytics primitives that can derive a
+versioned, non-reversible buyer pseudonym from a verified reader account or a
+settled Kenyan M-PESA payer phone using HMAC-SHA-256. They are not connected to
+production, do not read an environment secret, and do not store or backfill a
+field. Backup schema version 3 therefore remains unchanged.
+
+Before enabling new-reader or repeat-purchase analytics, provision a dedicated
+protected `AFFILIATE_ANALYTICS_HMAC_SECRET` with at least 32 bytes in staging,
+document rotation behavior, and rehearse the date-bounded join against the
+verified backup. Never use an unkeyed phone/email hash, a receipt number, an IP
+address, or a browser fingerprint as a buyer identity. The Writer Portal must
+receive aggregate counts only; HMAC keys and source identities remain
+server-side. Click conversion must stay unavailable until the selected window's
+durable click-history coverage can be proven.
