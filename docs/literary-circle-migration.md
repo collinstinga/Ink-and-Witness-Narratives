@@ -165,3 +165,17 @@ origin. Runtime integration requires a protected staging
 an explicit retention decision, and transaction-level idempotency. Existing
 legacy `affiliate_clicks` documents must be preserved verbatim. See
 `docs/checkpoints/2026-10-20-literary-circle-durable-click-primitives.md`.
+
+The gated runtime integration is also present locally, but its default mode is
+`off`, so it has no new production behavior until an environment is explicitly
+staged. `shadow` mode uses the dedicated click key and random first-party
+visitor pseudonym to dual-write deterministic v2 events while retaining the
+current rolling legacy counter and unique-visitor decisions; `required` mode
+then cuts over to deterministic event existence and fails accepted tracking
+closed if the same atomic transaction cannot create the event and increment
+the affiliate/campaign counters. Legacy click documents are never enumerated,
+rewritten, deleted, or assigned TTL. Do not activate this
+path until the protected staging key, guarded nine-affiliate backup, event and
+quota verification, separately reviewed bounded query, and immutable future
+`completeFrom` marker are all ready. See
+`docs/checkpoints/2026-10-21-literary-circle-durable-click-runtime.md`.

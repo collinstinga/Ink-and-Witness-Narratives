@@ -51,9 +51,11 @@ import {
 } from "./src/server/analyticsStore.js";
 import { fetchLiveExchangeRates, convertToKes, SUPPORTED_CURRENCIES } from "./src/server/exchangeRates.js";
 import {
+  AffiliateClickLedgerUnavailableError,
   AffiliateSettingsValidationError,
   LiteraryCircleSettingsConflictError,
-  sanitizeAffiliateForResponse
+  sanitizeAffiliateForResponse,
+  type AffiliateClickLedgerMode,
 } from "./src/server/affiliateStore.js";
 import { AffiliateAnalyticsValidationError } from "./src/server/affiliateAnalytics.js";
 import { parseAffiliateAnalyticsQuery } from "./src/server/affiliateAnalyticsRequest.js";
@@ -103,6 +105,12 @@ import {
   createAffiliateClickDedupCookieValue,
   isMatchingAffiliateClickDedupCookie
 } from "./src/server/affiliateClickDedupSecurity.js";
+import {
+  AFFILIATE_CLICK_VISITOR_COOKIE_NAME,
+  AFFILIATE_CLICK_VISITOR_DEFAULT_MAX_AGE_MS,
+  createAffiliateClickVisitorCookieValue,
+  verifyAffiliateClickVisitorCookie,
+} from "./src/server/affiliateClickLedger.js";
 import {
   AFFILIATE_ATTRIBUTION_COOKIE_NAME,
   AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS,
@@ -892,6 +900,77 @@ function clearAffiliateClickDedupCookie(res: Response) {
     secure: isProduction,
     sameSite: 'lax',
     path: '/api/affiliate/click'
+  });
+}
+
+function resolveAffiliateClickLedgerRuntime(): {
+  mode: AffiliateClickLedgerMode;
+  signingSecret: string | null;
+} {
+  const configuredMode = String(process.env.AFFILIATE_CLICK_LEDGER_MODE || '').trim().toLowerCase();
+  const mode: AffiliateClickLedgerMode = configuredMode === 'shadow' || configuredMode === 'required'
+    ? configuredMode
+    : 'off';
+  const candidate = String(process.env.AFFILIATE_CLICK_ANALYTICS_SECRET || '').trim();
+  return {
+    mode,
+    signingSecret: candidate.length >= 32 ? candidate : null,
+  };
+}
+
+function prepareAffiliateClickVisitor(req: Request): {
+  mode: AffiliateClickLedgerMode;
+  visitorKey?: string;
+  replacementCookie?: string;
+  replacementMaxAgeMs?: number;
+} {
+  const runtime = resolveAffiliateClickLedgerRuntime();
+  if (runtime.mode === 'off') return { mode: 'off' };
+  if (!runtime.signingSecret) {
+    if (runtime.mode === 'required') throw new AffiliateClickLedgerUnavailableError();
+    return { mode: runtime.mode };
+  }
+
+  const now = Date.now();
+  const rawCookie = (req as any).cookies?.[AFFILIATE_CLICK_VISITOR_COOKIE_NAME];
+  const existing = verifyAffiliateClickVisitorCookie(rawCookie, {
+    now,
+    signingSecret: runtime.signingSecret,
+  });
+  if (existing) return { mode: runtime.mode, visitorKey: existing.visitorKey };
+
+  const replacementCookie = createAffiliateClickVisitorCookieValue({
+    now,
+    maxAgeMs: AFFILIATE_CLICK_VISITOR_DEFAULT_MAX_AGE_MS,
+    signingSecret: runtime.signingSecret,
+  });
+  const replacement = verifyAffiliateClickVisitorCookie(replacementCookie, {
+    now,
+    signingSecret: runtime.signingSecret,
+  });
+  if (!replacementCookie || !replacement) {
+    if (runtime.mode === 'required') throw new AffiliateClickLedgerUnavailableError();
+    return { mode: runtime.mode };
+  }
+  return {
+    mode: runtime.mode,
+    visitorKey: replacement.visitorKey,
+    replacementCookie,
+    replacementMaxAgeMs: replacement.expiresAt - now,
+  };
+}
+
+function setAffiliateClickVisitorCookie(
+  res: Response,
+  cookieValue: string,
+  maxAgeMs: number,
+) {
+  res.cookie(AFFILIATE_CLICK_VISITOR_COOKIE_NAME, cookieValue, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: Math.max(1, Math.min(AFFILIATE_CLICK_VISITOR_DEFAULT_MAX_AGE_MS, Math.floor(maxAgeMs))),
+    path: '/',
   });
 }
 
@@ -2352,6 +2431,7 @@ export async function createApp() {
 
   // Affiliate / Referral Redirect Tracking Route
   app.get(["/r/:code", "/api/affiliate/redirect/:code"], publicWriteLimiter, referralClickLimiter, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
     const destination = resolveAffiliateReferralDestination(req.query);
     const trackingTarget = getAffiliateReferralTrackingTarget(destination);
     const fallbackLocation = buildAffiliateReferralLandingLocation(destination);
@@ -2370,17 +2450,28 @@ export async function createApp() {
       const userAgent = (req.headers["user-agent"] as string || "").substring(0, 150);
       const referrer = (req.headers["referer"] || req.headers["referrer"] || "") as string;
       const ipHash = crypto.createHash("sha256").update(ip + userAgent).digest("hex").substring(0, 16);
+      const visitor = prepareAffiliateClickVisitor(req);
 
       // The durable click transaction performs the authoritative, fresh affiliate
       // status check. This remains correct even when the runtime cache is cold.
-      const clickResult = await store.affiliates.registerClick(
-        code,
-        trackingTarget,
-        campaignCode || undefined,
-        ipHash,
-        userAgent,
-        referrer
-      );
+      const clickResult = visitor.mode === 'off'
+        ? await store.affiliates.registerClick(
+            code,
+            trackingTarget,
+            campaignCode || undefined,
+            ipHash,
+            userAgent,
+            referrer
+          )
+        : await store.affiliates.registerClick(
+            code,
+            trackingTarget,
+            campaignCode || undefined,
+            ipHash,
+            userAgent,
+            referrer,
+            { durableMode: visitor.mode, visitorKey: visitor.visitorKey }
+          );
 
       if (!clickResult.valid || !clickResult.affiliate) {
         return res.redirect(302, fallbackLocation);
@@ -2393,6 +2484,13 @@ export async function createApp() {
         articleId: trackingTarget,
         campaign: canonicalCampaignCode
       };
+      if (visitor.replacementCookie && visitor.replacementMaxAgeMs) {
+        setAffiliateClickVisitorCookie(
+          res,
+          visitor.replacementCookie,
+          visitor.replacementMaxAgeMs
+        );
+      }
       const clickDedupCookie = createAffiliateClickDedupCookieValue(attribution);
       if (clickDedupCookie) setAffiliateClickDedupCookie(res, clickDedupCookie);
       const attributionSet = setVerifiedAffiliateAttribution(
@@ -6030,7 +6128,14 @@ ${currentDraft || prompt}
   // ==========================================
 
   // Public: Register Referral Click (Attribution)
-  app.post("/api/affiliate/click", publicWriteLimiter, referralClickLimiter, publicWriteValidators.affiliateClick, async (req: Request, res: Response) => {
+  app.post(
+    "/api/affiliate/click",
+    publicWriteLimiter,
+    referralClickLimiter,
+    requireSameOriginPublicWrite,
+    publicWriteValidators.affiliateClick,
+    async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
       const { ref, articleId, campaign } = req.body;
       if (!ref) {
@@ -6050,9 +6155,27 @@ ${currentDraft || prompt}
       const userAgent = String(req.headers['user-agent'] || '').substring(0, 150);
       const referrer = String(req.headers.referer || '').substring(0, 200);
       const ipHash = crypto.createHash('sha256').update(ip + userAgent).digest('hex').substring(0, 16);
+      const visitor = prepareAffiliateClickVisitor(req);
 
-      const result = await store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer);
+      const result = visitor.mode === 'off'
+        ? await store.affiliates.registerClick(ref, articleId, campaign, ipHash, userAgent, referrer)
+        : await store.affiliates.registerClick(
+            ref,
+            articleId,
+            campaign,
+            ipHash,
+            userAgent,
+            referrer,
+            { durableMode: visitor.mode, visitorKey: visitor.visitorKey }
+          );
       if (result.valid && result.affiliate) {
+        if (visitor.replacementCookie && visitor.replacementMaxAgeMs) {
+          setAffiliateClickVisitorCookie(
+            res,
+            visitor.replacementCookie,
+            visitor.replacementMaxAgeMs
+          );
+        }
         const attributionSet = setVerifiedAffiliateAttribution(res, {
           ref: result.affiliate.affiliateCode || ref,
           articleId,
@@ -6068,10 +6191,15 @@ ${currentDraft || prompt}
       res.json({
         success: result.valid,
         affiliateName: result.affiliate?.name,
-        deduplicated: false
+        deduplicated: result.deduplicated === true
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to register click" });
+      if (err instanceof AffiliateClickLedgerUnavailableError) {
+        res.status(503).json({ error: 'Referral tracking is temporarily unavailable. Please retry.' });
+        return;
+      }
+      console.warn('[Affiliate Click] Failed to register referral click:', err);
+      res.status(500).json({ error: 'Failed to register referral click.' });
     }
   });
 

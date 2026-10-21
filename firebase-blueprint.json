@@ -106,6 +106,37 @@
       },
       "required": ["affiliateId", "reservedAt"]
     },
+    "DurableAffiliateClick": {
+      "title": "DurableAffiliateClick",
+      "description": "Server-only, privacy-minimised v2 referral click stored under a deterministic 30-minute deduplication ID",
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "type": "number", "enum": [2] },
+        "id": { "type": "string", "description": "Domain-separated HMAC document ID; does not expose visitor or referral inputs" },
+        "affiliateCode": { "type": "string" },
+        "affiliateId": { "type": "string" },
+        "articleId": { "type": "string" },
+        "campaignCode": { "type": "string" },
+        "visitorKey": { "type": "string", "description": "Server-derived pseudonym; never an IP, browser fingerprint, account ID, or cookie token" },
+        "referrerOrigin": { "type": "string", "description": "Optional HTTP(S) origin only; paths, queries, fragments, and credentials are removed" },
+        "timestamp": { "type": "string" },
+        "dedupeWindowStartedAt": { "type": "string" }
+      },
+      "required": ["schemaVersion", "id", "affiliateCode", "affiliateId", "visitorKey", "timestamp", "dedupeWindowStartedAt"]
+    },
+    "AffiliateClickAnalyticsActivation": {
+      "title": "AffiliateClickAnalyticsActivation",
+      "description": "Immutable server-only marker declaring the first instant of complete v2 click-ledger coverage",
+      "type": "object",
+      "properties": {
+        "schemaVersion": { "type": "number", "enum": [1] },
+        "eventSchemaVersion": { "type": "number", "enum": [2] },
+        "activatedAt": { "type": "string" },
+        "completeFrom": { "type": "string" },
+        "keyVersion": { "type": "string", "enum": ["v1"] }
+      },
+      "required": ["schemaVersion", "eventSchemaVersion", "activatedAt", "completeFrom", "keyVersion"]
+    },
     "PaymentTransaction": {
       "title": "PaymentTransaction",
       "description": "Reader payment transaction and M-Pesa payment record",

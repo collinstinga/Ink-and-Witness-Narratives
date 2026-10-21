@@ -513,8 +513,11 @@ export function buildAffiliateAnalyticsReport(options: {
         && (!filters.affiliateId || click.affiliateId === filters.affiliateId
           || Boolean(affiliateCodes?.has(safeIdentifier(click.affiliateCode).toUpperCase())));
     });
-    const visitorKeys = new Set(clicks.flatMap(click => click.ipHash ? [click.ipHash] : []));
-    const withoutVisitorKey = clicks.filter(click => !click.ipHash).length;
+    const visitorKeys = new Set(clicks.flatMap(click => {
+      const key = click.visitorKey || click.ipHash;
+      return key ? [key] : [];
+    }));
+    const withoutVisitorKey = clicks.filter(click => !(click.visitorKey || click.ipHash)).length;
     const complete = options.clickHistoryCompleteForWindow === true && withoutVisitorKey === 0;
     referralTraffic = {
       coverage: complete ? 'complete' : 'partial',

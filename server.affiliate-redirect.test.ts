@@ -30,6 +30,7 @@ const storeMocks = vi.hoisted(() => {
 
 vi.mock('./src/server/store.js', () => ({ store: storeMocks }));
 vi.mock('./src/server/affiliateStore.js', () => ({
+  AffiliateClickLedgerUnavailableError: class AffiliateClickLedgerUnavailableError extends Error {},
   affiliateStore: affiliateMocks,
   sanitizeAffiliateForResponse: (value: unknown) => value
 }));
@@ -58,6 +59,12 @@ vi.mock('./src/server/mpesa.js', () => ({
 import { createApp } from './server.js';
 import { verifyAffiliateAttributionCookie } from './src/server/affiliateAttributionSecurity.js';
 
+const originalClickLedgerEnvironment = {
+  AFFILIATE_CLICK_LEDGER_MODE: process.env.AFFILIATE_CLICK_LEDGER_MODE,
+  AFFILIATE_CLICK_ANALYTICS_SECRET: process.env.AFFILIATE_CLICK_ANALYTICS_SECRET,
+};
+const CLICK_LEDGER_SECRET = 'affiliate-click-route-test-secret-with-more-than-32-characters';
+
 describe('affiliate redirect route', () => {
   let server: Server;
   let baseUrl: string;
@@ -72,10 +79,16 @@ describe('affiliate redirect route', () => {
 
   afterAll(async () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    for (const [key, value] of Object.entries(originalClickLedgerEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.AFFILIATE_CLICK_LEDGER_MODE;
+    delete process.env.AFFILIATE_CLICK_ANALYTICS_SECRET;
     affiliateMocks.getAffiliateByCode.mockReturnValue({
       affiliateCode: 'PARTNER_7',
       status: 'active',
@@ -103,6 +116,18 @@ describe('affiliate redirect route', () => {
     expect(location).toBeTruthy();
     expect(location).toMatch(/^\//);
     return new URL(location!, baseUrl);
+  }
+
+  function getSetCookieHeaders(response: Response): string[] {
+    const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+    const individual = headers.getSetCookie?.();
+    if (individual && individual.length > 0) return individual;
+    const combined = response.headers.get('set-cookie');
+    return combined ? [combined] : [];
+  }
+
+  function findCookie(response: Response, name: string): string | undefined {
+    return getSetCookieHeaders(response).find(value => value.startsWith(`${name}=`));
   }
 
   it('lands a homepage link on the homepage and records exactly one click', async () => {
@@ -362,5 +387,208 @@ describe('affiliate redirect route', () => {
       'piece_43',
       undefined
     ]);
+  });
+
+  it('issues a private durable visitor cookie only after a valid shadow-mode referral', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'shadow';
+    process.env.AFFILIATE_CLICK_ANALYTICS_SECRET = CLICK_LEDGER_SECRET;
+
+    const response = await requestRedirect('/api/affiliate/redirect/PARTNER_7?article=piece_42');
+    const visitorCookie = findCookie(response, 'iw_affiliate_click_visitor');
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(visitorCookie).toMatch(/^iw_affiliate_click_visitor=aff_vis_v1\./);
+    expect(visitorCookie).toContain('Max-Age=7776000');
+    expect(visitorCookie).toContain('Path=/');
+    expect(visitorCookie).toContain('HttpOnly');
+    expect(visitorCookie).toContain('SameSite=Lax');
+    expect(visitorCookie).not.toContain('Domain=');
+    expect(affiliateMocks.registerClick).toHaveBeenCalledWith(
+      'PARTNER_7',
+      'piece_42',
+      undefined,
+      expect.stringMatching(/^[a-f0-9]{16}$/),
+      'affiliate-redirect-regression-test',
+      'https://share.example.test/',
+      {
+        durableMode: 'shadow',
+        visitorKey: expect.stringMatching(/^acv1_[A-Za-z0-9_-]{43}$/),
+      }
+    );
+  });
+
+  it('reuses a valid visitor pseudonym without extending its embedded expiry', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'shadow';
+    process.env.AFFILIATE_CLICK_ANALYTICS_SECRET = CLICK_LEDGER_SECRET;
+    const first = await requestRedirect('/api/affiliate/redirect/PARTNER_7?article=piece_42');
+    const visitorCookie = findCookie(first, 'iw_affiliate_click_visitor');
+    expect(visitorCookie).toBeTruthy();
+    const cookiePair = visitorCookie!.split(';')[0];
+    const firstVisitorKey = affiliateMocks.registerClick.mock.calls[0]?.[6]?.visitorKey;
+    affiliateMocks.registerClick.mockClear();
+
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: cookiePair,
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ ref: 'partner_7', articleId: 'piece_43' })
+    });
+
+    expect(response.status).toBe(200);
+    expect(findCookie(response, 'iw_affiliate_click_visitor')).toBeUndefined();
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+    expect(affiliateMocks.registerClick.mock.calls[0]?.[6]).toEqual({
+      durableMode: 'shadow',
+      visitorKey: firstVisitorKey,
+    });
+  });
+
+  it('rejects cross-site referral POSTs without touching the affiliate store', async () => {
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://attacker.example.test',
+        'sec-fetch-site': 'cross-site',
+      },
+      body: JSON.stringify({ ref: 'partner_7', articleId: 'piece_42' })
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ success: false });
+    expect(affiliateMocks.registerClick).not.toHaveBeenCalled();
+  });
+
+  it('fails required durable mode closed when the dedicated secret is absent', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'required';
+    delete process.env.AFFILIATE_CLICK_ANALYTICS_SECRET;
+
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ ref: 'partner_7', articleId: 'piece_42' })
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: 'Referral tracking is temporarily unavailable. Please retry.'
+    });
+    expect(affiliateMocks.registerClick).not.toHaveBeenCalled();
+    expect(findCookie(response, 'iw_affiliate_click_visitor')).toBeUndefined();
+  });
+
+  it('does not persist a visitor cookie for an invalid affiliate', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'shadow';
+    process.env.AFFILIATE_CLICK_ANALYTICS_SECRET = CLICK_LEDGER_SECRET;
+    affiliateMocks.registerClick.mockResolvedValueOnce({ valid: false });
+
+    const response = await requestRedirect('/api/affiliate/redirect/UNKNOWN_7?article=piece_42');
+
+    expect(response.status).toBe(302);
+    expect(findCookie(response, 'iw_affiliate_click_visitor')).toBeUndefined();
+    expect(response.headers.get('location')).toBe('/?article=piece_42');
+  });
+
+  it('replaces a tampered visitor token without exposing its pseudonym in the response', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'shadow';
+    process.env.AFFILIATE_CLICK_ANALYTICS_SECRET = CLICK_LEDGER_SECRET;
+
+    const response = await fetch(`${baseUrl}/api/affiliate/click`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: 'iw_affiliate_click_visitor=aff_vis_v1.tampered.signature',
+        origin: baseUrl,
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ ref: 'partner_7', articleId: 'piece_42' })
+    });
+    const payload = await response.json();
+    const replacementCookie = findCookie(response, 'iw_affiliate_click_visitor');
+    const storeOptions = affiliateMocks.registerClick.mock.calls[0]?.[6];
+
+    expect(response.status).toBe(200);
+    expect(replacementCookie).toMatch(/^iw_affiliate_click_visitor=aff_vis_v1\./);
+    expect(storeOptions).toEqual({
+      durableMode: 'shadow',
+      visitorKey: expect.stringMatching(/^acv1_[A-Za-z0-9_-]{43}$/),
+    });
+    expect(JSON.stringify(payload)).not.toContain(storeOptions.visitorKey);
+    expect(JSON.stringify(payload)).not.toContain('aff_vis_v1');
+  });
+
+  it('redirects safely without tracking cookies when required mode is unavailable', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'required';
+    delete process.env.AFFILIATE_CLICK_ANALYTICS_SECRET;
+
+    const response = await requestRedirect('/api/affiliate/redirect/PARTNER_7?article=piece_42');
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe('/?article=piece_42');
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(affiliateMocks.registerClick).not.toHaveBeenCalled();
+  });
+
+  it('redirects safely without attribution when the atomic click store fails', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'shadow';
+    process.env.AFFILIATE_CLICK_ANALYTICS_SECRET = CLICK_LEDGER_SECRET;
+    affiliateMocks.registerClick.mockRejectedValueOnce(new Error('simulated durable store failure'));
+
+    const response = await requestRedirect('/api/affiliate/redirect/PARTNER_7?article=piece_42');
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe('/?article=piece_42');
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('keeps the same durable visitor identity when attribution signing fails after commit', async () => {
+    process.env.AFFILIATE_CLICK_LEDGER_MODE = 'shadow';
+    process.env.AFFILIATE_CLICK_ANALYTICS_SECRET = CLICK_LEDGER_SECRET;
+    const sessionSigningSecret = process.env.SESSION_SIGNING_SECRET;
+    const affiliateSigningSecret = process.env.AFFILIATE_SESSION_SIGNING_SECRET;
+    delete process.env.SESSION_SIGNING_SECRET;
+    delete process.env.AFFILIATE_SESSION_SIGNING_SECRET;
+
+    let first: Response;
+    try {
+      first = await requestRedirect('/api/affiliate/redirect/PARTNER_7?article=piece_42');
+    } finally {
+      if (sessionSigningSecret === undefined) delete process.env.SESSION_SIGNING_SECRET;
+      else process.env.SESSION_SIGNING_SECRET = sessionSigningSecret;
+      if (affiliateSigningSecret === undefined) delete process.env.AFFILIATE_SESSION_SIGNING_SECRET;
+      else process.env.AFFILIATE_SESSION_SIGNING_SECRET = affiliateSigningSecret;
+    }
+
+    const visitorCookie = findCookie(first!, 'iw_affiliate_click_visitor');
+    const firstVisitorKey = affiliateMocks.registerClick.mock.calls[0]?.[6]?.visitorKey;
+    expect(first!.status).toBe(302);
+    expect(first!.headers.get('location')).toBe('/?article=piece_42');
+    expect(visitorCookie).toBeTruthy();
+    expect(findCookie(first!, 'iw_affiliate_attribution')).toBeUndefined();
+    expect(findCookie(first!, 'iw_affiliate_click_dedup')).toBeUndefined();
+
+    const retry = await fetch(`${baseUrl}/api/affiliate/redirect/PARTNER_7?article=piece_42`, {
+      redirect: 'manual',
+      headers: {
+        cookie: visitorCookie!.split(';')[0],
+        'user-agent': 'affiliate-redirect-regression-test',
+        referer: 'https://share.example.test/'
+      }
+    });
+
+    expect(retry.status).toBe(302);
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(2);
+    expect(affiliateMocks.registerClick.mock.calls[1]?.[6]?.visitorKey).toBe(firstVisitorKey);
+    expect(findCookie(retry, 'iw_affiliate_click_visitor')).toBeUndefined();
+    expect(findCookie(retry, 'iw_affiliate_attribution')).toBeTruthy();
   });
 });

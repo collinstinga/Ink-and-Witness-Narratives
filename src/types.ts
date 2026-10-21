@@ -1542,6 +1542,12 @@ export interface AffiliateClickEvent {
   affiliateId?: string;
   articleId?: string;
   campaignCode?: string;
+  /** Durable v2 click events use a random-cookie-derived HMAC pseudonym. */
+  visitorKey?: string;
+  schemaVersion?: 2;
+  referrerOrigin?: string;
+  dedupeWindowStartedAt?: string;
+  /** Legacy local-only fields retained for backwards-compatible backup reads. */
   ipHash?: string;
   userAgent?: string;
   referrer?: string;

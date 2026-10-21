@@ -34,6 +34,12 @@ import {
   LiteraryCircleSettings
 } from '../types.js';
 import { buildAffiliateAnalyticsReport } from './affiliateAnalytics.js';
+import {
+  createDurableAffiliateClickDedupeIdentity,
+  normalizeDurableAffiliateClickEventV2,
+  sanitizeAffiliateClickReferrerOrigin,
+  type DurableAffiliateClickEventV2,
+} from './affiliateClickLedger.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
@@ -177,6 +183,20 @@ export class LiteraryCircleSettingsConflictError extends Error {
   constructor() {
     super('Literary Circle settings changed since this editor was opened. Reload the latest settings before saving again.');
     this.name = 'LiteraryCircleSettingsConflictError';
+  }
+}
+
+export type AffiliateClickLedgerMode = 'off' | 'shadow' | 'required';
+
+export interface AffiliateClickRegistrationOptions {
+  durableMode?: AffiliateClickLedgerMode;
+  visitorKey?: string;
+}
+
+export class AffiliateClickLedgerUnavailableError extends Error {
+  constructor() {
+    super('Durable referral tracking is temporarily unavailable.');
+    this.name = 'AffiliateClickLedgerUnavailableError';
   }
 }
 
@@ -1443,15 +1463,40 @@ export const affiliateStore = {
   },
 
   // CLICKS & FUNNEL TRACKING
-  async registerClick(code: string, articleId?: string, campaignCode?: string, ipHash?: string, userAgent?: string, referrer?: string): Promise<{
+  async registerClick(
+    code: string,
+    articleId?: string,
+    campaignCode?: string,
+    ipHash?: string,
+    userAgent?: string,
+    referrer?: string,
+    options: AffiliateClickRegistrationOptions = {},
+  ): Promise<{
     valid: boolean;
     affiliate?: AffiliateAccount;
     campaign?: AffiliateCampaign;
     attributionMaxAgeMs?: number;
+    clickRecorded?: boolean;
+    deduplicated?: boolean;
+    durable?: boolean;
   }> {
     const cleanCode = String(code || '').trim().toUpperCase();
     if (!cleanCode) {
       return { valid: false };
+    }
+
+    const durableMode: AffiliateClickLedgerMode = options.durableMode === 'shadow'
+      || options.durableMode === 'required'
+      ? options.durableMode
+      : 'off';
+    const dedicatedSecret = typeof process.env.AFFILIATE_CLICK_ANALYTICS_SECRET === 'string'
+      && process.env.AFFILIATE_CLICK_ANALYTICS_SECRET.trim().length >= 32
+      ? process.env.AFFILIATE_CLICK_ANALYTICS_SECRET.trim()
+      : null;
+    const visitorKey = typeof options.visitorKey === 'string' ? options.visitorKey.trim() : '';
+    const durableRequested = durableMode !== 'off';
+    if (durableMode === 'required' && (!dedicatedSecret || !visitorKey)) {
+      throw new AffiliateClickLedgerUnavailableError();
     }
 
     const nowMs = Date.now();
@@ -1461,7 +1506,7 @@ export const affiliateStore = {
       return Number.isFinite(timestamp) && timestamp >= retentionCutoff;
     });
 
-    const duplicate = retainedClicks.some(click =>
+    const legacyDuplicate = retainedClicks.some(click =>
       click.affiliateCode.toUpperCase() === cleanCode &&
       click.articleId === articleId &&
       click.campaignCode === campaignCode &&
@@ -1469,7 +1514,7 @@ export const affiliateStore = {
       nowMs - new Date(click.timestamp).getTime() < 30 * 60 * 1000
     );
     const now = new Date(nowMs).toISOString();
-    const uniqueVisitor = !retainedClicks.some(click =>
+    const legacyUniqueVisitor = !retainedClicks.some(click =>
       click.affiliateCode.toUpperCase() === cleanCode && click.ipHash === ipHash
     );
     const db = getDb();
@@ -1547,10 +1592,64 @@ export const affiliateStore = {
         freshSettings.defaultAttributionDays
       );
 
+      let durableEvent: DurableAffiliateClickEventV2 | undefined;
+      let durableEventReference: any;
+      let durableEventExists = false;
+      if (durableRequested && dedicatedSecret && visitorKey) {
+        const dedupeIdentity = createDurableAffiliateClickDedupeIdentity({
+          affiliateCode: freshAffiliate.affiliateCode,
+          articleId,
+          campaignCode: freshCampaign?.code,
+          visitorKey,
+          occurredAtMs: nowMs,
+          signingSecret: dedicatedSecret,
+        });
+        const candidateEvent = dedupeIdentity
+          ? normalizeDurableAffiliateClickEventV2({
+              schemaVersion: 2,
+              id: dedupeIdentity.documentId,
+              affiliateCode: freshAffiliate.affiliateCode,
+              affiliateId: freshAffiliate.id,
+              articleId,
+              campaignCode: freshCampaign?.code,
+              visitorKey,
+              referrerOrigin: sanitizeAffiliateClickReferrerOrigin(referrer),
+              timestamp: now,
+              dedupeWindowStartedAt: dedupeIdentity.dedupeWindowStartedAt,
+            })
+          : null;
+        if (candidateEvent) {
+          durableEvent = candidateEvent;
+          durableEventReference = db.collection('affiliate_clicks').doc(candidateEvent.id);
+          const durableEventSnapshot = await firestoreTransaction.get(durableEventReference) as any;
+          durableEventExists = durableEventSnapshot.exists === true;
+        } else if (durableMode === 'required') {
+          throw new AffiliateClickLedgerUnavailableError();
+        }
+      }
+      if (durableMode === 'required' && !durableEvent) {
+        throw new AffiliateClickLedgerUnavailableError();
+      }
+
+      // Shadow mode is a behavior-preserving dual write: the existing rolling
+      // legacy decision remains authoritative for counters and the response.
+      // Required mode cuts over to deterministic fixed-window event existence.
+      const duplicate = durableMode === 'required'
+        ? durableEventExists
+        : legacyDuplicate;
+      if (durableEvent && durableEventReference && !durableEventExists) {
+        firestoreTransaction.set(durableEventReference, durableEvent);
+      }
       if (!duplicate) {
         firestoreTransaction.set(affiliateReference, {
           totalClicks: FieldValue.increment(1),
-          ...(uniqueVisitor ? { uniqueVisitors: FieldValue.increment(1) } : {}),
+          // A process-local cache cannot prove a globally unique durable
+          // visitor. Preserve the legacy approximate counter only while
+          // legacy semantics are authoritative (off/shadow); bounded v2
+          // analytics derives unique visitors from pseudonymous event keys.
+          ...(durableMode !== 'required' && legacyUniqueVisitor
+            ? { uniqueVisitors: FieldValue.increment(1) }
+            : {}),
           lastActivityAt: now
         }, { merge: true });
         if (freshCampaign && campaignReference) {
@@ -1563,20 +1662,25 @@ export const affiliateStore = {
       return {
         valid: true,
         duplicate,
+        durable: Boolean(durableEvent),
+        durableEvent: duplicate ? undefined : durableEvent,
         affiliateId: freshAffiliate.id,
         freshAffiliate: duplicate
           ? freshAffiliate
           : {
               ...freshAffiliate,
               totalClicks: (Number(freshAffiliate.totalClicks) || 0) + 1,
-              uniqueVisitors: (Number(freshAffiliate.uniqueVisitors) || 0) + (uniqueVisitor ? 1 : 0),
+              uniqueVisitors: (Number(freshAffiliate.uniqueVisitors) || 0)
+                + (durableMode !== 'required' && legacyUniqueVisitor ? 1 : 0),
               lastActivityAt: now
             },
         freshCampaign: freshCampaign
-          ? {
-              ...freshCampaign,
-              clicksCount: (Number(freshCampaign.clicksCount) || 0) + 1
-            }
+          ? duplicate
+            ? freshCampaign
+            : {
+                ...freshCampaign,
+                clicksCount: (Number(freshCampaign.clicksCount) || 0) + 1
+              }
           : undefined,
         freshSettings,
         attributionMaxAgeMs: attributionDays * DAY_MS
@@ -1590,43 +1694,63 @@ export const affiliateStore = {
       return { valid: false };
     }
 
-    const affiliate = cacheFreshAffiliateRecord(persisted.freshAffiliate.id, persisted.freshAffiliate)
-      || persisted.freshAffiliate;
-    if (persisted.freshSettings) {
-      cachedSettings = persisted.freshSettings;
-      writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+    let affiliate = persisted.freshAffiliate;
+    try {
+      affiliate = cacheFreshAffiliateRecord(persisted.freshAffiliate.id, persisted.freshAffiliate)
+        || persisted.freshAffiliate;
+      if (persisted.freshSettings) {
+        cachedSettings = persisted.freshSettings;
+        writeJsonFileSync(SETTINGS_FILE, cachedSettings);
+      }
+    } catch (error) {
+      // Firestore is authoritative after the transaction commits. A local
+      // projection failure must not turn a committed click into a retriable
+      // request that could mint a different visitor identity.
+      console.warn('[Affiliate Click] Local cache projection failed after commit:', error);
     }
     if (persisted.duplicate) {
       return {
         valid: true,
         affiliate,
         campaign: persisted.freshCampaign,
-        attributionMaxAgeMs: persisted.attributionMaxAgeMs
+        attributionMaxAgeMs: persisted.attributionMaxAgeMs,
+        clickRecorded: false,
+        deduplicated: true,
+        durable: persisted.durable,
       };
     }
 
-    const clickEvent: AffiliateClickEvent = {
-      id: `clk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      affiliateCode: affiliate.affiliateCode,
-      affiliateId: affiliate.id,
-      articleId,
-      campaignCode: persisted.freshCampaign?.code,
-      ipHash,
-      userAgent: (userAgent || '').substring(0, 150),
-      referrer: (referrer || '').substring(0, 200),
-      timestamp: now
-    };
-    cachedClicks = [...retainedClicks, clickEvent].slice(-5000);
-    writeJsonFileSync(CLICKS_FILE, cachedClicks);
+    try {
+      // Shadow mode must retain the legacy local event shape because its
+      // rolling dedupe and unique-visitor decisions still depend on ipHash.
+      // Required mode may project the privacy-minimised durable event instead.
+      const clickEvent: AffiliateClickEvent = durableMode === 'required' && persisted.durableEvent
+        ? persisted.durableEvent
+        : {
+            id: `clk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+            affiliateCode: affiliate.affiliateCode,
+            affiliateId: affiliate.id,
+            articleId,
+            campaignCode: persisted.freshCampaign?.code,
+            ipHash,
+            userAgent: (userAgent || '').substring(0, 150),
+            referrer: (referrer || '').substring(0, 200),
+            timestamp: now
+          };
+      cachedClicks = [...retainedClicks, clickEvent].slice(-5000);
+      writeJsonFileSync(CLICKS_FILE, cachedClicks);
 
-    if (persisted.freshCampaign) {
-      const campaignIndex = cachedCampaigns.findIndex(campaign => campaign.id === persisted.freshCampaign!.id);
-      if (campaignIndex >= 0) {
-        cachedCampaigns[campaignIndex] = persisted.freshCampaign;
-      } else {
-        cachedCampaigns.unshift(persisted.freshCampaign);
+      if (persisted.freshCampaign) {
+        const campaignIndex = cachedCampaigns.findIndex(campaign => campaign.id === persisted.freshCampaign!.id);
+        if (campaignIndex >= 0) {
+          cachedCampaigns[campaignIndex] = persisted.freshCampaign;
+        } else {
+          cachedCampaigns.unshift(persisted.freshCampaign);
+        }
+        writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
       }
-      writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
+    } catch (error) {
+      console.warn('[Affiliate Click] Local event projection failed after commit:', error);
     }
 
     console.log(`[Referral Click] Affiliate: ${affiliate.affiliateCode}, Article: ${articleId || 'all'}, Campaign: ${campaignCode || 'none'}`);
@@ -1634,7 +1758,10 @@ export const affiliateStore = {
       valid: true,
       affiliate,
       campaign: persisted.freshCampaign,
-      attributionMaxAgeMs: persisted.attributionMaxAgeMs
+      attributionMaxAgeMs: persisted.attributionMaxAgeMs,
+      clickRecorded: true,
+      deduplicated: false,
+      durable: persisted.durable,
     };
   },
 
