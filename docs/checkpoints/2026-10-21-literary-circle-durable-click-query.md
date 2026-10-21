@@ -28,9 +28,11 @@ migration, secret retrieval, push, merge, or deployment
   fingerprint on the marker and every v2 event against the currently deployed
   `AFFILIATE_CLICK_ANALYTICS_SECRET`. Missing or rotated key material is
   fail-closed instead of silently splitting visitor identities.
-- Applies a ten-minute ingestion safety lag. A live interval is explicitly
+- Applies a ten-minute ingestion safety lag derived from the activation-marker
+  snapshot's authoritative Firestore `readTime`. A live interval is explicitly
   partial through its returned `queriedThrough` watermark so an in-flight
-  Firestore transaction cannot be omitted while the report claims completion.
+  Firestore transaction or skewed application clock cannot be omitted while
+  the report claims completion.
 - Validates every returned document with the privacy-minimised v2 allow-list
   and requires the Firestore document ID to match the body ID. Invalid,
   visitorless, truncated, or pre-activation history can never be labelled

@@ -4,6 +4,7 @@ const firestore = vi.hoisted(() => ({
   activation: undefined as Record<string, unknown> | undefined,
   activationCreateTime: '2026-10-20T08:00:01.000Z',
   activationUpdateTime: '2026-10-20T08:00:01.000Z',
+  activationReadTime: '2026-10-20T12:00:00.000Z' as string | undefined,
   activationReadError: false,
   getDbError: false,
   eventQueryError: false,
@@ -57,7 +58,6 @@ function baseInput(overrides: Record<string, unknown> = {}) {
   return {
     rangeStartsAt: '2026-10-20T09:00:00.000Z',
     rangeEndsAt: '2026-10-20T11:00:00.000Z',
-    now: NOW,
     runtimeMode: 'required' as const,
     keyFingerprint: KEY_FINGERPRINT,
     ...overrides,
@@ -68,6 +68,7 @@ beforeEach(() => {
   firestore.activation = activation;
   firestore.activationCreateTime = '2026-10-20T08:00:01.000Z';
   firestore.activationUpdateTime = '2026-10-20T08:00:01.000Z';
+  firestore.activationReadTime = NOW.toISOString();
   firestore.activationReadError = false;
   firestore.getDbError = false;
   firestore.eventQueryError = false;
@@ -115,6 +116,9 @@ beforeEach(() => {
                 data: () => firestore.activation,
                 createTime: firestore.activationCreateTime,
                 updateTime: firestore.activationUpdateTime,
+                readTime: firestore.activationReadTime === undefined
+                  ? undefined
+                  : { toMillis: () => Date.parse(firestore.activationReadTime!) },
               };
             }),
           })),
@@ -184,6 +188,35 @@ describe('bounded durable affiliate click query', () => {
       coverage: { reasons: ['invalid_activation_marker'] },
     });
     expect(firestore.operations.some(operation => operation.kind === 'event_get')).toBe(false);
+  });
+
+  it('fails closed when Firestore does not supply an authoritative read time', async () => {
+    firestore.activationReadTime = undefined;
+    await expect(readDurableAffiliateClickWindow(baseInput())).resolves.toMatchObject({
+      source: 'unavailable',
+      coverage: { reasons: ['missing_server_time'] },
+    });
+    expect(firestore.operations.some(operation => operation.kind === 'event_get')).toBe(false);
+  });
+
+  it('derives the settling watermark from Firestore time, not the local process clock', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2036-01-01T00:00:00.000Z'));
+    try {
+      const result = await readDurableAffiliateClickWindow(baseInput({
+        rangeEndsAt: NOW.toISOString(),
+      }));
+      const expectedThrough = new Date(
+        NOW.getTime() - DURABLE_CLICK_INGESTION_SAFETY_LAG_MS,
+      ).toISOString();
+      expect(result).toMatchObject({
+        source: 'durable',
+        queriedThrough: expectedThrough,
+        coverage: { eventCoverage: 'partial', reasons: ['settling_window'] },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not query events before a future completeFrom instant', async () => {

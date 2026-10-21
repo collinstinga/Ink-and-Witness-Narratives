@@ -41,6 +41,7 @@ import {
 import {
   createDurableAffiliateClickDedupeIdentity,
   deriveAffiliateClickAnalyticsKeyFingerprint,
+  firestoreSnapshotReadTimeMillis,
   normalizeDurableAffiliateClickEventV2,
   sanitizeAffiliateClickReferrerOrigin,
   type DurableAffiliateClickEventV2,
@@ -1505,8 +1506,8 @@ export const affiliateStore = {
       throw new AffiliateClickLedgerUnavailableError();
     }
 
-    const nowMs = Date.now();
-    const retentionCutoff = nowMs - 90 * 24 * 60 * 60 * 1000;
+    const localNowMs = Date.now();
+    const retentionCutoff = localNowMs - 90 * 24 * 60 * 60 * 1000;
     const retainedClicks = cachedClicks.filter(click => {
       const timestamp = new Date(click.timestamp).getTime();
       return Number.isFinite(timestamp) && timestamp >= retentionCutoff;
@@ -1517,9 +1518,9 @@ export const affiliateStore = {
       click.articleId === articleId &&
       click.campaignCode === campaignCode &&
       click.ipHash === ipHash &&
-      nowMs - new Date(click.timestamp).getTime() < 30 * 60 * 1000
+      localNowMs - new Date(click.timestamp).getTime() < 30 * 60 * 1000
     );
-    const now = new Date(nowMs).toISOString();
+    const legacyNow = new Date(localNowMs).toISOString();
     const legacyUniqueVisitor = !retainedClicks.some(click =>
       click.affiliateCode.toUpperCase() === cleanCode && click.ipHash === ipHash
     );
@@ -1564,6 +1565,16 @@ export const affiliateStore = {
         };
       }
 
+      const transactionReadTimeMs = firestoreSnapshotReadTimeMillis(affiliateQuerySnapshot)
+        ?? firestoreSnapshotReadTimeMillis(affiliateSnapshot);
+      if (durableMode === 'required' && transactionReadTimeMs === null) {
+        throw new AffiliateClickLedgerUnavailableError();
+      }
+      const authoritativeNowMs = durableRequested && transactionReadTimeMs !== null
+        ? transactionReadTimeMs
+        : localNowMs;
+      const authoritativeNow = new Date(authoritativeNowMs).toISOString();
+
       let freshCampaign: AffiliateCampaign | undefined;
       let campaignReference: any;
       if (campaignCode) {
@@ -1581,7 +1592,7 @@ export const affiliateStore = {
           };
           if (
             candidate.code?.trim().toUpperCase() === campaignCode?.trim().toUpperCase() &&
-            isCampaignValidAttribution(candidate, articleId, nowMs)
+            isCampaignValidAttribution(candidate, articleId, authoritativeNowMs)
           ) {
             freshCampaign = candidate;
           }
@@ -1601,13 +1612,13 @@ export const affiliateStore = {
       let durableEvent: DurableAffiliateClickEventV2 | undefined;
       let durableEventReference: any;
       let durableEventExists = false;
-      if (durableRequested && dedicatedSecret && visitorKey) {
+      if (durableRequested && dedicatedSecret && visitorKey && transactionReadTimeMs !== null) {
         const dedupeIdentity = createDurableAffiliateClickDedupeIdentity({
           affiliateCode: freshAffiliate.affiliateCode,
           articleId,
           campaignCode: freshCampaign?.code,
           visitorKey,
-          occurredAtMs: nowMs,
+          occurredAtMs: transactionReadTimeMs,
           signingSecret: dedicatedSecret,
         });
         const candidateEvent = dedupeIdentity
@@ -1621,7 +1632,7 @@ export const affiliateStore = {
               campaignCode: freshCampaign?.code,
               visitorKey,
               referrerOrigin: sanitizeAffiliateClickReferrerOrigin(referrer),
-              timestamp: now,
+              timestamp: authoritativeNow,
               dedupeWindowStartedAt: dedupeIdentity.dedupeWindowStartedAt,
             })
           : null;
@@ -1657,7 +1668,7 @@ export const affiliateStore = {
           ...(durableMode !== 'required' && legacyUniqueVisitor
             ? { uniqueVisitors: FieldValue.increment(1) }
             : {}),
-          lastActivityAt: now
+          lastActivityAt: authoritativeNow
         }, { merge: true });
         if (freshCampaign && campaignReference) {
           firestoreTransaction.set(campaignReference, {
@@ -1679,7 +1690,7 @@ export const affiliateStore = {
               totalClicks: (Number(freshAffiliate.totalClicks) || 0) + 1,
               uniqueVisitors: (Number(freshAffiliate.uniqueVisitors) || 0)
                 + (durableMode !== 'required' && legacyUniqueVisitor ? 1 : 0),
-              lastActivityAt: now
+              lastActivityAt: authoritativeNow
             },
         freshCampaign: freshCampaign
           ? duplicate
@@ -1742,7 +1753,7 @@ export const affiliateStore = {
             ipHash,
             userAgent: (userAgent || '').substring(0, 150),
             referrer: (referrer || '').substring(0, 200),
-            timestamp: now
+            timestamp: legacyNow
           };
       cachedClicks = [...retainedClicks, clickEvent].slice(-5000);
       writeJsonFileSync(CLICKS_FILE, cachedClicks);
@@ -2753,7 +2764,6 @@ export const affiliateStore = {
           rangeStartsAt: window.startsAt,
           rangeEndsAt: window.endsAt,
           filters: options.filters,
-          now,
           runtimeMode,
           keyFingerprint,
         });

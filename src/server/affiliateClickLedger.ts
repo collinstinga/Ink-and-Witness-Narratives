@@ -73,6 +73,7 @@ export type DurableAffiliateClickCoverageReason =
   | 'not_enabled'
   | 'query_failed'
   | 'invalid_activation_marker'
+  | 'missing_server_time'
   | 'runtime_not_required'
   | 'missing_secret'
   | 'key_mismatch'
@@ -304,6 +305,41 @@ function canonicalIsoTimestamp(value: unknown): string | null {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return null;
   return new Date(timestamp).toISOString();
+}
+
+/**
+ * Extract Firestore's authoritative snapshot read time without accepting a
+ * caller-supplied Date/string as a substitute for server time.
+ */
+export function firestoreSnapshotReadTimeMillis(snapshot: unknown): number | null {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const readTime = (snapshot as { readTime?: unknown }).readTime;
+  if (!readTime || typeof readTime !== 'object') return null;
+  const timestamp = readTime as {
+    toMillis?: () => unknown;
+    seconds?: unknown;
+    nanoseconds?: unknown;
+  };
+  try {
+    if (typeof timestamp.toMillis === 'function') {
+      const millis = Number(timestamp.toMillis());
+      return Number.isFinite(millis) && Math.abs(millis) <= 8.64e15
+        ? Math.trunc(millis)
+        : null;
+    }
+  } catch {
+    return null;
+  }
+  const seconds = Number(timestamp.seconds);
+  const nanoseconds = Number(timestamp.nanoseconds ?? 0);
+  if (
+    !Number.isSafeInteger(seconds)
+    || !Number.isInteger(nanoseconds)
+    || nanoseconds < 0
+    || nanoseconds >= 1_000_000_000
+  ) return null;
+  const millis = seconds * 1_000 + Math.floor(nanoseconds / 1_000_000);
+  return Number.isSafeInteger(millis) && Math.abs(millis) <= 8.64e15 ? millis : null;
 }
 
 const DURABLE_EVENT_ALLOWED_KEYS = new Set([

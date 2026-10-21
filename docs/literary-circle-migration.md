@@ -194,3 +194,11 @@ the writer route is process-limited. The route continues using the explicitly
 partial local fallback until the marker exists. Do not activate or deploy this
 work without the guarded staging sequence above. See
 `docs/checkpoints/2026-10-21-literary-circle-durable-click-query.md`.
+
+Durable event time and the Writer analytics ingestion watermark are now
+anchored to Firestore snapshot `readTime`, not an application instance's local
+clock. `required` click tracking and activated analytics fail closed when that
+authoritative time is unavailable; `shadow` mode preserves the legacy path
+without claiming durable coverage. A fully deployed and controlled
+`required`-mode staging proof must precede marker creation. See
+`docs/checkpoints/2026-10-21-literary-circle-server-time-hardening.md`.

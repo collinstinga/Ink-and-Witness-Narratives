@@ -4,6 +4,7 @@ import type {
 } from '../types.js';
 import {
   assessDurableAffiliateClickCoverage,
+  firestoreSnapshotReadTimeMillis,
   normalizeAffiliateClickAnalyticsActivationV1,
   normalizeDurableAffiliateClickEventV2,
   unavailableDurableAffiliateClickCoverage,
@@ -35,7 +36,6 @@ interface DurableAffiliateClickWindowInput {
   rangeStartsAt: string;
   rangeEndsAt: string;
   filters?: AffiliateAnalyticsFilters;
-  now: Date;
   runtimeMode: 'off' | 'shadow' | 'required';
   keyFingerprint?: string | null;
 }
@@ -165,11 +165,9 @@ async function readDurableAffiliateClickWindowUncoalesced(
 ): Promise<DurableAffiliateClickWindowResult> {
   const startsAtMs = validTimestamp(input.rangeStartsAt);
   const endsAtMs = validTimestamp(input.rangeEndsAt);
-  const nowMs = input.now instanceof Date ? input.now.getTime() : Number.NaN;
   if (
     startsAtMs === null
     || endsAtMs === null
-    || !Number.isFinite(nowMs)
     || startsAtMs > endsAtMs
   ) {
     return unavailable('invalid_range');
@@ -193,6 +191,10 @@ async function readDurableAffiliateClickWindowUncoalesced(
     // partial pre-activation fallback. Do not query the click collection.
     return { source: 'legacy', events: [] };
   }
+  const serverReadTimeMs = firestoreSnapshotReadTimeMillis(markerSnapshot);
+  if (serverReadTimeMs === null) {
+    return unavailable('missing_server_time');
+  }
   const activation = normalizeAffiliateClickAnalyticsActivationV1(markerValue);
   if (!activation || !hasImmutableActivationMetadata(markerSnapshot, activation)) {
     return unavailable('invalid_activation_marker');
@@ -201,7 +203,7 @@ async function readDurableAffiliateClickWindowUncoalesced(
   const completeFromMs = Date.parse(activation.completeFrom);
   const safeThroughMs = Math.min(
     endsAtMs,
-    nowMs - DURABLE_CLICK_INGESTION_SAFETY_LAG_MS,
+    serverReadTimeMs - DURABLE_CLICK_INGESTION_SAFETY_LAG_MS,
   );
   const safeThrough = safeThroughMs >= startsAtMs
     ? new Date(safeThroughMs).toISOString()

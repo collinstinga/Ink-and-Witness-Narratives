@@ -1756,6 +1756,7 @@ export interface AffiliateAnalyticsReport {
       | 'not_enabled'
       | 'query_failed'
       | 'invalid_activation_marker'
+      | 'missing_server_time'
       | 'runtime_not_required'
       | 'missing_secret'
       | 'key_mismatch'

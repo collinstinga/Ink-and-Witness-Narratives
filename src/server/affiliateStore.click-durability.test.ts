@@ -6,6 +6,7 @@ const firestore = vi.hoisted(() => ({
   committedWrites: [] as Array<{ collection: string; id: string; value: Record<string, unknown> }>,
   reads: [] as Array<{ kind: string; collection: string; id?: string }>,
   failNextCommit: false,
+  serverReadTimeMs: 0 as number | null,
   getDb: vi.fn(),
   runTransaction: vi.fn(),
 }));
@@ -87,15 +88,26 @@ function querySnapshot(reference: Reference) {
   if (reference.collection === 'affiliates' && reference.value === 'PARTNER_7') {
     const ref = documentReference('affiliates', affiliate.id);
     return {
+      readTime: firestore.serverReadTimeMs === null
+        ? undefined
+        : { toMillis: () => firestore.serverReadTimeMs },
       docs: [{
         exists: true,
         id: affiliate.id,
         ref,
+        readTime: firestore.serverReadTimeMs === null
+          ? undefined
+          : { toMillis: () => firestore.serverReadTimeMs },
         data: () => clone(affiliate),
       }],
     };
   }
-  return { docs: [] };
+  return {
+    readTime: firestore.serverReadTimeMs === null
+      ? undefined
+      : { toMillis: () => firestore.serverReadTimeMs },
+    docs: [],
+  };
 }
 
 function documentSnapshot(reference: Reference) {
@@ -105,6 +117,9 @@ function documentSnapshot(reference: Reference) {
     exists: value !== undefined,
     id: reference.id,
     ref: reference,
+    readTime: firestore.serverReadTimeMs === null
+      ? undefined
+      : { toMillis: () => firestore.serverReadTimeMs },
     data: () => clone(value),
   };
 }
@@ -127,6 +142,7 @@ beforeEach(() => {
   firestore.committedWrites.length = 0;
   firestore.reads.length = 0;
   firestore.failNextCommit = false;
+  firestore.serverReadTimeMs = NOW;
   affiliate.status = 'active';
   delete (affiliate as typeof affiliate & { linksDisabled?: boolean }).linksDisabled;
   affiliate.totalClicks = 0;
@@ -235,6 +251,7 @@ describe('affiliate durable click transaction', () => {
     );
     await register();
     vi.setSystemTime(NOW + 30 * 60 * 1000);
+    firestore.serverReadTimeMs = NOW + 30 * 60 * 1000;
     await register();
 
     expect([...firestore.documents.keys()].filter(key => key.startsWith('affiliate_clicks/'))).toHaveLength(2);
@@ -271,6 +288,43 @@ describe('affiliate durable click transaction', () => {
     )).rejects.toBeInstanceOf(AffiliateClickLedgerUnavailableError);
     expect(firestore.runTransaction).not.toHaveBeenCalled();
     expect(firestore.committedWrites).toHaveLength(0);
+  });
+
+  it('fails required mode atomically when Firestore read time is unavailable', async () => {
+    firestore.serverReadTimeMs = null;
+    await expect(affiliateStore.registerClick(
+      'PARTNER_7',
+      'piece_42',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { durableMode: 'required', visitorKey: VISITOR_KEY },
+    )).rejects.toBeInstanceOf(AffiliateClickLedgerUnavailableError);
+    expect(firestore.committedWrites).toHaveLength(0);
+    expect([...firestore.documents.keys()].filter(key => key.startsWith('affiliate_clicks/'))).toHaveLength(0);
+  });
+
+  it('uses Firestore time for the durable timestamp and dedupe window under local clock skew', async () => {
+    vi.setSystemTime(new Date('2036-01-01T00:00:00.000Z'));
+    await affiliateStore.registerClick(
+      'PARTNER_7',
+      'piece_clock_skew',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { durableMode: 'required', visitorKey: VISITOR_KEY },
+    );
+
+    const event = [...firestore.documents.entries()]
+      .find(([key]) => key.startsWith('affiliate_clicks/aclk2_'))?.[1];
+    expect(event).toMatchObject({
+      timestamp: new Date(NOW).toISOString(),
+      dedupeWindowStartedAt: new Date(
+        Math.floor(NOW / (30 * 60 * 1000)) * 30 * 60 * 1000,
+      ).toISOString(),
+    });
   });
 
   it('keeps shadow mode backward-compatible before activation when the key is unavailable', async () => {
@@ -415,6 +469,7 @@ describe('affiliate durable click transaction', () => {
   it('keeps rolling legacy counter and unique-visitor semantics in shadow mode across a v2 window boundary', async () => {
     const boundaryStart = Date.parse('2026-10-20T08:29:00.000Z');
     vi.setSystemTime(boundaryStart);
+    firestore.serverReadTimeMs = boundaryStart;
     const register = () => affiliateStore.registerClick(
       'PARTNER_7',
       'piece_shadow_boundary',
@@ -427,6 +482,7 @@ describe('affiliate durable click transaction', () => {
 
     const first = await register();
     vi.setSystemTime(boundaryStart + 2 * 60 * 1000);
+    firestore.serverReadTimeMs = boundaryStart + 2 * 60 * 1000;
     const second = await register();
 
     expect(first).toMatchObject({ clickRecorded: true, deduplicated: false, durable: true });

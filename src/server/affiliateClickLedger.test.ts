@@ -7,6 +7,7 @@ import {
   createAffiliateClickVisitorCookieValue,
   createDurableAffiliateClickDedupeIdentity,
   deriveAffiliateClickAnalyticsKeyFingerprint,
+  firestoreSnapshotReadTimeMillis,
   normalizeAffiliateClickAnalyticsActivationV1,
   normalizeDurableAffiliateClickEventV2,
   sanitizeAffiliateClickReferrerOrigin,
@@ -74,6 +75,25 @@ function durableEvent(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe('Firestore authoritative read time', () => {
+  it('accepts Firestore timestamp shapes and rejects local substitutes', () => {
+    expect(firestoreSnapshotReadTimeMillis({
+      readTime: { toMillis: () => NOW + 0.75 },
+    })).toBe(NOW);
+    expect(firestoreSnapshotReadTimeMillis({
+      readTime: {
+        seconds: Math.floor(NOW / 1000),
+        nanoseconds: (NOW % 1000) * 1_000_000,
+      },
+    })).toBe(NOW);
+    expect(firestoreSnapshotReadTimeMillis({ readTime: new Date(NOW) })).toBeNull();
+    expect(firestoreSnapshotReadTimeMillis({ readTime: new Date(NOW).toISOString() })).toBeNull();
+    expect(firestoreSnapshotReadTimeMillis({
+      readTime: { toMillis: () => { throw new Error('unavailable'); } },
+    })).toBeNull();
+  });
+});
 
 describe('anonymous affiliate click visitor token', () => {
   it('creates a signed random pseudonym without embedding request or account identifiers', () => {

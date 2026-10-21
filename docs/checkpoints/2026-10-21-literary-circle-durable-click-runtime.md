@@ -112,11 +112,14 @@ interpreted as complete durable coverage.
 3. Deploy with `AFFILIATE_CLICK_LEDGER_MODE=shadow`, generate controlled test
    referrals, and verify event privacy, deterministic deduplication, exact
    counter changes, operation cost, and unchanged attribution/purchases.
-4. Add the separately reviewed bounded admin query and immutable create-only
-   marker support. Do not infer coverage from the first observed event.
-5. Create `site_configs/affiliate_click_analytics` with a `completeFrom`
-   timestamp slightly in the future, then switch every staging instance to
-   `required` before that instant.
+4. Add the separately reviewed bounded admin query, Firestore server-time
+   hardening, and immutable create-only marker support. Do not infer coverage
+   from the first observed event.
+5. Deploy `required` mode to every staging instance and prove it with recent
+   controlled v2 events carrying the expected key fingerprint and
+   Firestore-derived timestamps. Only after that proof may a create-only
+   `site_configs/affiliate_click_analytics` marker establish a future
+   `completeFrom` boundary.
 6. Prove complete reporting from `completeFrom`, rehearse key continuity and
    failure behavior, and repeat the guarded backup comparison.
 7. Only after explicit approval and successful staging evidence may the same
