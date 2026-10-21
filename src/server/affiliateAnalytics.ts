@@ -11,6 +11,7 @@ import type {
 } from '../types.js';
 import { isVerifiedAffiliateCommission, literaryCirclePeriodKey } from './literaryCircle.js';
 import { isSettledTransactionStatus } from './salesLedger.js';
+import type { DurableAffiliateClickCoverageAssessment } from './affiliateClickLedger.js';
 
 const DAY_MS = 86_400_000;
 const NAIROBI_TIME_ZONE = 'Africa/Nairobi';
@@ -359,6 +360,8 @@ export function buildAffiliateAnalyticsReport(options: {
   buyerKeysByCommissionId?: Readonly<Record<string, string>>;
   clickEvents?: AffiliateClickEvent[];
   clickHistoryCompleteForWindow?: boolean;
+  clickCoverageAssessment?: DurableAffiliateClickCoverageAssessment;
+  clickHistoryQueriedThrough?: string;
   startDate?: string;
   endDate?: string;
   now?: Date;
@@ -494,6 +497,19 @@ export function buildAffiliateAnalyticsReport(options: {
       clicksWithoutVisitorKey: null,
       conversionRate: null,
     };
+  } else if (options.clickCoverageAssessment?.eventCoverage === 'unavailable') {
+    referralTraffic = {
+      coverage: 'unavailable',
+      reason: options.clickCoverageAssessment.reasons[0] || 'query_failed',
+      coverageReasons: options.clickCoverageAssessment.reasons,
+      ...(options.clickHistoryQueriedThrough
+        ? { queriedThrough: options.clickHistoryQueriedThrough }
+        : {}),
+      clicks: null,
+      knownUniqueVisitors: null,
+      clicksWithoutVisitorKey: null,
+      conversionRate: null,
+    };
   } else {
     const affiliateCodes = filters.affiliateId
       ? new Set(options.affiliates
@@ -518,14 +534,31 @@ export function buildAffiliateAnalyticsReport(options: {
       return key ? [key] : [];
     }));
     const withoutVisitorKey = clicks.filter(click => !(click.visitorKey || click.ipHash)).length;
-    const complete = options.clickHistoryCompleteForWindow === true && withoutVisitorKey === 0;
+    const complete = options.clickCoverageAssessment
+      ? options.clickCoverageAssessment.eventCoverage === 'complete'
+        && options.clickCoverageAssessment.uniqueVisitorCoverage === 'complete'
+        && withoutVisitorKey === 0
+      : options.clickHistoryCompleteForWindow === true && withoutVisitorKey === 0;
+    const coverage = complete ? 'complete' as const : 'partial' as const;
+    const reason = complete
+      ? 'complete' as const
+      : (options.clickCoverageAssessment?.reasons.find(value => value !== 'complete')
+        || 'incomplete_history' as const);
     referralTraffic = {
-      coverage: complete ? 'complete' : 'partial',
-      reason: complete ? 'complete' : 'incomplete_history',
+      coverage,
+      reason,
+      ...(options.clickCoverageAssessment
+        ? { coverageReasons: options.clickCoverageAssessment.reasons }
+        : {}),
+      ...(options.clickHistoryQueriedThrough
+        ? { queriedThrough: options.clickHistoryQueriedThrough }
+        : {}),
       clicks: clicks.length,
       knownUniqueVisitors: visitorKeys.size,
       clicksWithoutVisitorKey: withoutVisitorKey,
-      conversionRate: complete && clicks.length > 0
+      conversionRate: complete
+        && !options.clickCoverageAssessment
+        && clicks.length > 0
         ? Math.round((selected.length / clicks.length) * 10_000) / 100
         : null,
     };

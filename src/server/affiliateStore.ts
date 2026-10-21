@@ -33,9 +33,14 @@ import {
   LiteraryCircleOnboardingStatus,
   LiteraryCircleSettings
 } from '../types.js';
-import { buildAffiliateAnalyticsReport } from './affiliateAnalytics.js';
+import { buildAffiliateAnalyticsReport, resolveAffiliateAnalyticsWindow } from './affiliateAnalytics.js';
+import {
+  readDurableAffiliateClickWindow,
+  type DurableAffiliateClickWindowResult,
+} from './affiliateClickAnalyticsStore.js';
 import {
   createDurableAffiliateClickDedupeIdentity,
+  deriveAffiliateClickAnalyticsKeyFingerprint,
   normalizeDurableAffiliateClickEventV2,
   sanitizeAffiliateClickReferrerOrigin,
   type DurableAffiliateClickEventV2,
@@ -1494,8 +1499,9 @@ export const affiliateStore = {
       ? process.env.AFFILIATE_CLICK_ANALYTICS_SECRET.trim()
       : null;
     const visitorKey = typeof options.visitorKey === 'string' ? options.visitorKey.trim() : '';
+    const keyFingerprint = deriveAffiliateClickAnalyticsKeyFingerprint(dedicatedSecret);
     const durableRequested = durableMode !== 'off';
-    if (durableMode === 'required' && (!dedicatedSecret || !visitorKey)) {
+    if (durableMode === 'required' && (!dedicatedSecret || !keyFingerprint || !visitorKey)) {
       throw new AffiliateClickLedgerUnavailableError();
     }
 
@@ -1608,6 +1614,7 @@ export const affiliateStore = {
           ? normalizeDurableAffiliateClickEventV2({
               schemaVersion: 2,
               id: dedupeIdentity.documentId,
+              keyFingerprint,
               affiliateCode: freshAffiliate.affiliateCode,
               affiliateId: freshAffiliate.id,
               articleId,
@@ -2714,23 +2721,64 @@ export const affiliateStore = {
     };
   },
 
-  getAdminAffiliateAnalytics(options: {
+  async getAdminAffiliateAnalytics(options: {
     startDate?: string;
     endDate?: string;
     filters?: AffiliateAnalyticsFilters;
     now?: Date;
-  } = {}): AffiliateAnalyticsReport {
+  } = {}): Promise<AffiliateAnalyticsReport> {
+    const now = options.now && Number.isFinite(options.now.getTime()) ? options.now : new Date();
+    const window = resolveAffiliateAnalyticsWindow({
+      startDate: options.startDate,
+      endDate: options.endDate,
+      now,
+    });
+    const clickFilterUnsupported = Boolean(
+      options.filters?.purchaseKind
+      || options.filters?.subscriptionPlanId
+      || options.filters?.literaryCircleTierId,
+    );
+    const configuredMode = String(process.env.AFFILIATE_CLICK_LEDGER_MODE || '').trim().toLowerCase();
+    const runtimeMode: AffiliateClickLedgerMode = configuredMode === 'shadow' || configuredMode === 'required'
+      ? configuredMode
+      : 'off';
+    const dedicatedSecretPresent = typeof process.env.AFFILIATE_CLICK_ANALYTICS_SECRET === 'string'
+      && process.env.AFFILIATE_CLICK_ANALYTICS_SECRET.trim().length >= 32;
+    const keyFingerprint = deriveAffiliateClickAnalyticsKeyFingerprint(
+      dedicatedSecretPresent ? process.env.AFFILIATE_CLICK_ANALYTICS_SECRET : undefined,
+    );
+    const durableClicks: DurableAffiliateClickWindowResult = clickFilterUnsupported
+      ? { source: 'unsupported_filter' as const, events: [] }
+      : await readDurableAffiliateClickWindow({
+          rangeStartsAt: window.startsAt,
+          rangeEndsAt: window.endsAt,
+          filters: options.filters,
+          now,
+          runtimeMode,
+          keyFingerprint,
+        });
+    const useLegacyClickFallback = durableClicks.source === 'legacy';
     return buildAffiliateAnalyticsReport({
       affiliates: cachedAffiliates,
       commissions: cachedCommissions,
-      clickEvents: cachedClicks,
+      clickEvents: clickFilterUnsupported
+        ? undefined
+        : useLegacyClickFallback
+          ? cachedClicks
+          : durableClicks.events,
       // The local click ledger is retained for only 90 days and capped, so it
       // must never be represented as complete historical coverage.
       clickHistoryCompleteForWindow: false,
+      ...(!useLegacyClickFallback && durableClicks.coverage
+        ? { clickCoverageAssessment: durableClicks.coverage }
+        : {}),
+      ...(!useLegacyClickFallback && durableClicks.queriedThrough
+        ? { clickHistoryQueriedThrough: durableClicks.queriedThrough }
+        : {}),
       startDate: options.startDate,
       endDate: options.endDate,
       filters: options.filters,
-      now: options.now,
+      now,
     });
   },
 

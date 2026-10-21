@@ -1538,6 +1538,8 @@ export interface AffiliateSaleCommission {
 
 export interface AffiliateClickEvent {
   id: string;
+  /** Identifies the dedicated click key without revealing the secret. */
+  keyFingerprint?: string;
   affiliateCode: string;
   affiliateId?: string;
   articleId?: string;
@@ -1745,7 +1747,25 @@ export interface AffiliateAnalyticsReport {
   };
   referralTraffic: {
     coverage: 'complete' | 'partial' | 'unavailable';
-    reason: 'complete' | 'not_provided' | 'incomplete_history' | 'unsupported_filter';
+    reason:
+      | 'complete'
+      | 'not_provided'
+      | 'incomplete_history'
+      | 'unsupported_filter'
+      | 'invalid_range'
+      | 'not_enabled'
+      | 'query_failed'
+      | 'invalid_activation_marker'
+      | 'runtime_not_required'
+      | 'missing_secret'
+      | 'key_mismatch'
+      | 'predates_durable_history'
+      | 'settling_window'
+      | 'truncated'
+      | 'invalid_events'
+      | 'missing_visitor_keys';
+    coverageReasons?: string[];
+    queriedThrough?: string;
     clicks: number | null;
     knownUniqueVisitors: number | null;
     clicksWithoutVisitorKey: number | null;

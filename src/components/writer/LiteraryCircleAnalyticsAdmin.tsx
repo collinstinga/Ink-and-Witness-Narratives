@@ -67,12 +67,19 @@ function coverageLabel(value: AffiliateAnalyticsReport['buyerMetrics']['coverage
 
 function trafficCoverageText(report: AffiliateAnalyticsReport): string {
   if (report.referralTraffic.coverage === 'complete') {
-    return 'Complete click history for this range; conversion can be calculated.';
+    return report.referralTraffic.conversionRate === null
+      ? 'Complete click history for this range; conversion remains withheld until purchases can be matched to a bounded click cohort.'
+      : 'Complete click history for this range; conversion can be calculated.';
   }
   if (report.referralTraffic.reason === 'unsupported_filter') {
     return 'Click attribution does not support every selected filter, so conversion is withheld.';
   }
   if (report.referralTraffic.coverage === 'partial') {
+    const coverageReasons = report.referralTraffic.coverageReasons
+      ?? [report.referralTraffic.reason];
+    if (coverageReasons.length === 1 && coverageReasons[0] === 'settling_window') {
+      return 'Recent clicks are still settling; displayed visits are complete only through the stated query cutoff and conversion is withheld.';
+    }
     return 'Partial retained click history; displayed visits are a lower bound and conversion is withheld.';
   }
   return 'No reliable click history is available for this range; conversion is withheld.';
@@ -143,6 +150,12 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
             <div><dt className="text-slate-500">Conversion</dt><dd className="mt-1 text-slate-200">{conversionAvailable ? `${(report.referralTraffic.conversionRate || 0).toFixed(1)}%` : 'Withheld'}</dd></div>
           </dl>
           <p className="mt-3 text-xs leading-relaxed text-slate-400">{trafficCoverageText(report)}</p>
+          {report.referralTraffic.coverage !== 'unavailable'
+            && report.referralTraffic.queriedThrough && (
+            <p className="mt-2 text-[11px] text-slate-500">
+              Click data queried through {new Date(report.referralTraffic.queriedThrough).toLocaleString('en-KE')}.
+            </p>
+          )}
         </div>
       </section>
 

@@ -128,6 +128,66 @@ describe('LiteraryCircleAnalyticsAdmin report view', () => {
     expect(markup).toContain('Complete pseudonymous coverage');
   });
 
+  it('does not imply conversion is valid from complete traffic coverage alone', () => {
+    const source = reportFixture();
+    const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{
+      ...source,
+      referralTraffic: {
+        coverage: 'complete',
+        reason: 'complete',
+        clicks: 30,
+        knownUniqueVisitors: 25,
+        clicksWithoutVisitorKey: 0,
+        conversionRate: null,
+        queriedThrough: '2026-10-20T08:50:00.000Z',
+      },
+    }} />);
+
+    expect(markup).toContain('conversion remains withheld');
+    expect(markup).toContain('bounded click cohort');
+    expect(markup).toContain('Click data queried through');
+    expect(markup).not.toContain('conversion can be calculated');
+  });
+
+  it('does not imply an unavailable window was queried', () => {
+    const source = reportFixture();
+    const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{
+      ...source,
+      referralTraffic: {
+        coverage: 'unavailable',
+        reason: 'predates_durable_history',
+        clicks: null,
+        knownUniqueVisitors: null,
+        clicksWithoutVisitorKey: null,
+        conversionRate: null,
+        queriedThrough: '2026-10-20T08:50:00.000Z',
+      },
+    }} />);
+
+    expect(markup).toContain('No reliable click history is available');
+    expect(markup).not.toContain('Click data queried through');
+  });
+
+  it('keeps mixed settling and integrity coverage labelled as a lower bound', () => {
+    const source = reportFixture();
+    const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{
+      ...source,
+      referralTraffic: {
+        coverage: 'partial',
+        reason: 'settling_window',
+        coverageReasons: ['settling_window', 'truncated', 'invalid_events'],
+        clicks: 1000,
+        knownUniqueVisitors: 800,
+        clicksWithoutVisitorKey: 0,
+        conversionRate: null,
+        queriedThrough: '2026-10-20T08:50:00.000Z',
+      },
+    }} />);
+
+    expect(markup).toContain('displayed visits are a lower bound');
+    expect(markup).not.toContain('displayed visits are complete only through');
+  });
+
   it('includes accessible table names and column scopes', () => {
     const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={reportFixture()} />);
 

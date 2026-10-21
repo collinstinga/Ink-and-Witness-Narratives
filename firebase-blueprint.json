@@ -113,6 +113,7 @@
       "properties": {
         "schemaVersion": { "type": "number", "enum": [2] },
         "id": { "type": "string", "description": "Domain-separated HMAC document ID; does not expose visitor or referral inputs" },
+        "keyFingerprint": { "type": "string", "description": "Non-secret commitment to the dedicated click key used for this event" },
         "affiliateCode": { "type": "string" },
         "affiliateId": { "type": "string" },
         "articleId": { "type": "string" },
@@ -122,7 +123,7 @@
         "timestamp": { "type": "string" },
         "dedupeWindowStartedAt": { "type": "string" }
       },
-      "required": ["schemaVersion", "id", "affiliateCode", "affiliateId", "visitorKey", "timestamp", "dedupeWindowStartedAt"]
+      "required": ["schemaVersion", "id", "keyFingerprint", "affiliateCode", "affiliateId", "visitorKey", "timestamp", "dedupeWindowStartedAt"]
     },
     "AffiliateClickAnalyticsActivation": {
       "title": "AffiliateClickAnalyticsActivation",
@@ -133,9 +134,10 @@
         "eventSchemaVersion": { "type": "number", "enum": [2] },
         "activatedAt": { "type": "string" },
         "completeFrom": { "type": "string" },
-        "keyVersion": { "type": "string", "enum": ["v1"] }
+        "keyVersion": { "type": "string", "enum": ["v1"] },
+        "keyFingerprint": { "type": "string", "description": "Must match the non-secret commitment derived from the deployed dedicated click key" }
       },
-      "required": ["schemaVersion", "eventSchemaVersion", "activatedAt", "completeFrom", "keyVersion"]
+      "required": ["schemaVersion", "eventSchemaVersion", "activatedAt", "completeFrom", "keyVersion", "keyFingerprint"]
     },
     "PaymentTransaction": {
       "title": "PaymentTransaction",

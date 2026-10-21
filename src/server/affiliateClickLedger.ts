@@ -8,6 +8,7 @@ export const AFFILIATE_CLICK_DEDUPE_WINDOW_MS = 30 * 60 * 1000;
 const VISITOR_TOKEN_PREFIX = 'aff_vis_v1';
 const VISITOR_KEY_PREFIX = 'acv1_';
 const CLICK_DOCUMENT_PREFIX = 'aclk2_';
+const CLICK_KEY_FINGERPRINT_PREFIX = 'ack1_';
 const MAX_TOKEN_LENGTH = 1024;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
 const MAX_REFERRER_LENGTH = 2048;
@@ -21,6 +22,7 @@ const AFFILIATE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const VISITOR_NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const VISITOR_KEY_PATTERN = /^acv1_[A-Za-z0-9_-]{43}$/;
 const CLICK_DOCUMENT_ID_PATTERN = /^aclk2_[a-f0-9]{64}$/;
+const CLICK_KEY_FINGERPRINT_PATTERN = /^ack1_[A-Za-z0-9_-]{43}$/;
 
 interface AffiliateClickVisitorTokenPayload {
   v: 1;
@@ -45,6 +47,7 @@ export interface AffiliateClickVisitorTokenOptions {
 export interface DurableAffiliateClickEventV2 {
   schemaVersion: 2;
   id: string;
+  keyFingerprint: string;
   affiliateCode: string;
   affiliateId: string;
   articleId?: string;
@@ -55,12 +58,26 @@ export interface DurableAffiliateClickEventV2 {
   dedupeWindowStartedAt?: string;
 }
 
+export interface AffiliateClickAnalyticsActivationV1 {
+  schemaVersion: 1;
+  eventSchemaVersion: 2;
+  activatedAt: string;
+  completeFrom: string;
+  keyVersion: 'v1';
+  keyFingerprint: string;
+}
+
 export type DurableAffiliateClickCoverageReason =
   | 'complete'
   | 'invalid_range'
   | 'not_enabled'
   | 'query_failed'
+  | 'invalid_activation_marker'
+  | 'runtime_not_required'
+  | 'missing_secret'
+  | 'key_mismatch'
   | 'predates_durable_history'
+  | 'settling_window'
   | 'truncated'
   | 'invalid_events'
   | 'missing_visitor_keys';
@@ -112,6 +129,20 @@ function deriveVisitorKey(nonce: string, signingSecret: string): string {
     .update(`ink-witness:affiliate-click-visitor:v1\u0000${nonce}`, 'utf8')
     .digest('base64url');
   return `${VISITOR_KEY_PREFIX}${digest}`;
+}
+
+/**
+ * Non-secret commitment used to detect click-key rotation. It is safe to store
+ * beside private click records, but is never returned by an analytics route.
+ */
+export function deriveAffiliateClickAnalyticsKeyFingerprint(secret: unknown): string | null {
+  const signingSecret = typeof secret === 'string' ? secret.trim() : '';
+  if (signingSecret.length < 32) return null;
+  const digest = crypto
+    .createHmac('sha256', signingSecret)
+    .update('ink-witness:affiliate-click-key-fingerprint:v1', 'utf8')
+    .digest('base64url');
+  return `${CLICK_KEY_FINGERPRINT_PREFIX}${digest}`;
 }
 
 function resolveTokenMaxAge(value: unknown): number {
@@ -278,6 +309,7 @@ function canonicalIsoTimestamp(value: unknown): string | null {
 const DURABLE_EVENT_ALLOWED_KEYS = new Set([
   'schemaVersion',
   'id',
+  'keyFingerprint',
   'affiliateCode',
   'affiliateId',
   'articleId',
@@ -287,6 +319,50 @@ const DURABLE_EVENT_ALLOWED_KEYS = new Set([
   'timestamp',
   'dedupeWindowStartedAt',
 ]);
+
+const ACTIVATION_MARKER_ALLOWED_KEYS = new Set([
+  'schemaVersion',
+  'eventSchemaVersion',
+  'activatedAt',
+  'completeFrom',
+  'keyVersion',
+  'keyFingerprint',
+]);
+
+/** Validate the create-only server marker without accepting future fields implicitly. */
+export function normalizeAffiliateClickAnalyticsActivationV1(
+  value: unknown,
+): AffiliateClickAnalyticsActivationV1 | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some(key => !ACTIVATION_MARKER_ALLOWED_KEYS.has(key))) return null;
+  if (
+    record.schemaVersion !== 1
+    || record.eventSchemaVersion !== 2
+    || record.keyVersion !== 'v1'
+    || typeof record.keyFingerprint !== 'string'
+    || !CLICK_KEY_FINGERPRINT_PATTERN.test(record.keyFingerprint)
+  ) {
+    return null;
+  }
+  const activatedAt = canonicalIsoTimestamp(record.activatedAt);
+  const completeFrom = canonicalIsoTimestamp(record.completeFrom);
+  if (
+    !activatedAt
+    || !completeFrom
+    || record.activatedAt !== activatedAt
+    || record.completeFrom !== completeFrom
+    || Date.parse(activatedAt) >= Date.parse(completeFrom)
+  ) return null;
+  return {
+    schemaVersion: 1,
+    eventSchemaVersion: 2,
+    activatedAt,
+    completeFrom,
+    keyVersion: 'v1',
+    keyFingerprint: record.keyFingerprint,
+  };
+}
 
 /**
  * Fail-closed durable event validator. Unknown fields are rejected so a future
@@ -299,6 +375,10 @@ export function normalizeDurableAffiliateClickEventV2(value: unknown): DurableAf
   if (Object.keys(record).some(key => !DURABLE_EVENT_ALLOWED_KEYS.has(key))) return null;
   if (record.schemaVersion !== 2) return null;
   if (typeof record.id !== 'string' || !CLICK_DOCUMENT_ID_PATTERN.test(record.id)) return null;
+  if (
+    typeof record.keyFingerprint !== 'string'
+    || !CLICK_KEY_FINGERPRINT_PATTERN.test(record.keyFingerprint)
+  ) return null;
   const affiliateCode = normalizeAffiliateCode(record.affiliateCode);
   const affiliateId = typeof record.affiliateId === 'string' ? record.affiliateId.trim() : '';
   const articleId = normalizeArticleId(record.articleId);
@@ -310,6 +390,7 @@ export function normalizeDurableAffiliateClickEventV2(value: unknown): DurableAf
     || articleId === null
     || campaignCode === null
     || !timestamp
+    || record.timestamp !== timestamp
   ) return null;
 
   const visitorKey = record.visitorKey === undefined
@@ -321,7 +402,10 @@ export function normalizeDurableAffiliateClickEventV2(value: unknown): DurableAf
   const dedupeWindowStartedAt = record.dedupeWindowStartedAt === undefined
     ? undefined
     : canonicalIsoTimestamp(record.dedupeWindowStartedAt);
-  if (record.dedupeWindowStartedAt !== undefined && !dedupeWindowStartedAt) return null;
+  if (
+    record.dedupeWindowStartedAt !== undefined
+    && (!dedupeWindowStartedAt || record.dedupeWindowStartedAt !== dedupeWindowStartedAt)
+  ) return null;
   if (Boolean(visitorKey) !== Boolean(dedupeWindowStartedAt)) return null;
   if (dedupeWindowStartedAt) {
     const occurredAtMs = Date.parse(timestamp);
@@ -340,6 +424,7 @@ export function normalizeDurableAffiliateClickEventV2(value: unknown): DurableAf
   return {
     schemaVersion: 2,
     id: record.id,
+    keyFingerprint: record.keyFingerprint,
     affiliateCode,
     affiliateId,
     ...(articleId ? { articleId } : {}),
@@ -351,7 +436,7 @@ export function normalizeDurableAffiliateClickEventV2(value: unknown): DurableAf
   };
 }
 
-function unavailableCoverage(
+export function unavailableDurableAffiliateClickCoverage(
   reason: DurableAffiliateClickCoverageReason,
 ): DurableAffiliateClickCoverageAssessment {
   return {
@@ -374,6 +459,7 @@ export function assessDurableAffiliateClickCoverage(input: {
   rangeStartsAt: unknown;
   rangeEndsAt: unknown;
   durableHistoryStartsAt?: unknown;
+  historyObservedThrough?: unknown;
   querySucceeded: boolean;
   truncated: boolean;
   events: unknown[];
@@ -381,16 +467,27 @@ export function assessDurableAffiliateClickCoverage(input: {
   const rangeStartsAt = canonicalIsoTimestamp(input.rangeStartsAt);
   const rangeEndsAt = canonicalIsoTimestamp(input.rangeEndsAt);
   if (!rangeStartsAt || !rangeEndsAt || Date.parse(rangeStartsAt) > Date.parse(rangeEndsAt)) {
-    return unavailableCoverage('invalid_range');
+    return unavailableDurableAffiliateClickCoverage('invalid_range');
   }
   const durableHistoryStartsAt = canonicalIsoTimestamp(input.durableHistoryStartsAt);
-  if (!durableHistoryStartsAt) return unavailableCoverage('not_enabled');
-  if (!input.querySucceeded) return unavailableCoverage('query_failed');
+  if (!input.querySucceeded) return unavailableDurableAffiliateClickCoverage('query_failed');
+  if (!durableHistoryStartsAt) return unavailableDurableAffiliateClickCoverage('not_enabled');
 
   const rangeStartMs = Date.parse(rangeStartsAt);
   const rangeEndMs = Date.parse(rangeEndsAt);
+  const durableHistoryStartMs = Date.parse(durableHistoryStartsAt);
+  if (rangeEndMs < durableHistoryStartMs) {
+    return unavailableDurableAffiliateClickCoverage('predates_durable_history');
+  }
   const reasons: DurableAffiliateClickCoverageReason[] = [];
-  if (rangeStartMs < Date.parse(durableHistoryStartsAt)) reasons.push('predates_durable_history');
+  if (rangeStartMs < durableHistoryStartMs) reasons.push('predates_durable_history');
+  const historyObservedThrough = input.historyObservedThrough === undefined
+    ? rangeEndsAt
+    : canonicalIsoTimestamp(input.historyObservedThrough);
+  if (!historyObservedThrough) {
+    return unavailableDurableAffiliateClickCoverage('invalid_range');
+  }
+  if (Date.parse(historyObservedThrough) < rangeEndMs) reasons.push('settling_window');
   if (input.truncated) reasons.push('truncated');
 
   let validEventCount = 0;
@@ -419,7 +516,9 @@ export function assessDurableAffiliateClickCoverage(input: {
   return {
     eventCoverage,
     uniqueVisitorCoverage,
-    conversionCoverage: uniqueVisitorCoverage,
+    // Click completeness alone cannot establish a purchase cohort. Until a
+    // bounded click-to-sale join exists, conversion must remain withheld.
+    conversionCoverage: 'partial',
     reasons: reasons.length > 0 ? reasons : ['complete'],
     validEventCount,
     invalidEventCount,

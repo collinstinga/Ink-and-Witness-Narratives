@@ -6,6 +6,8 @@ import {
   assessDurableAffiliateClickCoverage,
   createAffiliateClickVisitorCookieValue,
   createDurableAffiliateClickDedupeIdentity,
+  deriveAffiliateClickAnalyticsKeyFingerprint,
+  normalizeAffiliateClickAnalyticsActivationV1,
   normalizeDurableAffiliateClickEventV2,
   sanitizeAffiliateClickReferrerOrigin,
   verifyAffiliateClickVisitorCookie,
@@ -60,6 +62,7 @@ function durableEvent(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 2,
     id: dedupe!.documentId,
+    keyFingerprint: deriveAffiliateClickAnalyticsKeyFingerprint(TEST_SECRET),
     affiliateCode: 'PARTNER_7',
     affiliateId: 'affiliate_7',
     articleId: 'piece_42',
@@ -104,6 +107,15 @@ describe('anonymous affiliate click visitor token', () => {
       now: NOW,
       signingSecret: OTHER_SECRET,
     })).toBeNull();
+  });
+
+  it('derives a stable non-secret key commitment and detects rotation', () => {
+    const fingerprint = deriveAffiliateClickAnalyticsKeyFingerprint(TEST_SECRET);
+    expect(fingerprint).toMatch(/^ack1_[A-Za-z0-9_-]{43}$/);
+    expect(fingerprint).toBe(deriveAffiliateClickAnalyticsKeyFingerprint(TEST_SECRET));
+    expect(fingerprint).not.toBe(deriveAffiliateClickAnalyticsKeyFingerprint(OTHER_SECRET));
+    expect(fingerprint).not.toContain(TEST_SECRET);
+    expect(deriveAffiliateClickAnalyticsKeyFingerprint('too-short')).toBeNull();
   });
 
   it('rejects tampering, expiry, excessive lifetime, invalid nonce and future issuance', () => {
@@ -245,6 +257,14 @@ describe('durable affiliate click identity and privacy boundary', () => {
     const event = durableEvent();
     expect(normalizeDurableAffiliateClickEventV2({ ...event, id: 'legacy-click' })).toBeNull();
     expect(normalizeDurableAffiliateClickEventV2({ ...event, visitorKey: 'bad-key' })).toBeNull();
+    expect(normalizeDurableAffiliateClickEventV2({
+      ...event,
+      timestamp: '2026-10-20T11:00:00+03:00',
+    })).toBeNull();
+    expect(normalizeDurableAffiliateClickEventV2({
+      ...event,
+      dedupeWindowStartedAt: '2026-10-20T11:00:00+03:00',
+    })).toBeNull();
     expect(normalizeDurableAffiliateClickEventV2({ ...event, dedupeWindowStartedAt: undefined })).toBeNull();
     expect(normalizeDurableAffiliateClickEventV2({ ...event, visitorKey: undefined })).toBeNull();
     expect(normalizeDurableAffiliateClickEventV2({
@@ -267,7 +287,7 @@ describe('durable click coverage proof', () => {
     expect(assessDurableAffiliateClickCoverage({ ...base, events: [] })).toEqual({
       eventCoverage: 'complete',
       uniqueVisitorCoverage: 'complete',
-      conversionCoverage: 'complete',
+      conversionCoverage: 'partial',
       reasons: ['complete'],
       validEventCount: 0,
       invalidEventCount: 0,
@@ -288,6 +308,7 @@ describe('durable click coverage proof', () => {
     })).toMatchObject({ eventCoverage: 'unavailable', reasons: ['not_enabled'] });
     expect(assessDurableAffiliateClickCoverage({
       ...base,
+      durableHistoryStartsAt: undefined,
       querySucceeded: false,
       events: [],
     })).toMatchObject({ eventCoverage: 'unavailable', reasons: ['query_failed'] });
@@ -297,6 +318,19 @@ describe('durable click coverage proof', () => {
       rangeEndsAt: base.rangeStartsAt,
       events: [],
     })).toMatchObject({ eventCoverage: 'unavailable', reasons: ['invalid_range'] });
+  });
+
+  it('marks a range wholly before durable activation unavailable', () => {
+    expect(assessDurableAffiliateClickCoverage({
+      ...base,
+      rangeStartsAt: '2026-10-17T00:00:00.000Z',
+      rangeEndsAt: '2026-10-18T23:59:59.999Z',
+      durableHistoryStartsAt: '2026-10-19T00:00:00.000Z',
+      events: [],
+    })).toMatchObject({
+      eventCoverage: 'unavailable',
+      reasons: ['predates_durable_history'],
+    });
   });
 
   it('keeps conversion partial for pre-activation, truncated, invalid or visitorless history', () => {
@@ -320,5 +354,38 @@ describe('durable click coverage proof', () => {
     expect(result.validEventCount).toBe(1);
     expect(result.invalidEventCount).toBe(1);
     expect(result.eventsWithoutVisitorKey).toBe(1);
+  });
+});
+
+describe('durable click activation marker validation', () => {
+  const marker = {
+    schemaVersion: 1,
+    eventSchemaVersion: 2,
+    activatedAt: '2026-10-20T08:00:00.000Z',
+    completeFrom: '2026-10-20T08:05:00.000Z',
+    keyVersion: 'v1',
+    keyFingerprint: deriveAffiliateClickAnalyticsKeyFingerprint(TEST_SECRET)!,
+  } as const;
+
+  it('canonicalizes the exact create-only v1 marker', () => {
+    expect(normalizeAffiliateClickAnalyticsActivationV1(marker)).toEqual(marker);
+  });
+
+  it('rejects backdated, unknown-field and incompatible markers', () => {
+    expect(normalizeAffiliateClickAnalyticsActivationV1({
+      ...marker,
+      activatedAt: '2026-10-20T08:06:00.000Z',
+    })).toBeNull();
+    expect(normalizeAffiliateClickAnalyticsActivationV1({ ...marker, mutable: true })).toBeNull();
+    expect(normalizeAffiliateClickAnalyticsActivationV1({ ...marker, eventSchemaVersion: 3 })).toBeNull();
+    expect(normalizeAffiliateClickAnalyticsActivationV1({ ...marker, keyVersion: 'v2' })).toBeNull();
+    expect(normalizeAffiliateClickAnalyticsActivationV1({
+      ...marker,
+      activatedAt: marker.completeFrom,
+    })).toBeNull();
+    expect(normalizeAffiliateClickAnalyticsActivationV1({
+      ...marker,
+      activatedAt: '2026-10-20T08:00:00Z',
+    })).toBeNull();
   });
 });

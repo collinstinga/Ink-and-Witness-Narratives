@@ -7,6 +7,7 @@ const firestore = vi.hoisted(() => ({
   setDoc: vi.fn(),
   updateDoc: vi.fn(),
   getDoc: vi.fn(),
+  directGet: vi.fn(),
   getAllDocs: vi.fn(),
   deleteDoc: vi.fn(),
   runTransaction: vi.fn()
@@ -82,6 +83,7 @@ describe('affiliate store Literary Circle integration', () => {
     firestore.replaceDoc.mockReset();
     firestore.updateDoc.mockReset();
     firestore.getDoc.mockReset();
+    firestore.directGet.mockReset();
     firestore.getAllDocs.mockReset();
     firestore.deleteDoc.mockReset();
     firestore.runTransaction.mockReset();
@@ -110,10 +112,21 @@ describe('affiliate store Literary Circle integration', () => {
     firestore.deleteDoc.mockImplementation(async (collection: string, id: string) => {
       firestore.documents.delete(`${collection}/${id}`);
     });
+    firestore.directGet.mockImplementation(async (collection: string, id: string) => {
+      const value = firestore.documents.get(`${collection}/${id}`);
+      return {
+        exists: value !== undefined,
+        data: () => clone(value),
+      };
+    });
 
     const db = {
       collection: (collection: string) => ({
-        doc: (id: string) => ({ collection, id })
+        doc: (id: string) => ({
+          collection,
+          id,
+          get: () => firestore.directGet(collection, id),
+        })
       }),
       runTransaction: firestore.runTransaction
     };
@@ -447,14 +460,16 @@ describe('affiliate store Literary Circle integration', () => {
     ]));
 
     const databaseCallsBeforeAnalytics = {
-      reads: firestore.getAllDocs.mock.calls.length + firestore.getDoc.mock.calls.length,
+      reads: firestore.getAllDocs.mock.calls.length
+        + firestore.getDoc.mock.calls.length
+        + firestore.directGet.mock.calls.length,
       writes: firestore.setDoc.mock.calls.length
         + firestore.replaceDoc.mock.calls.length
         + firestore.updateDoc.mock.calls.length
         + firestore.deleteDoc.mock.calls.length
         + firestore.runTransaction.mock.calls.length,
     };
-    const analytics = affiliateStore.getAdminAffiliateAnalytics();
+    const analytics = await affiliateStore.getAdminAffiliateAnalytics();
     expect(analytics).toMatchObject({
       totals: {
         verifiedSales: 2,
@@ -474,13 +489,22 @@ describe('affiliate store Literary Circle integration', () => {
     expect(JSON.stringify(analytics)).not.toContain('circle-first@example.test');
     expect(JSON.stringify(analytics)).not.toContain('254700000101');
     expect({
-      reads: firestore.getAllDocs.mock.calls.length + firestore.getDoc.mock.calls.length,
+      reads: firestore.getAllDocs.mock.calls.length
+        + firestore.getDoc.mock.calls.length
+        + firestore.directGet.mock.calls.length,
       writes: firestore.setDoc.mock.calls.length
         + firestore.replaceDoc.mock.calls.length
         + firestore.updateDoc.mock.calls.length
         + firestore.deleteDoc.mock.calls.length
         + firestore.runTransaction.mock.calls.length,
-    }).toEqual(databaseCallsBeforeAnalytics);
+    }).toEqual({
+      reads: databaseCallsBeforeAnalytics.reads + 1,
+      writes: databaseCallsBeforeAnalytics.writes,
+    });
+    expect(firestore.directGet).toHaveBeenLastCalledWith(
+      'site_configs',
+      'affiliate_click_analytics',
+    );
   });
 
   it('atomically updates access, manual tier and additive founding recognition', async () => {

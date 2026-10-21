@@ -179,3 +179,18 @@ path until the protected staging key, guarded nine-affiliate backup, event and
 quota verification, separately reviewed bounded query, and immutable future
 `completeFrom` marker are all ready. See
 `docs/checkpoints/2026-10-21-literary-circle-durable-click-runtime.md`.
+
+The bounded Writer analytics query is now present locally. It reads the fixed
+activation marker on demand, queries only an inclusive timestamp range with a
+1,001-document hard limit, rejects private or malformed records, and never
+reads the marker on the public click path. Unsupported click dimensions cause
+zero Firestore reads; query or configuration failure keeps financial
+aggregates available while making traffic metrics unavailable. Marker creation
+is deliberately excluded. The reader verifies immutable Firestore marker
+metadata, a non-secret commitment to the deployed click key, and a ten-minute
+ingestion watermark; durable conversion stays withheld until a real
+click-to-sale cohort join exists. Identical concurrent reads are coalesced and
+the writer route is process-limited. The route continues using the explicitly
+partial local fallback until the marker exists. Do not activate or deploy this
+work without the guarded staging sequence above. See
+`docs/checkpoints/2026-10-21-literary-circle-durable-click-query.md`.

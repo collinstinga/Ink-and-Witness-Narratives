@@ -380,4 +380,96 @@ describe('affiliate analytics aggregate report', () => {
       repeatPayingReaders: null,
     });
   });
+
+  it('keeps financial aggregates available when the durable click query fails closed', () => {
+    const report = buildAffiliateAnalyticsReport({
+      affiliates: [affiliate('affiliate-1', 'PARTNER1')],
+      commissions: [commission('sale', '2026-10-10T08:00:00.000Z')],
+      clickEvents: [],
+      clickCoverageAssessment: {
+        eventCoverage: 'unavailable',
+        uniqueVisitorCoverage: 'unavailable',
+        conversionCoverage: 'unavailable',
+        reasons: ['query_failed'],
+        validEventCount: 0,
+        invalidEventCount: 0,
+        eventsWithoutVisitorKey: 0,
+      },
+      clickHistoryQueriedThrough: '2026-10-20T12:00:00.000Z',
+      startDate: '2026-10-01',
+      endDate: '2026-10-31',
+    });
+
+    expect(report.totals).toMatchObject({ verifiedSales: 1, grossSalesKes: 100 });
+    expect(report.referralTraffic).toEqual({
+      coverage: 'unavailable',
+      reason: 'query_failed',
+      coverageReasons: ['query_failed'],
+      queriedThrough: '2026-10-20T12:00:00.000Z',
+      clicks: null,
+      knownUniqueVisitors: null,
+      clicksWithoutVisitorKey: null,
+      conversionRate: null,
+    });
+  });
+
+  it('reports bounded durable traffic but withholds conversion without a cohort join', () => {
+    const clicks: AffiliateClickEvent[] = [{
+      schemaVersion: 2,
+      id: `aclk2_${'a'.repeat(64)}`,
+      keyFingerprint: `ack1_${'B'.repeat(43)}`,
+      affiliateCode: 'PARTNER1',
+      affiliateId: 'affiliate-1',
+      articleId: 'piece-1',
+      visitorKey: `acv1_${'A'.repeat(43)}`,
+      timestamp: '2026-10-10T07:00:00.000Z',
+      dedupeWindowStartedAt: '2026-10-10T07:00:00.000Z',
+    }];
+    const base = {
+      affiliates: [affiliate('affiliate-1', 'PARTNER1')],
+      commissions: [commission('sale', '2026-10-10T08:00:00.000Z')],
+      clickEvents: clicks,
+      startDate: '2026-10-01',
+      endDate: '2026-10-31',
+    };
+    const partial = buildAffiliateAnalyticsReport({
+      ...base,
+      clickCoverageAssessment: {
+        eventCoverage: 'partial',
+        uniqueVisitorCoverage: 'partial',
+        conversionCoverage: 'partial',
+        reasons: ['predates_durable_history'],
+        validEventCount: 1,
+        invalidEventCount: 0,
+        eventsWithoutVisitorKey: 0,
+      },
+    });
+    expect(partial.referralTraffic).toMatchObject({
+      coverage: 'partial',
+      reason: 'predates_durable_history',
+      clicks: 1,
+      knownUniqueVisitors: 1,
+      conversionRate: null,
+    });
+
+    const complete = buildAffiliateAnalyticsReport({
+      ...base,
+      clickCoverageAssessment: {
+        eventCoverage: 'complete',
+        uniqueVisitorCoverage: 'complete',
+        conversionCoverage: 'partial',
+        reasons: ['complete'],
+        validEventCount: 1,
+        invalidEventCount: 0,
+        eventsWithoutVisitorKey: 0,
+      },
+    });
+    expect(complete.referralTraffic).toMatchObject({
+      coverage: 'complete',
+      reason: 'complete',
+      clicks: 1,
+      knownUniqueVisitors: 1,
+      conversionRate: null,
+    });
+  });
 });

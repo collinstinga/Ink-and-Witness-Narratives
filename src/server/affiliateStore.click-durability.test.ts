@@ -212,6 +212,7 @@ describe('affiliate durable click transaction', () => {
     expect(eventId).toMatch(/^affiliate_clicks\/aclk2_[a-f0-9]{64}$/);
     expect(event).toMatchObject({
       schemaVersion: 2,
+      keyFingerprint: expect.stringMatching(/^ack1_[A-Za-z0-9_-]{43}$/),
       affiliateCode: 'PARTNER_7',
       affiliateId: 'affiliate_7',
       articleId: 'piece_42',
@@ -292,6 +293,41 @@ describe('affiliate durable click transaction', () => {
     });
     expect([...firestore.documents.keys()].filter(key => key.startsWith('affiliate_clicks/'))).toHaveLength(0);
     expect(firestore.committedWrites.filter(write => write.collection === 'affiliates')).toHaveLength(1);
+  });
+
+  it('never reads the analytics activation marker on the click hot path', async () => {
+    await affiliateStore.registerClick(
+      'PARTNER_7',
+      'piece_mode_off',
+      undefined,
+      'legacy-mode-off-fingerprint',
+      undefined,
+      undefined,
+      { durableMode: 'off', visitorKey: VISITOR_KEY },
+    );
+    await affiliateStore.registerClick(
+      'PARTNER_7',
+      'piece_mode_shadow',
+      undefined,
+      'legacy-mode-shadow-fingerprint',
+      undefined,
+      undefined,
+      { durableMode: 'shadow', visitorKey: VISITOR_KEY },
+    );
+    await affiliateStore.registerClick(
+      'PARTNER_7',
+      'piece_mode_required',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { durableMode: 'required', visitorKey: VISITOR_KEY },
+    );
+
+    expect(firestore.reads.filter(read => (
+      read.collection === 'site_configs'
+      && read.id === 'affiliate_click_analytics'
+    ))).toHaveLength(0);
   });
 
   it('preserves pre-existing legacy click documents byte-for-byte', async () => {

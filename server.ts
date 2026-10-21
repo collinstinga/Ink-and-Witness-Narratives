@@ -1419,6 +1419,19 @@ export async function createApp() {
     message: { success: false, error: "Comment refresh limit reached. Please try again in a moment." }
   });
 
+  const affiliateAnalyticsReadLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 6,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    keyGenerator: (req: Request) => String((req as any).user?.id || 'unknown'),
+    message: {
+      success: false,
+      error: "Affiliate analytics refresh limit reached. Please wait before refreshing again."
+    }
+  });
+
   const commentReportLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
     max: 10,
@@ -6882,20 +6895,25 @@ ${currentDraft || prompt}
 
   // Admin: Aggregate-only affiliate analytics. This route deliberately uses
   // the already-loaded ledgers and never hydrates customer transactions.
-  app.get("/api/admin/affiliates/analytics", requireAdminAuth, (req: Request, res: Response) => {
-    res.setHeader('Cache-Control', 'private, no-store');
-    try {
-      const options = parseAffiliateAnalyticsQuery(req.query as Record<string, unknown>);
-      res.json(store.affiliates.getAdminAffiliateAnalytics(options));
-    } catch (err) {
-      if (err instanceof AffiliateAnalyticsValidationError) {
-        res.status(400).json({ error: err.message });
-        return;
+  app.get(
+    "/api/admin/affiliates/analytics",
+    requireAdminAuth,
+    affiliateAnalyticsReadLimiter,
+    async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'private, no-store');
+      try {
+        const options = parseAffiliateAnalyticsQuery(req.query as Record<string, unknown>);
+        res.json(await store.affiliates.getAdminAffiliateAnalytics(options));
+      } catch (err) {
+        if (err instanceof AffiliateAnalyticsValidationError) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        console.error('[AffiliateAnalytics] Failed to build writer report:', err);
+        res.status(500).json({ error: 'Affiliate analytics could not be loaded right now.' });
       }
-      console.error('[AffiliateAnalytics] Failed to build writer report:', err);
-      res.status(500).json({ error: 'Affiliate analytics could not be loaded right now.' });
-    }
-  });
+    },
+  );
 
   // Admin: List All Affiliates
   app.get("/api/admin/affiliates", requireAdminAuth, (req: Request, res: Response) => {
