@@ -106,6 +106,16 @@ export function planAffiliateNotifications(input: {
       exclude(Object.keys(eligibility.reasons)[0] || 'ineligible');
       continue;
     }
+    // A later opt-in must not turn historical releases into a marketing backlog.
+    // Delivery must independently recheck current consent before sending.
+    if (source.eventType === 'new_release') {
+      const consentAt = affiliate.notificationPreferences?.marketingConsentAt;
+      const consentMs = typeof consentAt === 'string' ? Date.parse(consentAt) : NaN;
+      if (!Number.isFinite(consentMs) || consentMs <= 0 || consentMs > occurredMs) {
+        exclude('marketing_consent_after_event');
+        continue;
+      }
+    }
     result.intents.push({
       schemaVersion: 1,
       id: digest('ani1_', [eventId, affiliate.id]),
