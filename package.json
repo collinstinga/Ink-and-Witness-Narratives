@@ -13,7 +13,9 @@
     "migrate:sales:dry-run": "tsx scripts/backfill-sales-ledger.ts",
     "literary-circle:backup": "tsx scripts/backup-literary-circle.ts",
     "literary-circle:migrate:dry-run": "tsx scripts/migrate-literary-circle.ts",
-    "literary-circle:migrate:apply": "tsx scripts/migrate-literary-circle.ts --apply"
+    "literary-circle:migrate:apply": "tsx scripts/migrate-literary-circle.ts --apply",
+    "literary-circle:click-activation:dry-run": "tsx scripts/activate-affiliate-click-analytics.ts",
+    "literary-circle:click-activation:apply": "tsx scripts/activate-affiliate-click-analytics.ts --apply"
   },
   "dependencies": {
     "@google-cloud/firestore": "^9.0.0",

@@ -49,6 +49,59 @@ verification have both passed.
 Run the dry-run command again with the same verified backup. A healthy repeat
 shows no membership or index changes, proving the migration is idempotent.
 
+## Durable-click activation utility
+
+The create-only durable-click marker has a separate staging-only utility. It is
+not part of the founding migration and has no production override. The command
+defaults to a zero-write dry run; apply additionally requires all three explicit
+acknowledgements shown below.
+
+Before either command:
+
+1. deploy `AFFILIATE_CLICK_LEDGER_MODE=required` to every staging instance with
+   the protected dedicated click secret;
+2. complete a controlled referral smoke test through that immutable staging
+   deployment and retain both its deployment reference and its `aclk2_...`
+   Firestore event ID;
+3. quiesce staging affiliate traffic;
+4. take a new verified schema-v3 backup after the proof event exists; and
+5. keep `FIREBASE_SERVICE_ACCOUNT_JSON` available only in the protected local
+   process environment. Application-default credentials are refused.
+
+The deployment reference is operator-supplied evidence from the separate
+staging smoke run. The utility hashes it in its report but does not claim to
+query or validate Vercel. It independently validates the referenced Firestore
+event's strict v2 schema, reconciled affiliate ownership, key fingerprint,
+create-only metadata, authoritative time, recency, and presence in the fresh
+backup.
+
+Example dry run:
+
+```powershell
+pnpm run literary-circle:click-activation:dry-run --environment=staging --expected-project=ink-witness-staging "--expected-database=(default)" --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json --expected-key-fingerprint=ack1_EXPECTED_NON_SECRET_FINGERPRINT --deployment-evidence=dpl_ImmutableStagingDeployment --proof-event-id=aclk2_CONTROLLED_EVENT_ID --lead-minutes=30
+```
+
+Only after the dry-run report is reviewed, use the same evidence and add the
+irreversible-boundary acknowledgements:
+
+```powershell
+pnpm run literary-circle:click-activation:apply --environment=staging --expected-project=ink-witness-staging "--expected-database=(default)" --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json --expected-key-fingerprint=ack1_EXPECTED_NON_SECRET_FINGERPRINT --deployment-evidence=dpl_ImmutableStagingDeployment --proof-event-id=aclk2_CONTROLLED_EVENT_ID --lead-minutes=30 --acknowledge-create-only --acknowledge-no-rollback --acknowledge-staging-traffic-quiesced
+```
+
+Apply performs one permitted write: `transaction.create()` at
+`site_configs/affiliate_click_analytics` with the exact six-field v1 marker.
+Any pre-existing marker, including an identical one, aborts with a conflict.
+The tool never updates, merges, deletes, repairs, or retries an existing marker.
+It reads the marker back, verifies `createTime === updateTime` and
+`activatedAt <= createTime < completeFrom`, then repeats exact live-to-backup
+comparison. If post-verification fails, the marker is deliberately left intact
+for manual incident review; never delete it to rerun activation.
+
+The JSON report contains hashes and non-secret configuration evidence only. It
+must not contain the service account, dedicated secret, visitor key, affiliate
+identity, proof-event ID, or raw provider errors. Store any captured report only
+under an approved, git-ignored `data/` location.
+
 ## Backup scope and checks
 
 The snapshot contains every document from `affiliates`,
