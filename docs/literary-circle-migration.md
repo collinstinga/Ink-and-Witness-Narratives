@@ -30,7 +30,7 @@ The backup contains personal and financial data. It is written under the
 git-ignored `data/backups/` directory with a timestamped backup ID. Do not
 commit, email, or copy it to an unapproved location.
 
-Current backup schema is v5. It also captures all newsletter campaign and
+Current backup schema is v6. It also captures all newsletter campaign and
 article documents, preserving release-notification source evidence, unpublished
 content and publication state without projection. Treat these additional files
 as confidential. Capturing and comparing them requires collection reads; budget
@@ -39,6 +39,21 @@ These datasets are preservation evidence only, not migration write targets.
 Older backups remain unchanged but cannot satisfy the current verifier. Take a
 fresh complete backup; never relabel an older manifest or invent empty datasets.
 
+Schema v6 also preserves the named durable-click activation marker and founding
+migration marker. Unrelated migration markers are excluded. Activation compares
+all datasets exactly before writing; post-verification allows only its exact
+independently verified newly created marker. Migration retries accept only an
+unchanged marker or the completed first-apply marker tied to the same backup
+hash, backup ID and nine affiliate identities; post-verification compares the
+exact transaction result. No marker repair/delete fallback is provided.
+
+Migration now requires `--expected-database` and explicit
+`FIREBASE_SERVICE_ACCOUNT_JSON` belonging to the exact allowlisted staging
+project. ADC and cross-project credentials are refused before initialization.
+The initialized client's recorded project/database must also match before reads
+or writes. CLI arguments reject duplicates and unknown flags. Provider failures
+are redacted, rather than exposing source payloads or credential details.
+
 ## Staging sequence
 
 Use staging credentials and replace the example project and backup path:
@@ -46,9 +61,9 @@ Use staging credentials and replace the example project and backup path:
 ```powershell
 npm run literary-circle:backup -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9
 
-npm run literary-circle:migrate:dry-run -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
+npm run literary-circle:migrate:dry-run -- --environment=staging --expected-project=ink-witness-staging --expected-database="(default)" --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
 
-npm run literary-circle:migrate:apply -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
+npm run literary-circle:migrate:apply -- --environment=staging --expected-project=ink-witness-staging --expected-database="(default)" --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
 ```
 
 Before any eventual production migration, capture and verify the live records
@@ -80,7 +95,7 @@ Before either command:
    deployment and retain both its deployment reference and its `aclk2_...`
    Firestore event ID;
 3. quiesce staging affiliate traffic;
-4. take a new verified schema-v5 backup after the proof event exists; and
+4. take a new verified schema-v6 backup after the proof event exists; and
 5. keep `FIREBASE_SERVICE_ACCOUNT_JSON` available only in the protected local
    process environment. Application-default credentials are refused.
 

@@ -6,7 +6,7 @@ import type {
   Firestore,
   Transaction,
 } from 'firebase-admin/firestore';
-import { getDb } from '../src/server/db.js';
+import { getDb, getFirestoreClientTarget } from '../src/server/db.js';
 import {
   captureAffiliateDatasets,
   configuredFirebaseTarget,
@@ -31,6 +31,7 @@ import {
   assertFreshAffiliateClickActivationBackup,
   assertImmutableAffiliateClickActivationMarker,
   assertRecentAffiliateClickActivationProofEvent,
+  activationCanonicalJson,
   buildAffiliateClickActivationMarker,
   buildRedactedAffiliateClickActivationReport,
   parseAffiliateClickActivationArgs,
@@ -48,6 +49,7 @@ interface ActivationDependencies {
   now: () => Date;
   configuredTarget: () => FirebaseTarget;
   getFirestore: () => Firestore;
+  getClientTarget: typeof getFirestoreClientTarget;
   verifyBackup: typeof verifyAffiliateBackup;
   captureDatasets: (db: Firestore) => Promise<Map<string, BackupDatasetPayload>>;
 }
@@ -57,6 +59,7 @@ const defaultDependencies: ActivationDependencies = {
   now: () => new Date(),
   configuredTarget: () => configuredFirebaseTarget(),
   getFirestore: () => getDb(),
+  getClientTarget: getFirestoreClientTarget,
   verifyBackup: verifyAffiliateBackup,
   captureDatasets: db => captureAffiliateDatasets(db),
 };
@@ -247,6 +250,10 @@ function validateGate(input: {
   });
 
   const liveAffiliates = snapshotDocuments(input.snapshots.affiliates);
+  const backedUpMarkers = input.backup.payloads.get('literary_circle_migration_markers')?.documents;
+  if (activationCanonicalJson(backedUpMarkers) !== activationCanonicalJson(snapshotDocuments([input.snapshots.migration]))) {
+    throw new AffiliateClickActivationSafeError('backup', 'migration_marker_drift', 'The founding migration marker differs from the verified backup.');
+  }
   const founding = assertFoundingAffiliateMigrationReconciled({
     migrationMarker: input.snapshots.migration.exists
       ? input.snapshots.migration.data()
@@ -322,6 +329,7 @@ async function captureAndVerifyLiveState(
   dependencies: ActivationDependencies,
   db: Firestore,
   backup: VerifiedAffiliateBackup,
+  expectedCreatedMarker?: ReturnType<typeof buildAffiliateClickActivationMarker>,
 ): Promise<{
   payloads: Map<string, BackupDatasetPayload>;
   evidence: AffiliateClickActivationLiveStateEvidence;
@@ -335,6 +343,7 @@ async function captureAndVerifyLiveState(
   const evidence = assertExactAffiliateClickActivationLiveState({
     verifiedBackup: backup,
     livePayloads: payloads,
+    expectedCreatedMarker,
   });
   return { payloads, evidence };
 }
@@ -368,6 +377,11 @@ export async function executeAffiliateClickActivation(
     'The staging Firestore client could not be initialized safely.',
     dependencies.getFirestore,
   );
+  const binding = safely('target', 'client_target_unavailable', 'The initialized Firestore target could not be verified safely.',
+    () => dependencies.getClientTarget(db));
+  if (!binding || binding.projectId !== firebaseTarget.projectId || binding.firestoreDatabaseId !== firebaseTarget.databaseId) {
+    throw new AffiliateClickActivationSafeError('target', 'client_target_mismatch', 'The initialized Firestore client does not match the explicit staging project and database.');
+  }
   const references = gateReferences(db, cli, backupAffiliates);
 
   const initialSnapshots = await safelyAsync(
@@ -460,7 +474,7 @@ export async function executeAffiliateClickActivation(
     updateTime: postSnapshot.updateTime,
     expected: transactionGate.marker,
   });
-  const postLive = await captureAndVerifyLiveState(dependencies, db, backup);
+  const postLive = await captureAndVerifyLiveState(dependencies, db, backup, transactionGate.marker);
   const backupEvidence = assertFreshAffiliateClickActivationBackup({
     manifest: backup.manifest,
     authoritativeSnapshot: postSnapshot,

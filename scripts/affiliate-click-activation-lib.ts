@@ -639,6 +639,8 @@ export interface AffiliateClickActivationLiveStateEvidence {
 export function assertExactAffiliateClickActivationLiveState(input: {
   verifiedBackup: VerifiedAffiliateBackup;
   livePayloads: ReadonlyMap<string, BackupDatasetPayload>;
+  /** Only the marker independently verified after this command's create may differ. */
+  expectedCreatedMarker?: AffiliateClickAnalyticsActivationV1;
 }): AffiliateClickActivationLiveStateEvidence {
   const summaries: Array<{ key: string; documentsSha256: string; count: number }> = [];
   let documentCount = 0;
@@ -648,15 +650,26 @@ export function assertExactAffiliateClickActivationLiveState(input: {
     if (!backupPayload || !livePayload) {
       fail('backup', 'live_dataset_missing', 'The live-state comparison is missing a required dataset.');
     }
-    if (activationCanonicalJson(livePayload) !== activationCanonicalJson(backupPayload)) {
+    let expectedPayload = backupPayload;
+    if (definition.key === 'affiliate_click_activation_marker' && input.expectedCreatedMarker) {
+      if (backupPayload.documents.length) {
+        fail('backup', 'activation_marker_backed_up', 'A backed-up activation marker cannot be replaced.');
+      }
+      expectedPayload = {
+        ...backupPayload,
+        documents: [{ id: AFFILIATE_CLICK_ACTIVATION_MARKER_DOCUMENT_ID,
+          data: assertExactAffiliateClickActivationMarker(input.expectedCreatedMarker) as unknown as Record<string, unknown> }],
+      };
+    }
+    if (activationCanonicalJson(livePayload) !== activationCanonicalJson(expectedPayload)) {
       fail('backup', 'live_state_drift', 'The staging affiliate state differs from the fresh verified backup.');
     }
-    const count = backupPayload.documents.length;
+    const count = expectedPayload.documents.length;
     documentCount += count;
     summaries.push({
       key: definition.key,
       count,
-      documentsSha256: evidenceHash(`activation-live-dataset:${definition.key}`, backupPayload.documents),
+      documentsSha256: evidenceHash(`activation-live-dataset:${definition.key}`, expectedPayload.documents),
     });
   }
   if (

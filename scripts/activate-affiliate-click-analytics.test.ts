@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { DocumentReference, DocumentSnapshot, Firestore, Transaction } from 'firebase-admin/firestore';
 import { deriveAffiliateClickAnalyticsKeyFingerprint } from '../src/server/affiliateClickLedger.js';
 import {
@@ -105,6 +105,8 @@ function verifiedBackup(): VerifiedAffiliateBackup {
         ? affiliates()
         : definition.key === 'affiliate_clicks'
           ? [{ id: PROOF_EVENT_ID, data: proofEvent() }]
+          : definition.key === 'literary_circle_migration_markers'
+            ? [{ id: 'literary-circle-founding-affiliates-v1', data: migrationMarker() }]
           : [],
     });
   }
@@ -293,16 +295,40 @@ function dependencies(firestore = fakeFirestore(), backup = verifiedBackup()) {
       now: () => new Date(NOW),
       configuredTarget: () => ({ projectId: PROJECT_ID, databaseId: DATABASE_ID }),
       getFirestore: () => firestore.db,
+      getClientTarget: () => ({ projectId: PROJECT_ID, firestoreDatabaseId: DATABASE_ID }),
       verifyBackup: () => backup,
       captureDatasets: async (_db: Firestore) => {
         captures += 1;
-        return clonePayloads(backup.payloads);
+        const payloads = clonePayloads(backup.payloads);
+        for (const key of ['affiliate_click_activation_marker', 'literary_circle_migration_markers']) {
+          const definition = AFFILIATE_BACKUP_DATASETS.find(item => item.key === key)!;
+          const snapshot = await _db.collection(definition.collection).doc(definition.documentIds![0]).get();
+          payloads.set(key, { ...payloads.get(key)!, documents: snapshot.exists
+            ? [{ id: snapshot.id, data: snapshot.data()! }] : [] });
+        }
+        return payloads;
       },
     },
   };
 }
 
 describe('affiliate click activation CLI boundary', () => {
+  it.each([
+    null,
+    { projectId: 'ink-and-witness-narratives', firestoreDatabaseId: DATABASE_ID },
+    { projectId: PROJECT_ID, firestoreDatabaseId: 'other-database' },
+  ])('rejects a mismatched initialized client before any database read %#', async binding => {
+    const setup = dependencies();
+    const collection = vi.spyOn(setup.firestore.db, 'collection');
+    await expect(executeAffiliateClickActivation(argumentsFor('apply'), {
+      ...setup.values, getClientTarget: () => binding,
+    })).rejects.toMatchObject({ kind: 'target', safeCode: 'client_target_mismatch' });
+    expect(collection).not.toHaveBeenCalled();
+    expect(setup.captures).toBe(0);
+    expect(setup.firestore.transactions).toBe(0);
+    expect(setup.firestore.writes).toEqual([]);
+  });
+
   it('defaults to a zero-write dry run and emits only redacted evidence', async () => {
     const setup = dependencies();
     const report = await executeAffiliateClickActivation(argumentsFor(), setup.values);

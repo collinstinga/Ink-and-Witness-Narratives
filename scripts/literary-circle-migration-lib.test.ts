@@ -8,6 +8,7 @@ import {
   AFFILIATE_BACKUP_SCHEMA_VERSION,
   FOUNDING_AFFILIATE_COUNT,
   assertLiveStateMatchesBackup,
+  assertMigrationMarkerMatchesBackup,
   assertReadOnlyBackupTarget,
   assertStagingTarget,
   buildDatasetPayload,
@@ -22,6 +23,8 @@ import {
   validateFoundingAffiliateDocuments,
   verifyAffiliateBackup,
   writeAffiliateBackup,
+  migrationMarkerDocumentId,
+  LITERARY_CIRCLE_MIGRATION_ID,
   type BackupDatasetPayload,
   type BackupDocument
 } from './literary-circle-migration-lib.js';
@@ -126,6 +129,52 @@ function fakeFirestore(documents: ReadonlyMap<string, Record<string, unknown>>):
 }
 
 describe('Literary Circle migration safety helpers', () => {
+  it('captures only the named activation/migration markers and preserves their exact fields', async () => {
+    const records = new Map<string, Record<string, unknown>>([
+      ['site_configs/affiliate_click_analytics', { schemaVersion: 1, activatedAt: '2026-10-23T00:00:00.000Z', custom: 'preserved' }],
+      [`migration_markers/${migrationMarkerDocumentId()}`, { status: 'complete', attemptCount: 1, custom: ['preserved'] }],
+      ['migration_markers/unrelated', { private: 'excluded' }],
+    ]);
+    const captured = await captureAffiliateDatasets(fakeFirestore(records));
+    for (const key of ['affiliate_click_activation_marker', 'literary_circle_migration_markers']) {
+      const definition = AFFILIATE_BACKUP_DATASETS.find(item => item.key === key)!;
+      expect(captured.get(key)?.documents).toEqual([{ id: definition.documentIds![0], data: records.get(`${definition.collection}/${definition.documentIds![0]}`) }]);
+    }
+  });
+
+  it('allows only a completed first migration marker bound to the exact backup on retry', () => {
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const written = writeAffiliateBackup({ payloads: completePayloadSet(), target, now: '2026-10-16T00:00:00.000Z' });
+    cleanupDirectories.push(written.directory);
+    const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT });
+    const marker: BackupDocument = { id: migrationMarkerDocumentId(), data: {
+      schemaVersion: 1, migrationId: LITERARY_CIRCLE_MIGRATION_ID, status: 'complete',
+      expectedAffiliateCount: 9, completedCount: 9,
+      completedAffiliateIds: verified.payloads.get('affiliates')!.documents.map(document => document.id).sort(),
+      backupId: written.manifest.backupId, backupManifestSha256: written.manifest.contentSha256,
+      startedAt: '2026-10-16T00:00:01.000Z', completedAt: '2026-10-16T00:00:02.000Z',
+      lastAppliedAt: '2026-10-16T00:00:02.000Z', attemptCount: 1,
+    } };
+    expect(() => assertMigrationMarkerMatchesBackup(verified, [])).not.toThrow();
+    expect(() => assertMigrationMarkerMatchesBackup(verified, [marker])).not.toThrow();
+    for (const patch of [
+      { backupManifestSha256: 'wrong' }, { backupId: 'wrong' }, { status: 'pending' },
+      { attemptCount: 2 }, { completedCount: 8 }, { completedAffiliateIds: [] }, { unexpected: true },
+      { startedAt: '2026-10-15T00:00:00.000Z' }, { completedAt: 'invalid' },
+    ]) {
+      expect(() => assertMigrationMarkerMatchesBackup(verified, [{ ...marker, data: { ...marker.data, ...patch } }])).toThrow(/migration marker/);
+    }
+    const definition = AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'literary_circle_migration_markers')!;
+    const live = new Map(verified.payloads);
+    live.set(definition.key, buildDatasetPayload(definition, [marker]));
+    expect(() => assertLiveStateMatchesBackup(verified, live)).not.toThrow();
+    expect(() => assertLiveStateMatchesBackup(verified, live, { expectedMigrationMarker: marker })).not.toThrow();
+    expect(() => assertLiveStateMatchesBackup(verified, live, { expectedMigrationMarker: { ...marker, data: { ...marker.data, attemptCount: 2 } } })).toThrow(/committed transaction/);
+    const baseline = { ...verified, payloads: new Map(live) };
+    expect(() => assertMigrationMarkerMatchesBackup(baseline, [marker])).not.toThrow();
+    expect(() => assertMigrationMarkerMatchesBackup(baseline, [])).toThrow(/migration marker/);
+  });
+
   it('canonicalizes object keys and reports configured sums', () => {
     expect(canonicalJson({ z: 1, nested: { b: 2, a: 1 } }))
       .toBe(canonicalJson({ nested: { a: 1, b: 2 }, z: 1 }));

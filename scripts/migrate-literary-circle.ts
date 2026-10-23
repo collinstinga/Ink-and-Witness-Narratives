@@ -1,4 +1,6 @@
-import type { DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
+import path from 'path';
+import { pathToFileURL } from 'url';
+import type { DocumentReference, DocumentSnapshot, Firestore } from 'firebase-admin/firestore';
 import type { AffiliateAccount } from '../src/types.js';
 import { getDb, sanitizeForFirestore } from '../src/server/db.js';
 import {
@@ -7,12 +9,11 @@ import {
   normalizeLiteraryCircleSettings
 } from '../src/server/literaryCircle.js';
 import {
-  FOUNDING_AFFILIATE_COUNT,
   LITERARY_CIRCLE_MIGRATION_ID,
   affiliateCodeIndexId,
   affiliateEmailIndexId,
   assertLiveStateMatchesBackup,
-  assertStagingTarget,
+  assertMigrationMarkerMatchesBackup,
   canonicalJson,
   captureAffiliateDatasets,
   configuredFirebaseTarget,
@@ -25,18 +26,15 @@ import {
   verifyAffiliateBackup,
   type BackupDatasetPayload,
   type BackupDocument,
+  type FirebaseTarget,
   type VerifiedAffiliateBackup
 } from './literary-circle-migration-lib.js';
-
-type MigrationMode = 'dry-run' | 'apply';
-
-interface CliOptions {
-  mode: MigrationMode;
-  environment?: string;
-  expectedProject?: string;
-  expectedAffiliates: number;
-  backupPath?: string;
-}
+import {
+  LiteraryCircleMigrationSafeError,
+  assertConfiguredMigrationTarget,
+  assertMigrationFirestoreTarget,
+  parseLiteraryCircleMigrationArgs,
+} from './literary-circle-migration-target.js';
 
 interface PlanCounts {
   membershipsCreate: number;
@@ -49,30 +47,6 @@ interface PlanCounts {
   emailIndexesBackfill: number;
   emailIndexesUnchanged: number;
   conflicts: number;
-}
-
-function argumentValue(name: string): string | undefined {
-  const prefix = `--${name}=`;
-  return process.argv.find(argument => argument.startsWith(prefix))?.slice(prefix.length);
-}
-
-function parseOptions(): CliOptions {
-  const expectedAffiliates = Number(argumentValue('expected-affiliates'));
-  if (expectedAffiliates !== FOUNDING_AFFILIATE_COUNT) {
-    throw new Error(`This migration requires --expected-affiliates=${FOUNDING_AFFILIATE_COUNT}.`);
-  }
-  const mode: MigrationMode = process.argv.includes('--apply') ? 'apply' : 'dry-run';
-  const backupPath = argumentValue('backup')?.trim();
-  if (mode === 'apply' && !backupPath) {
-    throw new Error('--apply requires --backup=<data/backups/.../manifest.json>.');
-  }
-  return {
-    mode,
-    environment: argumentValue('environment') || process.env.LITERARY_CIRCLE_ENV,
-    expectedProject: argumentValue('expected-project'),
-    expectedAffiliates,
-    ...(backupPath ? { backupPath } : {})
-  };
 }
 
 function payloadDocumentMap(payload: BackupDatasetPayload | undefined): Map<string, BackupDocument> {
@@ -158,12 +132,15 @@ function snapshotMap(snapshots: readonly DocumentSnapshot[]): Map<string, Docume
 }
 
 async function applyMigration(options: {
+  db: Firestore;
+  target: FirebaseTarget;
   affiliateDocuments: ReturnType<typeof validateFoundingAffiliateDocuments>;
   settings: ReturnType<typeof normalizeLiteraryCircleSettings>;
   verifiedBackup: VerifiedAffiliateBackup;
   appliedAt: string;
-}): Promise<PlanCounts & { markerWritten: boolean; alreadyComplete: boolean }> {
-  const db = getDb();
+}): Promise<PlanCounts & { markerWritten: boolean; alreadyComplete: boolean; expectedMarker: BackupDocument }> {
+  const db = options.db;
+  assertMigrationFirestoreTarget(db, options.target);
   const markerRef = db.collection('migration_markers').doc(migrationMarkerDocumentId());
   const affiliateRefs = options.affiliateDocuments.map(item => db.collection('affiliates').doc(item.documentId));
   const codeRefs = options.affiliateDocuments.map(item => db.collection('affiliate_codes').doc(item.codeIndexId));
@@ -175,6 +152,7 @@ async function applyMigration(options: {
     const byPath = snapshotMap(snapshots);
     const markerSnapshot = byPath.get(markerRef.path);
     const marker = markerSnapshot?.exists ? markerSnapshot.data() as Record<string, unknown> : undefined;
+    assertMigrationMarkerMatchesBackup(options.verifiedBackup, marker ? [{ id: markerRef.id, data: marker }] : []);
     const plan = emptyPlan();
     const writes: Array<() => void> = [];
 
@@ -238,9 +216,10 @@ async function applyMigration(options: {
       && marker.expectedAffiliateCount === options.affiliateDocuments.length
       && canonicalJson(marker.completedAffiliateIds) === canonicalJson(completedAffiliateIds);
     const alreadyComplete = writes.length === 0 && markerAlreadyComplete;
+    let expectedMarker = marker as Record<string, unknown>;
     if (!alreadyComplete) {
       const priorAttempts = typeof marker?.attemptCount === 'number' ? marker.attemptCount : 0;
-      writes.push(() => transaction.set(markerRef, sanitizeForFirestore({
+      const markerPatch = sanitizeForFirestore({
         schemaVersion: 1,
         migrationId: LITERARY_CIRCLE_MIGRATION_ID,
         status: 'complete',
@@ -253,15 +232,21 @@ async function applyMigration(options: {
         completedAt: options.appliedAt,
         lastAppliedAt: options.appliedAt,
         attemptCount: priorAttempts + 1
-      }), { merge: true }));
+      });
+      expectedMarker = { ...marker, ...markerPatch };
+      writes.push(() => transaction.set(markerRef, markerPatch, { merge: true }));
     }
     for (const write of writes) write();
-    return { ...plan, markerWritten: !alreadyComplete, alreadyComplete };
+    return { ...plan, markerWritten: !alreadyComplete, alreadyComplete, expectedMarker: { id: markerRef.id, data: expectedMarker } };
   });
 }
 
-async function verifyAppliedState(affiliateDocuments: ReturnType<typeof validateFoundingAffiliateDocuments>): Promise<void> {
-  const db = getDb();
+async function verifyAppliedState(
+  affiliateDocuments: ReturnType<typeof validateFoundingAffiliateDocuments>,
+  db: Firestore,
+  target: FirebaseTarget,
+): Promise<void> {
+  assertMigrationFirestoreTarget(db, target);
   const references: DocumentReference[] = [];
   for (const item of affiliateDocuments) {
     references.push(
@@ -282,12 +267,14 @@ async function verifyAppliedState(affiliateDocuments: ReturnType<typeof validate
   }
 }
 
-async function main(): Promise<void> {
-  const cli = parseOptions();
-  const target = configuredFirebaseTarget();
-  assertStagingTarget({ environment: cli.environment, expectedProject: cli.expectedProject, target });
+export async function executeLiteraryCircleMigration(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const cli = parseLiteraryCircleMigrationArgs(argv);
+  const target = Object.freeze(configuredFirebaseTarget());
+  assertConfiguredMigrationTarget(cli, target);
+  const db = getDb();
+  assertMigrationFirestoreTarget(db, target);
 
-  const livePayloads = await captureAffiliateDatasets();
+  const livePayloads = await captureAffiliateDatasets(db);
   const affiliatePayload = livePayloads.get('affiliates');
   if (!affiliatePayload) throw new Error('Affiliate dataset is unavailable.');
   const affiliateDocuments = validateFoundingAffiliateDocuments(affiliatePayload.documents, cli.expectedAffiliates);
@@ -299,14 +286,15 @@ async function main(): Promise<void> {
   }
   if (cli.mode === 'apply' && !verifiedBackup) throw new Error('A verified backup is required for apply.');
 
-  const settingsSnapshot = await getDb()
+  assertMigrationFirestoreTarget(db, target);
+  const settingsSnapshot = await db
     .collection('site_configs')
     .doc(LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID)
     .get();
   const settings = normalizeLiteraryCircleSettings(settingsSnapshot.exists ? settingsSnapshot.data() : undefined);
   const migrationTime = new Date().toISOString();
   const plan = buildDryRunPlan({ affiliates: affiliateDocuments, payloads: livePayloads, seededAt: migrationTime, settings });
-  const markerSnapshot = await getDb().collection('migration_markers').doc(migrationMarkerDocumentId()).get();
+  const markerSnapshot = await db.collection('migration_markers').doc(migrationMarkerDocumentId()).get();
 
   const baseReport = {
     migrationId: LITERARY_CIRCLE_MIGRATION_ID,
@@ -314,7 +302,7 @@ async function main(): Promise<void> {
     affiliateCount: affiliateDocuments.length,
     backupVerified: Boolean(verifiedBackup),
     backupManifestSha256: verifiedBackup?.manifest.contentSha256,
-    markerStatus: markerSnapshot.exists ? markerSnapshot.data()?.status || 'present' : 'absent',
+    markerStatus: markerSnapshot.exists ? (markerSnapshot.data()?.status === 'complete' ? 'complete' : 'present') : 'absent',
     plan
   };
   if (cli.mode === 'dry-run') {
@@ -325,25 +313,34 @@ async function main(): Promise<void> {
   if (plan.conflicts) throw new Error('Apply refused because index ownership conflicts exist.');
 
   const result = await applyMigration({
+    db,
+    target,
     affiliateDocuments,
     settings,
     verifiedBackup: verifiedBackup as VerifiedAffiliateBackup,
     appliedAt: migrationTime
   });
-  await verifyAppliedState(affiliateDocuments);
-  const postMigrationPayloads = await captureAffiliateDatasets();
-  assertLiveStateMatchesBackup(verifiedBackup as VerifiedAffiliateBackup, postMigrationPayloads);
+  await verifyAppliedState(affiliateDocuments, db, target);
+  assertMigrationFirestoreTarget(db, target);
+  const postMigrationPayloads = await captureAffiliateDatasets(db);
+  assertLiveStateMatchesBackup(verifiedBackup as VerifiedAffiliateBackup, postMigrationPayloads, { expectedMigrationMarker: result.expectedMarker });
+  const { expectedMarker: _expectedMarker, ...appliedReport } = result;
   console.log(JSON.stringify({
     ...baseReport,
     status: result.alreadyComplete ? 'already_complete' : 'complete',
     markerWritten: result.markerWritten,
     preservedBackupStateVerified: true,
-    applied: result,
+    applied: appliedReport,
     affiliateIdentitySetSha256: sha256Hex(canonicalJson(affiliateDocuments.map(item => item.documentId).sort()))
   }, null, 2));
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : 'Literary Circle migration failed.');
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
+if (invokedPath === import.meta.url) {
+  executeLiteraryCircleMigration().catch(error => {
+    console.error(error instanceof LiteraryCircleMigrationSafeError
+      ? error.message
+      : 'Literary Circle migration failed safely. Review staging prerequisites and verified backup state; provider details were suppressed.');
+    process.exitCode = 1;
+  });
+}

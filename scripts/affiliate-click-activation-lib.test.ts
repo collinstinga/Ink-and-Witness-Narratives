@@ -421,6 +421,7 @@ describe('authoritative time and fresh backup guards', () => {
     ['wrong schema', { schemaVersion: 2 }],
     ['older schema without notification outbox coverage', { schemaVersion: 3 }],
     ['older schema without release source coverage', { schemaVersion: 4 }],
+    ['older schema without activation marker coverage', { schemaVersion: 5 }],
     ['wrong project', { projectId: 'other-staging-project' }],
     ['wrong database', { databaseId: 'another-db' }],
     ['wrong affiliate count', { datasets: [{ key: 'affiliates', count: 8 }] }],
@@ -503,6 +504,26 @@ describe('founding affiliate reconciliation', () => {
 });
 
 describe('exact activation backup equality', () => {
+  it('permits only its exact created activation marker during post-verification', () => {
+    const state = exactBackupState();
+    const marker = buildAffiliateClickActivationMarker({
+      authoritativeSnapshot: firestoreSnapshot(AUTHORITATIVE_TIME), leadMinutes: 30, keyFingerprint: FINGERPRINT,
+    });
+    const payload = state.livePayloads.get('affiliate_click_activation_marker')!;
+    payload.documents = [{ id: 'affiliate_click_analytics', data: marker as unknown as Record<string, unknown> }];
+    expectSafeError(() => assertExactAffiliateClickActivationLiveState(state), 'backup', 'live_state_drift');
+    expect(assertExactAffiliateClickActivationLiveState({ ...state, expectedCreatedMarker: marker }).documentCount).toBe(10);
+    payload.documents[0].data = { ...marker, completeFrom: '2026-10-21T09:31:00.000Z' };
+    expectSafeError(() => assertExactAffiliateClickActivationLiveState({ ...state, expectedCreatedMarker: marker }), 'backup', 'live_state_drift');
+    payload.documents[0].data = marker as unknown as Record<string, unknown>;
+    state.livePayloads.get('affiliates')!.documents[0].data.custom = 'unrelated drift';
+    expectSafeError(() => assertExactAffiliateClickActivationLiveState({ ...state, expectedCreatedMarker: marker }), 'backup', 'live_state_drift');
+    const existing = exactBackupState();
+    existing.verifiedBackup.payloads.get('affiliate_click_activation_marker')!.documents = structuredClone(payload.documents);
+    existing.livePayloads.get('affiliate_click_activation_marker')!.documents = structuredClone(payload.documents);
+    expectSafeError(() => assertExactAffiliateClickActivationLiveState({ ...existing, expectedCreatedMarker: marker }), 'backup', 'activation_marker_backed_up');
+  });
+
   it('proves every captured dataset is byte-for-byte equal to the verified backup', () => {
     const state = exactBackupState();
     const evidence = assertExactAffiliateClickActivationLiveState(state);

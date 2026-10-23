@@ -4,7 +4,7 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 5 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 6 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = [
@@ -185,6 +185,22 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
     collection: 'articles',
     fileName: 'release_source_articles.json',
     scope: 'all_documents',
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: 'affiliate_click_activation_marker',
+    collection: 'site_configs',
+    fileName: 'affiliate_click_activation_marker.json',
+    scope: 'explicit_documents',
+    documentIds: ['affiliate_click_analytics'],
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: 'literary_circle_migration_markers',
+    collection: 'migration_markers',
+    fileName: 'literary_circle_migration_markers.json',
+    scope: 'explicit_documents',
+    documentIds: [LITERARY_CIRCLE_MIGRATION_ID],
     sumFields: EMPTY_SUM_FIELDS
   },
   {
@@ -672,9 +688,40 @@ export function verifyAffiliateBackup(
   return { directory, manifest, payloads };
 }
 
+/** Permit only an unchanged marker or the completed first apply tied to this backup. */
+export function assertMigrationMarkerMatchesBackup(
+  verified: VerifiedAffiliateBackup,
+  documents: readonly BackupDocument[]
+): void {
+  const original = verified.payloads.get('literary_circle_migration_markers')?.documents;
+  if (!original) throw new Error('Verified backup is missing migration marker evidence.');
+  if (canonicalJson(original) === canonicalJson(documents)) return;
+  const document = documents[0];
+  const marker = document?.data;
+  const expectedIds = (verified.payloads.get('affiliates')?.documents || []).map(item => item.id).sort();
+  const isoMs = (value: unknown): number => {
+    const milliseconds = typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value ? milliseconds : NaN;
+  };
+  const started = isoMs(marker?.startedAt);
+  const completed = isoMs(marker?.completedAt);
+  if (original.length || documents.length !== 1 || document.id !== migrationMarkerDocumentId() || !isRecord(marker)
+    || Object.keys(marker).some(key => !['schemaVersion', 'migrationId', 'status', 'expectedAffiliateCount', 'completedAffiliateIds', 'completedCount', 'backupId', 'backupManifestSha256', 'startedAt', 'completedAt', 'lastAppliedAt', 'attemptCount'].includes(key))
+    || marker.schemaVersion !== 1 || marker.migrationId !== LITERARY_CIRCLE_MIGRATION_ID || marker.status !== 'complete'
+    || marker.backupId !== verified.manifest.backupId || marker.backupManifestSha256 !== verified.manifest.contentSha256
+    || expectedIds.length !== FOUNDING_AFFILIATE_COUNT || marker.expectedAffiliateCount !== expectedIds.length
+    || marker.completedCount !== expectedIds.length || canonicalJson(marker.completedAffiliateIds) !== canonicalJson(expectedIds)
+    || marker.attemptCount !== 1 || !Number.isFinite(started) || !Number.isFinite(completed)
+    || started < Date.parse(verified.manifest.createdAt) || completed < started || completed > Date.now()
+    || marker.lastAppliedAt !== marker.completedAt) {
+    throw new Error('Current migration marker differs from the verified backup or its exact completed first apply.');
+  }
+}
+
 export function assertLiveStateMatchesBackup(
   verified: VerifiedAffiliateBackup,
-  livePayloads: ReadonlyMap<string, BackupDatasetPayload>
+  livePayloads: ReadonlyMap<string, BackupDatasetPayload>,
+  options: { expectedMigrationMarker?: BackupDocument } = {}
 ): void {
   const backupAffiliates = verified.payloads.get('affiliates');
   const liveAffiliates = livePayloads.get('affiliates');
@@ -689,6 +736,16 @@ export function assertLiveStateMatchesBackup(
     const backupPayload = verified.payloads.get(definition.key);
     const livePayload = livePayloads.get(definition.key);
     if (!backupPayload || !livePayload) throw new Error(`Live comparison is missing ${definition.key}.`);
+
+    if (definition.key === 'literary_circle_migration_markers') {
+      if (options.expectedMigrationMarker) {
+        if (options.expectedMigrationMarker.id !== migrationMarkerDocumentId()) throw new Error('Unexpected migration marker identity.');
+        assertSameJson(livePayload.documents, [options.expectedMigrationMarker], 'Post-migration marker differs from the committed transaction result.');
+      } else {
+        assertMigrationMarkerMatchesBackup(verified, livePayload.documents);
+      }
+      continue;
+    }
 
     // A successful first run legitimately adds index documents, so subsequent
     // idempotency runs may have a larger index count or same-owner backfill
