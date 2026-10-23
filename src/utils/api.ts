@@ -3172,6 +3172,7 @@ export const api = {
     const data = await safeFetchJson<any>(
       '/api/admin/affiliates/campaigns',
       {
+        cache: 'no-store',
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load affiliate campaigns.'
@@ -3198,15 +3199,17 @@ export const api = {
     );
   },
 
-  async deleteAdminAffiliateCampaign(id: string): Promise<{ success: boolean; message: string }> {
+  /** Legacy endpoint now pauses the campaign; historical records are retained. */
+  async deleteAdminAffiliateCampaign(id: string, revision?: number): Promise<{ success: boolean; message: string }> {
     const activeToken = getWriterToken();
     return safeFetchJson(
       `/api/admin/affiliates/campaigns/${encodeURIComponent(id)}`,
       {
         method: 'DELETE',
-        headers: { 'x-admin-token': activeToken || '' }
+        headers: { 'x-admin-token': activeToken || '', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision })
       },
-      'Failed to delete campaign.'
+      'Failed to pause campaign.'
     );
   },
 

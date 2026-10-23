@@ -187,6 +187,52 @@ export class AffiliateSettingsValidationError extends Error {
   }
 }
 
+export class AffiliateCampaignValidationError extends Error {
+  readonly statusCode = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = 'AffiliateCampaignValidationError';
+  }
+}
+
+export class AffiliateCampaignConflictError extends Error {
+  readonly statusCode = 409;
+  constructor(message = 'This campaign changed since it was opened. Reload the current campaign before saving again.') {
+    super(message);
+    this.name = 'AffiliateCampaignConflictError';
+  }
+}
+
+const SAFE_CAMPAIGN_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
+const SAFE_CAMPAIGN_CODE = /^[A-Z0-9][A-Z0-9_]{0,63}$/;
+const MAX_FRESH_AFFILIATE_CAMPAIGNS = 500;
+
+function campaignText(value: unknown, label: string, maximum: number, required = false): string {
+  if (typeof value !== 'string' || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value)
+    || value.trim().length > maximum || (required && !value.trim())) {
+    throw new AffiliateCampaignValidationError(`${label} is invalid.`);
+  }
+  return value.trim();
+}
+
+function campaignTime(value: unknown, label: string): string {
+  const milliseconds = typeof value === 'string' ? Date.parse(value) : NaN;
+  if (!Number.isFinite(milliseconds) || !/^(?:\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/.test(String(value))
+    || (typeof value === 'string' && value.length === 10 && new Date(milliseconds).toISOString().slice(0, 10) !== value)
+    || (typeof value === 'string' && value.length > 10 && new Date(milliseconds).toISOString() !== value)) {
+    throw new AffiliateCampaignValidationError(`${label} must be a valid date or UTC timestamp.`);
+  }
+  return new Date(milliseconds).toISOString();
+}
+
+function campaignRevision(value: unknown): number {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) >= Number.MAX_SAFE_INTEGER) {
+    throw new AffiliateCampaignConflictError();
+  }
+  return value as number;
+}
+
 export class LiteraryCircleSettingsConflictError extends Error {
   constructor() {
     super('Literary Circle settings changed since this editor was opened. Reload the latest settings before saving again.');
@@ -360,6 +406,31 @@ function publishLiteraryCircleSettingsSnapshot(value: unknown): LiteraryCircleSe
     writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
   }
   return normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings);
+}
+
+/** Project committed campaign snapshots only; never write these projections back
+ * to Firestore. Financial counters currently grow only through positive atomic
+ * increments, independently of the writer-owned configuration revision. */
+export function publishCommittedAffiliateCampaignSnapshot(value: AffiliateCampaign): AffiliateCampaign {
+  const index = cachedCampaigns.findIndex(campaign => campaign.id === value.id);
+  const current = index >= 0 ? cachedCampaigns[index] : undefined;
+  const revision = (campaign: AffiliateCampaign) => Number.isSafeInteger(campaign.revision) && Number(campaign.revision) >= 0 ? Number(campaign.revision) : 0;
+  const newer = current && (revision(current) > revision(value)
+    || (revision(current) === revision(value) && Date.parse(current.updatedAt || '') > Date.parse(value.updatedAt || '')))
+    ? current : value;
+  const projected = structuredClone(newer);
+  if (current) {
+    for (const field of ['clicksCount', 'salesCount', 'revenueKes', 'commissionsKes'] as const) {
+      const left = current[field];
+      const right = value[field];
+      if (typeof left === 'number' && Number.isFinite(left) && left >= 0
+        && typeof right === 'number' && Number.isFinite(right) && right >= 0) projected[field] = Math.max(left, right);
+    }
+  }
+  if (index >= 0) cachedCampaigns[index] = projected;
+  else cachedCampaigns.unshift(projected);
+  writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
+  return structuredClone(projected);
 }
 
 export function sanitizeAffiliateForResponse(affiliate: AffiliateAccount): AffiliatePublicProfile {
@@ -605,9 +676,9 @@ export const affiliateStore = {
         const raw = fs.readFileSync(CAMPAIGNS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         cachedCampaigns = Array.isArray(parsed) ? parsed : [];
-        for (const c of cachedCampaigns) {
-          setFirestoreDoc('affiliate_campaigns', c.id, c).catch(() => {});
-        }
+        // Local snapshots are display projections, not authority to resurrect
+        // or overwrite campaigns. Restoring cloud data requires a reviewed
+        // backup/migration, never an automatic startup write.
       } else {
         cachedCampaigns = [];
         writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
@@ -1761,13 +1832,7 @@ export const affiliateStore = {
       writeJsonFileSync(CLICKS_FILE, cachedClicks);
 
       if (persisted.freshCampaign) {
-        const campaignIndex = cachedCampaigns.findIndex(campaign => campaign.id === persisted.freshCampaign!.id);
-        if (campaignIndex >= 0) {
-          cachedCampaigns[campaignIndex] = persisted.freshCampaign;
-        } else {
-          cachedCampaigns.unshift(persisted.freshCampaign);
-        }
-        writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
+        publishCommittedAffiliateCampaignSnapshot(persisted.freshCampaign);
       }
     } catch (error) {
       console.warn('[Affiliate Click] Local event projection failed after commit:', error);
@@ -2236,13 +2301,7 @@ export const affiliateStore = {
       );
     }
     if (persisted.freshCampaign) {
-      const campaignIndex = cachedCampaigns.findIndex(campaign => campaign.id === persisted.freshCampaign!.id);
-      if (campaignIndex >= 0) {
-        cachedCampaigns[campaignIndex] = persisted.freshCampaign;
-      } else {
-        cachedCampaigns.unshift(persisted.freshCampaign);
-      }
-      writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
+      publishCommittedAffiliateCampaignSnapshot(persisted.freshCampaign);
     }
 
     if (!persisted.commission) {
@@ -2470,56 +2529,165 @@ export const affiliateStore = {
     return [...cachedCampaigns];
   },
 
-  saveCampaign(data: Partial<AffiliateCampaign>, actor = 'Admin'): AffiliateCampaign {
-    const code = (data.code || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '');
-    if (!code) {
-      throw new Error("Campaign code is required.");
+  async getCampaignsFresh(): Promise<AffiliateCampaign[]> {
+    try {
+      const snapshot = await getDb().collection('affiliate_campaigns').limit(MAX_FRESH_AFFILIATE_CAMPAIGNS + 1).get();
+      if (snapshot.docs.length > MAX_FRESH_AFFILIATE_CAMPAIGNS) {
+        throw new Error('Campaign directory exceeds the reviewed read bound.');
+      }
+      // Do not publish this read into the warm cache: an older overlapping read
+      // must not undo a newer committed save or a financial counter update.
+      return snapshot.docs.map(document => ({ ...document.data(), id: document.id }) as AffiliateCampaign);
+    } catch {
+      throw new Error('Current affiliate campaigns could not be loaded. Please retry.');
     }
-
-    const index = cachedCampaigns.findIndex(c => c.id === data.id || c.code.toUpperCase() === code);
-    const now = new Date().toISOString();
-
-    const campaign: AffiliateCampaign = {
-      id: data.id || `camp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      code,
-      name: (data.name || code).trim(),
-      description: data.description || '',
-      commissionRate: Number(data.commissionRate) || 20,
-      attributionDays: Number(data.attributionDays) || 30,
-      eligiblePieceIds: Array.isArray(data.eligiblePieceIds) ? data.eligiblePieceIds : [],
-      startDate: data.startDate || now,
-      endDate: data.endDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      isActive: data.isActive !== undefined ? data.isActive : true,
-      clicksCount: data.clicksCount || (index >= 0 ? cachedCampaigns[index].clicksCount : 0),
-      salesCount: data.salesCount || (index >= 0 ? cachedCampaigns[index].salesCount : 0),
-      revenueKes: data.revenueKes || (index >= 0 ? cachedCampaigns[index].revenueKes : 0),
-      commissionsKes: data.commissionsKes || (index >= 0 ? cachedCampaigns[index].commissionsKes : 0),
-      createdAt: index >= 0 ? cachedCampaigns[index].createdAt : now,
-      updatedAt: now
-    };
-
-    if (index >= 0) {
-      cachedCampaigns[index] = campaign;
-    } else {
-      cachedCampaigns.unshift(campaign);
-    }
-
-    writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
-    setFirestoreDoc('affiliate_campaigns', campaign.id, campaign).catch(() => {});
-    this.recordAudit(actor, 'campaign_saved', 'campaign', `Saved campaign "${campaign.name}" (${campaign.code}) with ${campaign.commissionRate}% commission`, campaign.id, null, campaign);
-
-    return campaign;
   },
 
-  deleteCampaign(id: string, actor = 'Admin'): boolean {
-    const idx = cachedCampaigns.findIndex(c => c.id === id);
-    if (idx < 0) return false;
-    const deleted = cachedCampaigns[idx];
-    cachedCampaigns.splice(idx, 1);
-    writeJsonFileSync(CAMPAIGNS_FILE, cachedCampaigns);
-    deleteFirestoreDoc('affiliate_campaigns', id).catch(() => {});
-    this.recordAudit(actor, 'campaign_deleted', 'campaign', `Deleted campaign "${deleted.name}" (${deleted.code})`, id);
-    return true;
+  async saveCampaign(data: Partial<AffiliateCampaign>, actor = 'Admin'): Promise<AffiliateCampaign> {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new AffiliateCampaignValidationError('Campaign settings must be an object.');
+    }
+    const allowed = new Set(['id', 'code', 'name', 'description', 'commissionRate', 'attributionDays', 'eligiblePieceIds',
+      'startDate', 'endDate', 'isActive', 'revision', 'updatedBy', 'createdAt', 'updatedAt',
+      'clicksCount', 'salesCount', 'revenueKes', 'commissionsKes']);
+    if (Object.keys(data).some(key => !allowed.has(key))) {
+      throw new AffiliateCampaignValidationError('Campaign settings contain unsupported fields.');
+    }
+    // Copy request values before any await. Financial totals and server-owned
+    // timestamps are accepted for older full-record editors but never applied.
+    const request = { ...data, ...(Array.isArray(data.eligiblePieceIds) ? { eligiblePieceIds: [...data.eligiblePieceIds] } : {}) };
+    const updating = request.id !== undefined;
+    if (updating && (typeof request.id !== 'string' || !SAFE_CAMPAIGN_ID.test(request.id))) {
+      throw new AffiliateCampaignValidationError('A valid campaign identifier is required.');
+    }
+    const createCode = updating ? undefined : campaignText(request.code, 'Campaign code', 64, true).toUpperCase();
+    if (createCode !== undefined && !SAFE_CAMPAIGN_CODE.test(createCode)) {
+      throw new AffiliateCampaignValidationError('Campaign code must contain only letters, numbers and underscores.');
+    }
+    const now = new Date().toISOString();
+    // The same new code always contends on one document, even when both
+    // transactions initially observe an empty code query. Existing IDs stay put.
+    const id = request.id || `camp_${crypto.createHash('sha256').update(`affiliate-campaign-v1\0${createCode}`).digest('hex').slice(0, 40)}`;
+    const auditId = `aud_${crypto.randomBytes(16).toString('hex')}`;
+    const safeActor = String(actor || 'Admin').trim().slice(0, 120) || 'Admin';
+    try {
+      const db = getDb();
+      const campaignRef = db.collection('affiliate_campaigns').doc(id);
+      const committed = await db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(campaignRef);
+        if (updating !== snapshot.exists) {
+          throw new AffiliateCampaignConflictError(updating ? 'Campaign not found. Reload the campaign list.' : undefined);
+        }
+        const previous = snapshot.exists ? snapshot.data() as AffiliateCampaign : undefined;
+        if (previous?.id !== undefined && previous.id !== id) throw new AffiliateCampaignConflictError();
+        const previousRevision = campaignRevision(previous?.revision);
+        if ((request.revision === undefined && previousRevision > 0)
+          || (request.revision !== undefined && campaignRevision(request.revision) !== previousRevision)) {
+          throw new AffiliateCampaignConflictError();
+        }
+        const code = campaignText(request.code !== undefined ? request.code : previous?.code ?? '', 'Campaign code', 64, true).toUpperCase();
+        if (!SAFE_CAMPAIGN_CODE.test(code)) throw new AffiliateCampaignValidationError('Campaign code must contain only letters, numbers and underscores.');
+        if (previous && previous.code !== code) {
+          throw new AffiliateCampaignConflictError('An existing campaign code cannot be changed. Create a new campaign for a new referral identity.');
+        }
+        const duplicateSnapshot = await transaction.get(db.collection('affiliate_campaigns').where('code', '==', code).limit(2));
+        if (duplicateSnapshot.docs.some(document => document.id !== id)) {
+          throw new AffiliateCampaignConflictError('This campaign code already exists. Reload it before making changes.');
+        }
+        const name = campaignText(request.name !== undefined ? request.name : previous?.name ?? code, 'Campaign name', 120, true);
+        const description = campaignText(request.description !== undefined ? request.description : previous?.description ?? '', 'Campaign description', 2_000);
+        const commissionRate = request.commissionRate !== undefined ? request.commissionRate : previous?.commissionRate ?? 20;
+        const attributionDays = request.attributionDays !== undefined ? request.attributionDays : previous?.attributionDays ?? 30;
+        if (typeof commissionRate !== 'number' || !Number.isFinite(commissionRate) || commissionRate <= 0 || commissionRate > 100) {
+          throw new AffiliateCampaignValidationError('Campaign commission must be greater than zero and at most 100 percent.');
+        }
+        if (!Number.isSafeInteger(attributionDays) || attributionDays < 1 || attributionDays > MAX_ATTRIBUTION_DAYS) {
+          throw new AffiliateCampaignValidationError('Campaign attribution must be a whole number from 1 to 90 days.');
+        }
+        const eligiblePieceIds = request.eligiblePieceIds !== undefined ? request.eligiblePieceIds : previous?.eligiblePieceIds ?? [];
+        if (!Array.isArray(eligiblePieceIds) || eligiblePieceIds.length > 200
+          || Array.from(eligiblePieceIds).some(pieceId => typeof pieceId !== 'string' || !SAFE_CAMPAIGN_ID.test(pieceId))
+          || new Set(eligiblePieceIds).size !== eligiblePieceIds.length) {
+          throw new AffiliateCampaignValidationError('Choose at most 200 distinct valid campaign pieces.');
+        }
+        const isActive = request.isActive !== undefined ? request.isActive : previous?.isActive ?? true;
+        if (typeof isActive !== 'boolean') throw new AffiliateCampaignValidationError('Campaign active state must be true or false.');
+        const startDate = request.startDate !== undefined ? request.startDate : previous?.startDate ?? now;
+        const endDate = request.endDate !== undefined ? request.endDate : previous?.endDate ?? new Date(Date.parse(now) + 30 * DAY_MS).toISOString();
+        const startTime = campaignTime(startDate, 'Campaign start');
+        const endTime = campaignTime(endDate, 'Campaign end');
+        if (Date.parse(endTime) <= Date.parse(startTime)) {
+          throw new AffiliateCampaignValidationError('Campaign end must be after its start.');
+        }
+        const campaign: AffiliateCampaign = {
+          ...(previous || { clicksCount: 0, salesCount: 0, revenueKes: 0, commissionsKes: 0, createdAt: now }),
+          id, code, name, description, commissionRate, attributionDays, eligiblePieceIds: [...eligiblePieceIds], isActive,
+          startDate: previous && (request.startDate === undefined || request.startDate === previous.startDate) ? previous.startDate : startTime,
+          endDate: previous && (request.endDate === undefined || request.endDate === previous.endDate) ? previous.endDate : endTime,
+          revision: previousRevision + 1, updatedAt: now, updatedBy: safeActor,
+        };
+        const audit: AffiliateAuditLogEntry = {
+          id: auditId, timestamp: now, actor: safeActor, action: 'campaign_saved', targetType: 'campaign', targetId: id,
+          summary: `Saved campaign "${name}" (${code}) with ${commissionRate}% commission`,
+          ...(previous ? { previousValue: sanitizeAuditValue(previous) } : {}),
+          newValue: sanitizeAuditValue(campaign),
+        };
+        if (previous) transaction.set(campaignRef, campaign, { merge: false });
+        else transaction.create(campaignRef, campaign);
+        transaction.create(db.collection('affiliate_audit').doc(auditId), audit);
+        return { campaign, audit };
+      });
+      publishCommittedAffiliateCampaignSnapshot(committed.campaign);
+      this.rememberCommittedAudit(committed.audit);
+      return structuredClone(committed.campaign);
+    } catch (error) {
+      if (error instanceof AffiliateCampaignValidationError || error instanceof AffiliateCampaignConflictError) throw error;
+      throw new Error('Campaign settings could not be committed. Please retry; no local fallback was used.');
+    }
+  },
+
+  /** Legacy endpoint name retained for compatibility. Campaigns are now paused
+   * reversibly, never erased with their referral identity or financial history. */
+  async deleteCampaign(id: string, actor = 'Admin', expectedRevision?: number): Promise<boolean> {
+    if (typeof id !== 'string' || !SAFE_CAMPAIGN_ID.test(id)) {
+      throw new AffiliateCampaignValidationError('A valid campaign identifier is required.');
+    }
+    if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+      throw new AffiliateCampaignValidationError('A valid campaign revision is required.');
+    }
+    const now = new Date().toISOString();
+    const auditId = `aud_${crypto.randomBytes(16).toString('hex')}`;
+    const safeActor = String(actor || 'Admin').trim().slice(0, 120) || 'Admin';
+    try {
+      const db = getDb();
+      const campaignRef = db.collection('affiliate_campaigns').doc(id);
+      const committed = await db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(campaignRef);
+        if (!snapshot.exists) return null;
+        const previous = snapshot.data() as AffiliateCampaign;
+        if (previous.id !== undefined && previous.id !== id) throw new AffiliateCampaignConflictError();
+        const revision = campaignRevision(previous.revision);
+        if ((expectedRevision === undefined && revision > 0)
+          || (expectedRevision !== undefined && expectedRevision !== revision)) throw new AffiliateCampaignConflictError();
+        if (previous.isActive === false) return { campaign: { ...previous, id }, audit: undefined };
+        const campaign: AffiliateCampaign = { ...previous, id, isActive: false, revision: revision + 1, updatedAt: now, updatedBy: safeActor };
+        const audit: AffiliateAuditLogEntry = {
+          id: auditId, timestamp: now, actor: safeActor, action: 'campaign_archived', targetType: 'campaign', targetId: id,
+          summary: `Paused campaign "${previous.name}" (${previous.code}); referral and financial history retained.`,
+          previousValue: sanitizeAuditValue(previous), newValue: sanitizeAuditValue(campaign),
+        };
+        transaction.set(campaignRef, campaign, { merge: false });
+        transaction.create(db.collection('affiliate_audit').doc(auditId), audit);
+        return { campaign, audit };
+      });
+      if (!committed) return false;
+      publishCommittedAffiliateCampaignSnapshot(committed.campaign);
+      if (committed.audit) this.rememberCommittedAudit(committed.audit);
+      return true;
+    } catch (error) {
+      if (error instanceof AffiliateCampaignValidationError || error instanceof AffiliateCampaignConflictError) throw error;
+      throw new Error('Campaign pause could not be committed. Please retry; no local fallback was used.');
+    }
   },
 
   // AUDIT LOGS

@@ -7594,35 +7594,44 @@ ${currentDraft || prompt}
   });
 
   // Admin: Campaigns
-  app.get("/api/admin/affiliates/campaigns", requireAdminAuth, (_req: Request, res: Response) => {
+  app.get("/api/admin/affiliates/campaigns", requireAdminAuth, async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     try {
-      const campaigns = store.affiliates.getCampaigns();
+      const campaigns = await store.affiliates.getCampaignsFresh();
       res.json(campaigns);
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch campaigns." });
+    } catch {
+      res.status(503).json({ success: false, error: "Current affiliate campaigns could not be loaded. Please retry." });
     }
   });
 
-  app.post("/api/admin/affiliates/campaigns", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/affiliates/campaigns", requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const campaign = store.affiliates.saveCampaign(req.body, 'Admin (Jake)');
+      const campaign = await store.affiliates.saveCampaign(req.body, 'Admin (Jake)');
       res.json({
         success: true,
         campaign,
         message: `Campaign "${campaign.name}" (${campaign.code}) saved.`
       });
     } catch (err: any) {
-      res.status(400).json({ success: false, error: err.message || "Failed to save campaign." });
+      const status = err?.statusCode === 400 || err?.statusCode === 409 ? err.statusCode : 503;
+      res.status(status).json({ success: false, error: status === 503 ? "Campaign settings could not be committed. Please retry." : err.message });
     }
   });
 
-  app.delete("/api/admin/affiliates/campaigns/:id", requireAdminAuth, (req: Request, res: Response) => {
+  app.delete("/api/admin/affiliates/campaigns/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const success = store.affiliates.deleteCampaign(id, 'Admin (Jake)');
-      res.json({ success });
+      const success = await store.affiliates.deleteCampaign(id, 'Admin (Jake)', req.body?.revision);
+      if (!success) {
+        res.status(404).json({ success: false, error: 'Campaign not found. Reload the campaign list.' });
+        return;
+      }
+      res.json({ success: true, message: 'Campaign paused; referral and financial history retained.' });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to delete campaign." });
+      const status = err?.statusCode === 400 || err?.statusCode === 409 ? err.statusCode : 503;
+      res.status(status).json({ success: false, error: status === 503 ? "Campaign pause could not be committed. Please retry." : err.message });
     }
   });
 

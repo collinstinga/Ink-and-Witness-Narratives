@@ -59,6 +59,7 @@ import { LiteraryCircleResourcesAdmin } from './LiteraryCircleResourcesAdmin.js'
 
 const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
 const LiteraryCircleAnalyticsAdmin = React.lazy(() => import('./LiteraryCircleAnalyticsAdmin.js'));
+const AffiliateCampaignEditor = React.lazy(() => import('./AffiliateCampaignEditor.js').then(module => ({ default: module.AffiliateCampaignEditor })));
 
 interface AffiliatesAdminTabProps {
   articles: Article[];
@@ -77,6 +78,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<AdminSubTab>('overview');
+  const activeSubTabRef = useRef<AdminSubTab>('overview');
   const [summary, setSummary] = useState<AdminAffiliatesSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -88,7 +90,10 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [showEditAffiliateModal, setShowEditAffiliateModal] = useState<AffiliateAccount | null>(null);
   const [showPayoutProcessModal, setShowPayoutProcessModal] = useState<AffiliatePayoutRequest | null>(null);
   const [showAffiliateDetailsModal, setShowAffiliateDetailsModal] = useState<AffiliateAccount | null>(null);
-  const [showCreateCampaignModal, setShowCreateCampaignModal] = useState(false);
+  const [campaignEditor, setCampaignEditor] = useState<AffiliateCampaign | 'new' | null>(null);
+  const [openingCampaignId, setOpeningCampaignId] = useState<string>();
+  const [campaignDirectoryError, setCampaignDirectoryError] = useState('');
+  const campaignEditorRequestIdRef = useRef(0);
 
   // New Affiliate Form
   const [newAffName, setNewAffName] = useState('');
@@ -115,14 +120,6 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [payoutRef, setPayoutRef] = useState('');
   const [payoutNotes, setPayoutNotes] = useState('');
   const [processingPayout, setProcessingPayout] = useState(false);
-
-  // Campaign Form
-  const [campCode, setCampCode] = useState('');
-  const [campName, setCampName] = useState('');
-  const [campDesc, setCampDesc] = useState('');
-  const [campRate, setCampRate] = useState<number>(20);
-  const [campDays, setCampDays] = useState<number>(30);
-  const [savingCamp, setSavingCamp] = useState(false);
 
   // Settings State
   const [settingsForm, setSettingsForm] = useState<AffiliateSettings | null>(null);
@@ -169,16 +166,22 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     setError('');
 
     try {
-      const [res, freshSettings, freshLiteraryCircle] = await Promise.all([
+      const [res, freshSettings, freshLiteraryCircle, freshCampaigns] = await Promise.all([
         api.getAdminAffiliatesSummary(),
         isRefresh ? Promise.resolve(null) : api.getAdminAffiliateSettings(),
-        isRefresh ? Promise.resolve(null) : api.getAdminLiteraryCircleSettings()
+        isRefresh ? Promise.resolve(null) : api.getAdminLiteraryCircleSettings(),
+        (!isRefresh || activeSubTabRef.current === 'campaigns') ? api.getAdminAffiliateCampaigns().then(result => ({ ...result, error: '' })).catch(failure => ({
+          campaigns: [] as AffiliateCampaign[],
+          error: failure instanceof Error ? failure.message : 'Current campaigns could not be loaded.',
+        })) : Promise.resolve(null)
       ]);
       if (requestId !== summaryRequestIdRef.current) return;
+      if (freshCampaigns) setCampaignDirectoryError(freshCampaigns.error);
       const currentSettings = freshSettings || res.settings;
-      setSummary(current => isRefresh && current?.settings
-        ? { ...res, settings: current.settings }
-        : { ...res, settings: currentSettings });
+      setSummary(current => ({ ...res,
+        settings: isRefresh && current?.settings ? current.settings : currentSettings,
+        campaigns: freshCampaigns?.campaigns ?? current?.campaigns ?? res.campaigns,
+      }));
       // A background refresh must not overwrite the settings returned by a
       // successful durable save with an older cached summary from another
       // warm serverless instance.
@@ -201,6 +204,12 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       }
     }
   };
+
+  useEffect(() => {
+    activeSubTabRef.current = activeSubTab;
+    // Read the campaign directory on entry, not on every unrelated 15s poll.
+    if (activeSubTab === 'campaigns') void loadSummary(true);
+  }, [activeSubTab]);
 
   useEffect(() => {
     loadSummary();
@@ -565,41 +574,40 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     }
   };
 
-  const handleSaveCampaign = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!campCode || !campName) {
-      alert("Code and Name are required.");
-      return;
-    }
-    setSavingCamp(true);
+  const handleEditCampaign = async (campaignId: string) => {
+    const requestId = ++campaignEditorRequestIdRef.current;
+    setOpeningCampaignId(campaignId);
     try {
-      await api.saveAdminAffiliateCampaign({
-        code: campCode.toLowerCase().trim(),
-        name: campName.trim(),
-        description: campDesc.trim(),
-        commissionRate: campRate,
-        attributionDays: campDays,
-        eligiblePieceIds: []
-      });
-      setShowCreateCampaignModal(false);
-      setCampCode('');
-      setCampName('');
-      setCampDesc('');
-      loadSummary(true);
-    } catch (err: any) {
-      alert(`Failed to save campaign: ${err.message}`);
+      const fresh = await api.getAdminAffiliateCampaigns();
+      if (requestId !== campaignEditorRequestIdRef.current) return;
+      const current = fresh.campaigns.find(campaign => campaign.id === campaignId);
+      if (!current) throw new Error('Campaign no longer exists. Refresh the campaign list.');
+      setCampaignEditor(current);
+    } catch (failure) {
+      if (requestId === campaignEditorRequestIdRef.current) setError(failure instanceof Error ? failure.message : 'Could not load the current campaign.');
     } finally {
-      setSavingCamp(false);
+      if (requestId === campaignEditorRequestIdRef.current) setOpeningCampaignId(undefined);
     }
   };
 
-  const handleDeleteCampaign = async (campId: string) => {
-    if (!window.confirm("Delete this promotional campaign?")) return;
+  const handleSaveCampaign = async (update: Partial<AffiliateCampaign> & { code: string; name: string }) => {
+    const { campaign } = await api.saveAdminAffiliateCampaign(update);
+    setCampaignEditor(null);
+    // Invalidate an older summary before publishing the committed record.
+    summaryRequestIdRef.current++;
+    setSummary(current => current ? { ...current, campaigns: [campaign, ...current.campaigns.filter(item => item.id !== campaign.id)] } : current);
+    setSuccessMsg('Campaign saved. Existing earnings and referral identity were preserved.');
+    void loadSummary(true);
+  };
+
+  const handlePauseCampaign = async (campaign: AffiliateCampaign) => {
+    if (!window.confirm('Pause this promotional campaign? Its referral identity, history and earnings will be preserved. You can enable it again in Edit.')) return;
     try {
-      await api.deleteAdminAffiliateCampaign(campId);
+      await api.deleteAdminAffiliateCampaign(campaign.id, campaign.revision ?? 0);
+      setSuccessMsg('Campaign paused. Its history and earnings were preserved.');
       loadSummary(true);
     } catch (err: any) {
-      alert(`Failed to delete campaign: ${err.message}`);
+      alert(`Failed to pause campaign: ${err.message}`);
     }
   };
 
@@ -1574,15 +1582,21 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 </div>
 
                 <button
-                  onClick={() => setShowCreateCampaignModal(true)}
-                  className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs flex items-center gap-1.5 cursor-pointer"
+                  disabled={Boolean(campaignDirectoryError)}
+                  onClick={() => { campaignEditorRequestIdRef.current++; setOpeningCampaignId(undefined); setCampaignEditor('new'); }}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>New Campaign</span>
                 </button>
               </div>
 
-              {(!summary?.campaigns || summary.campaigns.length === 0) ? (
+              {campaignDirectoryError ? (
+                <div role="alert" className="space-y-3 rounded-xl border border-amber-800 bg-amber-950/30 p-4 text-sm text-amber-200">
+                  <p>{campaignDirectoryError} Campaigns have not been reset or removed.</p>
+                  <button type="button" disabled={refreshing} onClick={() => void loadSummary(true)} className="min-h-11 rounded-lg border border-amber-700 px-3 disabled:opacity-50">Retry current campaigns</button>
+                </div>
+              ) : (!summary?.campaigns || summary.campaigns.length === 0) ? (
                 <div className="py-16 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-400 text-xs">
                   No promotional campaigns created yet.
                 </div>
@@ -1594,16 +1608,15 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                         <span className="px-2 py-0.5 rounded bg-cyan-950 border border-cyan-800 text-cyan-300 font-mono text-xs font-bold">
                           Tag: ?c={camp.code}
                         </span>
-                        <button
-                          onClick={() => handleDeleteCampaign(camp.id)}
-                          className="p-1 text-slate-500 hover:text-rose-400"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button type="button" aria-label={`Edit campaign ${camp.name}`} disabled={Boolean(openingCampaignId)} onClick={() => void handleEditCampaign(camp.id)} className="min-h-11 min-w-11 rounded-lg p-2 text-cyan-300 disabled:opacity-50"><Edit3 className="h-4 w-4" /></button>
+                          <button type="button" aria-label={`Pause campaign ${camp.name}`} title="Pause without erasing history" disabled={!camp.isActive} onClick={() => void handlePauseCampaign(camp)} className="min-h-11 min-w-11 rounded-lg p-2 text-slate-400 hover:text-amber-300 disabled:opacity-30"><Lock className="h-4 w-4" /></button>
+                        </div>
                       </div>
 
                       <div>
                         <h4 className="text-sm font-serif font-bold text-slate-100">{camp.name}</h4>
+                        <p className="mt-1 text-xs text-slate-400">{camp.isActive ? 'Enabled' : 'Paused'} · {new Date(camp.startDate).toLocaleDateString()} – {new Date(camp.endDate).toLocaleDateString()}</p>
                         {camp.description && (
                           <p className="text-xs text-slate-400 font-sans mt-0.5">{camp.description}</p>
                         )}
@@ -2270,99 +2283,13 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         </div>
       )}
 
-      {/* CREATE CAMPAIGN MODAL */}
-      {showCreateCampaignModal && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-          <div className="w-full max-w-md bg-[#0a0f1d] border border-cyan-700/80 rounded-2xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-serif font-bold text-white">Create Promotional Campaign</h3>
-              <button onClick={() => setShowCreateCampaignModal(false)} className="p-1 text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveCampaign} className="space-y-3">
-              <div>
-                <label className="block text-xs font-mono text-slate-300 mb-1">Campaign Code (URL Tag)</label>
-                <input
-                  type="text"
-                  required
-                  value={campCode}
-                  onChange={(e) => setCampCode(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
-                  placeholder="e.g. twitter_promo or summer_drop"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-cyan-300 font-mono focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-mono text-slate-300 mb-1">Campaign Name</label>
-                <input
-                  type="text"
-                  required
-                  value={campName}
-                  onChange={(e) => setCampName(e.target.value)}
-                  placeholder="e.g. Critical Essays Autumn Push"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-sans focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-mono text-slate-300 mb-1">Description</label>
-                <input
-                  type="text"
-                  value={campDesc}
-                  onChange={(e) => setCampDesc(e.target.value)}
-                  placeholder="Targeting Twitter literary circles"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-sans focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-mono text-slate-300 mb-1">Commission Rate (%)</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={90}
-                    value={campRate}
-                    onChange={(e) => setCampRate(Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-mono text-slate-300 mb-1">Attribution (Days)</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={180}
-                    value={campDays}
-                    onChange={(e) => setCampDays(Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateCampaignModal(false)}
-                  className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-300 font-mono text-xs cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingCamp}
-                  className="flex-1 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-mono text-xs font-semibold cursor-pointer disabled:opacity-50"
-                >
-                  {savingCamp ? 'Saving...' : 'Create Campaign'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {campaignEditor ? (
+        <React.Suspense fallback={<p role="status" className="fixed bottom-4 right-4 z-60 rounded-xl bg-slate-900 p-4 text-sm text-cyan-300">Opening campaign editor…</p>}>
+          <AffiliateCampaignEditor key={campaignEditor === 'new' ? 'new' : `${campaignEditor.id}:${campaignEditor.revision ?? 0}`}
+            campaign={campaignEditor === 'new' ? undefined : campaignEditor} articles={articles}
+            onSave={handleSaveCampaign} onClose={() => setCampaignEditor(null)} />
+        </React.Suspense>
+      ) : null}
     </div>
   );
 };

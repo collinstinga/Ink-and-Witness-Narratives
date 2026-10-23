@@ -1596,6 +1596,9 @@ export interface AffiliatePayoutRequest {
 
 export interface AffiliateCampaign {
   id: string;
+  /** Server-owned edit version; legacy records start at zero. */
+  revision?: number;
+  updatedBy?: string;
   code: string;
   name: string;
   description?: string;
