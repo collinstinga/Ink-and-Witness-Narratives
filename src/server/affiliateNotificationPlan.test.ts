@@ -96,6 +96,7 @@ describe('held partner notification planning', () => {
       ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
       marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
       marketingConsentAt: source.occurredAt, marketingConsentSource: 'affiliate_dashboard',
+      releaseUpdatesEnabledAt: source.occurredAt,
       allMarketingOptOut: false, releaseUpdates: true,
     };
     expect(planAffiliateNotifications(candidate).intents).toHaveLength(1);
@@ -116,6 +117,7 @@ describe('held partner notification planning', () => {
       ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
       marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
       marketingConsentAt: consentAt, marketingConsentSource: 'affiliate_dashboard',
+      releaseUpdatesEnabledAt: source.occurredAt,
       allMarketingOptOut: false, releaseUpdates: true,
     };
     const initial = planAffiliateNotifications(candidate);
@@ -125,12 +127,39 @@ describe('held partner notification planning', () => {
     if (!count) expect(initial.reasons).toEqual({ marketing_consent_after_event: 1 });
   });
 
+  it('does not prepare an intent before a recorded writer approval takes effect', () => {
+    const candidate = input();
+    candidate.affiliates[0].approvedAt = '2026-10-24T00:00:00.000Z';
+    expect(planAffiliateNotifications(candidate)).toMatchObject({ intents: [], reasons: { writer_approval_not_effective: 1 } });
+  });
+
   it('keeps operational commission alerts independent of marketing consent', () => {
     const candidate = input();
     candidate.affiliates[0].notificationPreferences = { ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES };
     expect(planAffiliateNotifications(candidate).intents).toHaveLength(1);
     candidate.affiliates[0].notificationPreferences.commissionAlerts = false;
     expect(planAffiliateNotifications(candidate).intents).toEqual([]);
+  });
+
+  it.each([
+    [undefined, 0], ['not-a-date', 0], ['2026-10-23', 0],
+    ['2026-10-23T08:00:00+03:00', 0],
+    ['2026-10-23T04:59:59.999Z', 1], [source.occurredAt, 1],
+    ['2026-10-23T05:00:00.001Z', 0], [NOW, 0],
+  ] as const)('requires independent release-topic opt-in evidence at %s', (releaseUpdatesEnabledAt, count) => {
+    const candidate = input();
+    candidate.source = { eventType: 'new_release', sourceId: 'piece-one', sourceVersion: 1, occurredAt: source.occurredAt };
+    candidate.affiliates[0].notificationPreferences = {
+      ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+      marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+      marketingConsentAt: '2026-10-01T00:00:00.000Z', marketingConsentSource: 'affiliate_dashboard',
+      allMarketingOptOut: false, releaseUpdates: true, releaseUpdatesEnabledAt,
+    };
+    const initial = planAffiliateNotifications(candidate);
+    expect(initial.intents).toHaveLength(count);
+    candidate.now = '2026-10-25T00:00:00.000Z';
+    expect(planAffiliateNotifications(candidate).intents).toHaveLength(count);
+    if (!count) expect(initial.reasons).toEqual({ release_opt_in_after_event: 1 });
   });
 
   it('honors global and per-template disabled switches', () => {

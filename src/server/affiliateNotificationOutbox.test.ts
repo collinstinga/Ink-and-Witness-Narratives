@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import crypto from 'crypto';
 import type { Firestore } from 'firebase-admin/firestore';
 import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS } from './affiliateNotifications.js';
 import { storeHeldAffiliateNotifications } from './affiliateNotificationOutbox.js';
@@ -70,6 +71,16 @@ function sourcePath(h: ReturnType<typeof harness>) {
 }
 function intentPath(h: ReturnType<typeof harness>) {
   return h.writes.find(path => path.includes('/ani1_'))!;
+}
+
+function evidenceHash(value: unknown): string {
+  const canonical = (item: unknown): string => {
+    if (item === null || typeof item !== 'object') return JSON.stringify(item);
+    if (Array.isArray(item)) return `[${item.map(canonical).join(',')}]`;
+    const record = item as Record<string, unknown>;
+    return `{${Object.keys(record).filter(key => record[key] !== undefined).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
+  };
+  return crypto.createHash('sha256').update(canonical(value)).digest('hex');
 }
 
 describe('create-only held partner notification outbox', () => {
@@ -145,7 +156,7 @@ describe('create-only held partner notification outbox', () => {
   });
 
   it('rejects duplicate, excessive or invalid recipients and malformed sources before any transaction', async () => {
-    for (const ids of [['partner-one', 'partner-one'], ['bad/id'], Array.from({ length: 201 }, (_, i) => `partner-${i}`)]) {
+    for (const ids of [['partner-one', 'partner-one'], ['bad/id'], new Array<string>(1), Array.from({ length: 201 }, (_, i) => `partner-${i}`)]) {
       const h = harness();
       await expect(storeHeldAffiliateNotifications({ ...h.input, affiliateIds: ids })).rejects.toThrow(/Invalid/);
       expect(h.db.runTransaction).not.toHaveBeenCalled();
@@ -154,6 +165,36 @@ describe('create-only held partner notification outbox', () => {
     h.input.source.sourceId = 'sensitive@example.test';
     await expect(storeHeldAffiliateNotifications(h.input)).rejects.toThrow('Invalid partner notification planning input.');
     expect(h.db.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { eventType: 'new_release' }, { settingsRevision: -1 }, { settingsRevision: 0.5 },
+    { dueAt: 'yesterday' }, { dueAt: '2026-10-23T08:59:59.999Z' },
+    { extraPrivateField: 'must not be accepted' }, { affiliateId: 'partner-two' },
+  ])('independently validates replay semantics even when stored hashes agree: %j', async patch => {
+    const h = harness();
+    h.input.affiliateIds.push('partner-two');
+    await storeHeldAffiliateNotifications(h.input);
+    const record = h.documents.get(intentPath(h)) as Record<string, unknown>;
+    Object.assign(record, patch);
+    const source = h.documents.get(sourcePath(h)) as { intentEvidence: Array<{ sha256: string }> };
+    source.intentEvidence[0].sha256 = evidenceHash(record);
+    const original = structuredClone([...h.documents]);
+    await expect(storeHeldAffiliateNotifications(h.input)).rejects.toThrow(/no repair was attempted/);
+    expect([...h.documents]).toEqual(original);
+    expect(h.writes).toHaveLength(2);
+  });
+
+  it.each(['invalid', '2026-10-23T08:59:59.999Z', '2026-10-23T09:00:00.001Z'])('rejects inconsistent source creation chronology: %s', async createdAt => {
+    const h = harness();
+    await storeHeldAffiliateNotifications(h.input);
+    const source = h.documents.get(sourcePath(h)) as { createdAt: string; intentEvidence: Array<{ sha256: string }> };
+    const record = h.documents.get(intentPath(h)) as Record<string, unknown>;
+    source.createdAt = createdAt;
+    record.createdAt = createdAt;
+    source.intentEvidence[0].sha256 = evidenceHash(record);
+    await expect(storeHeldAffiliateNotifications(h.input)).rejects.toThrow(/no repair was attempted/);
+    expect(h.writes).toHaveLength(2);
   });
 
   it('has no provider delivery path', async () => {

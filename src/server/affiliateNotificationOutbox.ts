@@ -27,6 +27,13 @@ function hash(value: unknown): string {
   return crypto.createHash('sha256').update(canonical(value)).digest('hex');
 }
 
+function isoTime(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value
+    ? milliseconds : null;
+}
+
 function conflict(): never {
   throw new Error('Partner notification outbox conflict; existing records were preserved.');
 }
@@ -67,12 +74,14 @@ export async function storeHeldAffiliateNotifications(input: {
   if (input.mode === undefined || input.mode === 'disabled') return { status: 'disabled', intentCount: 0 };
   if (input.mode !== 'held' || !Array.isArray(input.affiliateIds)
     || input.affiliateIds.length > MAX_AFFILIATE_NOTIFICATION_PLAN_RECIPIENTS
-    || input.affiliateIds.some(id => typeof id !== 'string' || !SAFE_ID.test(id))
+    || Array.from(input.affiliateIds).some(id => typeof id !== 'string' || !SAFE_ID.test(id))
     || new Set(input.affiliateIds).size !== input.affiliateIds.length) {
     throw new Error('Invalid partner notification storage input.');
   }
   const source = { ...input.source };
   const now = input.now;
+  const db = input.db;
+  const verifySource = input.verifySource;
   // Validate source/time before a Firestore transaction can be reached.
   const emptyPlan = planAffiliateNotifications({
     source, settings: DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS,
@@ -81,42 +90,52 @@ export async function storeHeldAffiliateNotifications(input: {
   const audience = [...input.affiliateIds].sort();
   const sourceSha256 = hash(source);
   const audienceSha256 = hash(audience);
-  const collection = input.db.collection(AFFILIATE_NOTIFICATION_OUTBOX_COLLECTION);
+  const collection = db.collection(AFFILIATE_NOTIFICATION_OUTBOX_COLLECTION);
   const sourceRef = collection.doc(emptyPlan.eventId);
 
   try {
-    return await input.db.runTransaction(async transaction => {
-      if (input.verifySource && !await input.verifySource(transaction)) {
+    return await db.runTransaction(async transaction => {
+      if (verifySource && !await verifySource(transaction)) {
         return { status: 'ineligible' as const, intentCount: 0 };
       }
       const sourceSnapshot = await transaction.get(sourceRef);
       if (sourceSnapshot.exists) {
         const existing = sourceSnapshot.data() as SourceRecord;
+        const createdMs = isoTime(existing?.createdAt);
         if (!existing || existing.schemaVersion !== 1 || existing.kind !== 'source'
           || Object.keys(existing).some(key => !['schemaVersion', 'kind', 'id', 'source', 'sourceSha256', 'audienceSha256', 'intentEvidence', 'createdAt', 'deliveryMode'].includes(key))
           || existing.id !== emptyPlan.eventId || existing.deliveryMode !== 'preview_only'
           || existing.sourceSha256 !== sourceSha256 || hash(existing.source) !== sourceSha256
           || existing.audienceSha256 !== audienceSha256
-          || typeof existing.createdAt !== 'string'
+          || createdMs === null || createdMs < Date.parse(source.occurredAt) || createdMs > Date.parse(now)
           || !Array.isArray(existing.intentEvidence) || !existing.intentEvidence.length
           || existing.intentEvidence.length > MAX_AFFILIATE_NOTIFICATION_PLAN_RECIPIENTS
-          || existing.intentEvidence.some(item => !item || !INTENT_ID.test(item.id) || !/^[a-f0-9]{64}$/.test(item.sha256))
+          || existing.intentEvidence.some(item => !item || Object.keys(item).some(key => !['id', 'sha256'].includes(key))
+            || !INTENT_ID.test(item.id) || !/^[a-f0-9]{64}$/.test(item.sha256))
           || new Set(existing.intentEvidence.map(item => item.id)).size !== existing.intentEvidence.length) conflict();
         const snapshots = await transaction.getAll(...existing.intentEvidence.map(item => collection.doc(item.id)));
         const byId = new Map(snapshots.map(snapshot => [snapshot.id, snapshot]));
+        const recipients = new Set<string>();
         for (const evidence of existing.intentEvidence) {
           const snapshot = byId.get(evidence.id);
           const record = snapshot?.data() as IntentRecord | undefined;
           if (!snapshot?.exists || !record || record.kind !== 'intent' || record.schemaVersion !== 1
+            || Object.keys(record).some(key => !['schemaVersion', 'id', 'eventId', 'eventType', 'affiliateId', 'settingsRevision', 'state', 'dueAt', 'kind', 'createdAt'].includes(key))
             || record.id !== evidence.id || record.eventId !== existing.id || record.state !== 'held'
+            || record.eventType !== source.eventType || !Number.isSafeInteger(record.settingsRevision) || record.settingsRevision < 0
             || record.createdAt !== existing.createdAt
-            || !audience.includes(record.affiliateId) || hash(record) !== evidence.sha256) conflict();
+            || isoTime(record.dueAt) === null || Date.parse(record.dueAt) < Date.parse(source.occurredAt)
+            || !audience.includes(record.affiliateId) || recipients.has(record.affiliateId)
+            || record.id !== `ani1_${hash([existing.id, record.affiliateId])}`
+            || (source.targetAffiliateId !== undefined && record.affiliateId !== source.targetAffiliateId)
+            || hash(record) !== evidence.sha256) conflict();
+          recipients.add(record.affiliateId);
         }
         return { status: 'existing' as const, intentCount: existing.intentEvidence.length };
       }
 
-      const settingsRef = input.db.collection('site_configs').doc('affiliate_notifications');
-      const affiliateRefs = audience.map(id => input.db.collection('affiliates').doc(id));
+      const settingsRef = db.collection('site_configs').doc('affiliate_notifications');
+      const affiliateRefs = audience.map(id => db.collection('affiliates').doc(id));
       const snapshots = await transaction.getAll(settingsRef, ...affiliateRefs);
       const byPath = new Map(snapshots.map(snapshot => [snapshot.ref.path, snapshot]));
       const settingsSnapshot = byPath.get(settingsRef.path);

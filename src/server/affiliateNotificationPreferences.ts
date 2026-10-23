@@ -75,6 +75,11 @@ function safeIso(value: unknown): string | undefined {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
 }
 
+function canonicalIso(value: unknown): string | undefined {
+  const normalized = safeIso(value);
+  return normalized === value ? normalized : undefined;
+}
+
 function safeRevision(value: unknown): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
@@ -114,6 +119,9 @@ export function normalizeAffiliateNotificationPreferences(value: unknown): Affil
         : 'affiliate_dashboard',
     } : {}),
     releaseUpdates: consentGranted && value.releaseUpdates === true,
+    ...(consentGranted && value.releaseUpdates === true && canonicalIso(value.releaseUpdatesEnabledAt)
+      ? { releaseUpdatesEnabledAt: canonicalIso(value.releaseUpdatesEnabledAt) }
+      : {}),
     campaignUpdates: consentGranted && value.campaignUpdates === true,
     inactivityReminders: consentGranted && value.inactivityReminders === true,
     exclusiveOpportunities: consentGranted && value.exclusiveOpportunities === true,
@@ -182,6 +190,7 @@ export async function saveAffiliateNotificationPreferences(
 
     const now = new Date().toISOString();
     const consentGranted = update.marketingConsent === true;
+    const releaseUpdates = consentGranted && update.releaseUpdates;
     const preferences: AffiliateNotificationPreferences = {
       schemaVersion: AFFILIATE_NOTIFICATION_PREFERENCES_SCHEMA_VERSION,
       revision: previous.revision + 1,
@@ -198,7 +207,14 @@ export async function saveAffiliateNotificationPreferences(
         marketingOptOutAt: now,
         marketingOptOutSource: 'affiliate_dashboard' as const,
       }),
-      releaseUpdates: consentGranted && update.releaseUpdates,
+      releaseUpdates,
+      ...(releaseUpdates ? {
+        // An explicit save may opt an older account in from now onward, but
+        // missing historical evidence must never be replaced with old consent.
+        releaseUpdatesEnabledAt: previous.releaseUpdates && previous.releaseUpdatesEnabledAt
+          ? previous.releaseUpdatesEnabledAt
+          : now,
+      } : {}),
       campaignUpdates: consentGranted && update.campaignUpdates,
       inactivityReminders: consentGranted && update.inactivityReminders,
       exclusiveOpportunities: consentGranted && update.exclusiveOpportunities,
@@ -222,7 +238,7 @@ export async function saveAffiliateNotificationPreferences(
     transaction.set(affiliateRef, sanitizeForFirestore({
       notificationPreferences: preferences,
       updatedAt: now,
-    }), { merge: true });
+    }), { mergeFields: ['notificationPreferences', 'updatedAt'] });
     transaction.set(db.collection(AUDIT_COLLECTION).doc(audit.id), sanitizeForFirestore(audit), { merge: false });
     return { preferences, audit };
   });
@@ -284,7 +300,7 @@ export async function optOutAffiliateMarketingByToken(
     transaction.set(affiliateRef, sanitizeForFirestore({
       notificationPreferences: preferences,
       updatedAt: now,
-    }), { merge: true });
+    }), { mergeFields: ['notificationPreferences', 'updatedAt'] });
     transaction.set(db.collection(AUDIT_COLLECTION).doc(audit.id), sanitizeForFirestore(audit), { merge: false });
     return { accepted: true as const, changed: true, affiliateId: verified.affiliateId, audit };
   });

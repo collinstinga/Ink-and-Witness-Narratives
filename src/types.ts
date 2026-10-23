@@ -1334,6 +1334,8 @@ export interface AffiliateNotificationPreferences {
   marketingOptOutAt?: string;
   marketingOptOutSource?: 'affiliate_dashboard' | 'signed_email_link';
   releaseUpdates: boolean;
+  /** Evidence of the latest explicit release-topic opt-in, never backfilled. */
+  releaseUpdatesEnabledAt?: string;
   campaignUpdates: boolean;
   inactivityReminders: boolean;
   exclusiveOpportunities: boolean;

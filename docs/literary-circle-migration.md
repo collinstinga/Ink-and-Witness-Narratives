@@ -8,6 +8,13 @@ production project IDs as an additional deny-list. The known production project
 `ink-and-witness-narratives` is denied in code even when that environment
 variable is absent.
 
+Both current and legacy production projects are denied in code. Staging access
+also requires `LITERARY_CIRCLE_STAGING_PROJECT_IDS` to explicitly contain the
+exact target project, with no malformed or production-overlapping entries.
+Configured Firebase emulators are refused by these real-staging tools. Use
+least-privilege staging-only credentials and explicitly verify the database ID;
+the project label alone does not prove credential isolation.
+
 `FIREBASE_PROJECT_ID` and `FIRESTORE_DATABASE_ID` must identify the staging
 target. These environment overrides take precedence over
 `firebase-applet-config.json`, and the migration validates the same resolved

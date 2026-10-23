@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const firestore = vi.hoisted(() => ({
   documents: new Map<string, any>(),
@@ -62,9 +62,15 @@ describe('affiliate notification preferences', () => {
           const value = firestore.documents.get(`${reference.collection}/${reference.id}`);
           return { exists: value !== undefined, data: () => clone(value) };
         },
-        set: (reference: any, value: any, options?: { merge?: boolean }) => {
+        set: (reference: any, value: any, options?: { merge?: boolean; mergeFields?: string[] }) => {
           writeStarted = true;
-          writes.push({ reference, value: clone(value), merge: options?.merge === true });
+          if (reference.collection === 'affiliates') {
+            // Replacing this whole map must remove omitted consent evidence;
+            // Firestore merge:true would recursively retain those old fields.
+            expect(options).toEqual({ mergeFields: ['notificationPreferences', 'updatedAt'] });
+            expect(Object.keys(value).sort()).toEqual([...options!.mergeFields!].sort());
+          }
+          writes.push({ reference, value: clone(value), merge: options?.merge === true || Boolean(options?.mergeFields) });
         },
       };
       const result = await operation(transaction);
@@ -77,6 +83,8 @@ describe('affiliate notification preferences', () => {
       return clone(result);
     });
   });
+
+  afterEach(() => { vi.useRealTimers(); });
 
   it('defaults marketing to unknown and fully opted out without borrowing terms consent', async () => {
     firestore.documents.set('affiliates/aff-one', { id: 'aff-one', acceptedTerms: true });
@@ -104,7 +112,32 @@ describe('affiliate notification preferences', () => {
     });
   });
 
+  it.each([undefined, 'not-a-date', '2026-10-01', '2026-10-01T03:00:00+03:00'])('does not fabricate release-topic chronology from missing/noncanonical evidence: %s', releaseUpdatesEnabledAt => {
+    const normalized = normalizeAffiliateNotificationPreferences({
+      ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+      marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+      marketingConsentAt: '2026-10-01T00:00:00.000Z', allMarketingOptOut: false,
+      releaseUpdates: true, releaseUpdatesEnabledAt,
+    });
+    expect(normalized.releaseUpdates).toBe(true);
+    expect(normalized.releaseUpdatesEnabledAt).toBeUndefined();
+  });
+
+  it('retains canonical topic evidence only while release marketing remains enabled', () => {
+    const value = {
+      ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+      marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+      marketingConsentAt: '2026-10-01T00:00:00.000Z', allMarketingOptOut: false,
+      releaseUpdates: true, releaseUpdatesEnabledAt: '2026-10-02T00:00:00.000Z',
+    };
+    expect(normalizeAffiliateNotificationPreferences(value).releaseUpdatesEnabledAt).toBe(value.releaseUpdatesEnabledAt);
+    expect(normalizeAffiliateNotificationPreferences({ ...value, releaseUpdates: false }).releaseUpdatesEnabledAt).toBeUndefined();
+    expect(normalizeAffiliateNotificationPreferences({ ...value, marketingConsent: 'denied' }).releaseUpdatesEnabledAt).toBeUndefined();
+  });
+
   it('atomically records explicit consent, category choices and a notification audit', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-23T10:00:00.000Z'));
     firestore.documents.set('affiliates/aff-one', {
       id: 'aff-one',
       affiliateCode: 'AFFONE',
@@ -119,6 +152,7 @@ describe('affiliate notification preferences', () => {
       marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
       marketingConsentSource: 'affiliate_dashboard',
       releaseUpdates: true,
+      releaseUpdatesEnabledAt: '2026-10-23T10:00:00.000Z',
       campaignUpdates: true,
       inactivityReminders: false,
       allMarketingOptOut: false,
@@ -130,6 +164,54 @@ describe('affiliate notification preferences', () => {
       targetType: 'notification',
       targetId: 'aff-one',
     });
+  });
+
+  it('dates a new release-topic opt-in independently, preserves it on saves, and resets it after re-enabling', async () => {
+    vi.useFakeTimers();
+    const initialConsent = '2026-10-01T00:00:00.000Z';
+    firestore.documents.set('affiliates/aff-one', {
+      id: 'aff-one', affiliateCode: 'AFFONE', walletBalanceKes: 700,
+      customData: { preserved: true },
+      notificationPreferences: {
+        ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+        marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+        marketingConsentAt: initialConsent, releaseUpdates: false, campaignUpdates: true,
+        allMarketingOptOut: false, commissionAlerts: false, tierAlerts: true,
+      },
+    });
+    vi.setSystemTime(new Date('2026-10-23T10:00:00.000Z'));
+    const first = await saveAffiliateNotificationPreferences('aff-one', validUpdate({ commissionAlerts: false }), 'Affiliate');
+    expect(first.preferences.marketingConsentAt).toBe(initialConsent);
+    expect(first.preferences.releaseUpdatesEnabledAt).toBe('2026-10-23T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-10-23T11:00:00.000Z'));
+    const savedAgain = await saveAffiliateNotificationPreferences('aff-one', validUpdate({ expectedRevision: 1, commissionAlerts: false }), 'Affiliate');
+    expect(savedAgain.preferences.releaseUpdatesEnabledAt).toBe(first.preferences.releaseUpdatesEnabledAt);
+    const disabled = await saveAffiliateNotificationPreferences('aff-one', validUpdate({ expectedRevision: 2, releaseUpdates: false, commissionAlerts: false }), 'Affiliate');
+    expect(disabled.preferences.releaseUpdatesEnabledAt).toBeUndefined();
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty('releaseUpdatesEnabledAt');
+    vi.setSystemTime(new Date('2026-10-24T10:00:00.000Z'));
+    const reenabled = await saveAffiliateNotificationPreferences('aff-one', validUpdate({ expectedRevision: 3, commissionAlerts: false }), 'Affiliate');
+    expect(reenabled.preferences.releaseUpdatesEnabledAt).toBe('2026-10-24T10:00:00.000Z');
+    expect(reenabled.preferences.marketingConsentAt).toBe(initialConsent);
+    expect(reenabled.preferences).toMatchObject({ commissionAlerts: false, tierAlerts: true, campaignUpdates: true });
+    expect(firestore.documents.get('affiliates/aff-one')).toMatchObject({
+      id: 'aff-one', affiliateCode: 'AFFONE', walletBalanceKes: 700, customData: { preserved: true },
+    });
+  });
+
+  it('allows an old release preference without evidence to opt in only from an explicit current save', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-23T10:00:00.000Z'));
+    firestore.documents.set('affiliates/aff-one', {
+      id: 'aff-one', notificationPreferences: {
+        ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+        marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+        marketingConsentAt: '2026-10-01T00:00:00.000Z', allMarketingOptOut: false, releaseUpdates: true,
+      },
+    });
+    const saved = await saveAffiliateNotificationPreferences('aff-one', validUpdate(), 'Affiliate');
+    expect(saved.preferences.releaseUpdatesEnabledAt).toBe('2026-10-23T10:00:00.000Z');
+    expect(saved.preferences.marketingConsentAt).toBe('2026-10-01T00:00:00.000Z');
   });
 
   it('turns a refusal into an explicit all-marketing opt-out and clears marketing categories', async () => {
@@ -144,6 +226,7 @@ describe('affiliate notification preferences', () => {
         marketingConsentAt: '2026-10-01T00:00:00.000Z',
         marketingConsentSource: 'affiliate_dashboard',
         releaseUpdates: true,
+        releaseUpdatesEnabledAt: '2026-10-02T00:00:00.000Z',
         allMarketingOptOut: false,
       },
     });
@@ -165,6 +248,9 @@ describe('affiliate notification preferences', () => {
       commissionAlerts: false,
     });
     expect(saved.preferences.marketingConsentAt).toBeUndefined();
+    expect(saved.preferences.releaseUpdatesEnabledAt).toBeUndefined();
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty('releaseUpdatesEnabledAt');
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty('marketingConsentAt');
     expect(saved.preferences.marketingOptOutAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -181,6 +267,10 @@ describe('affiliate notification preferences', () => {
       ...validUpdate({ expectedRevision: 3 }),
       marketingConsentSource: 'writer_recorded',
     }, 'Affiliate')).rejects.toThrow(/unsupported/i);
+    await expect(saveAffiliateNotificationPreferences('aff-one', {
+      ...validUpdate({ expectedRevision: 3 }),
+      releaseUpdatesEnabledAt: '2020-01-01T00:00:00.000Z',
+    }, 'Affiliate')).rejects.toThrow(/unsupported/i);
   });
 
   it('atomically applies a signed marketing opt-out while preserving operational alerts', async () => {
@@ -195,6 +285,7 @@ describe('affiliate notification preferences', () => {
         marketingConsentAt: '2026-10-01T00:00:00.000Z',
         marketingConsentSource: 'affiliate_dashboard',
         releaseUpdates: true,
+        releaseUpdatesEnabledAt: '2026-10-02T00:00:00.000Z',
         campaignUpdates: true,
         inactivityReminders: true,
         exclusiveOpportunities: true,
@@ -225,6 +316,8 @@ describe('affiliate notification preferences', () => {
       allMarketingOptOut: true,
     });
     expect([...firestore.documents.keys()].filter(key => key.startsWith('affiliate_audit/'))).toHaveLength(1);
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty('releaseUpdatesEnabledAt');
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty('marketingConsentAt');
   });
 
   it('accepts invalid or missing-account opt-out capabilities without disclosing account state', async () => {

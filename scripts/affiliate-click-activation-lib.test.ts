@@ -329,16 +329,16 @@ describe('staging target and runtime guards', () => {
     );
   });
 
-  it('always denies the known production project, even when labelled staging', () => {
+  it.each(['ink-and-witness-narratives', 'divine-experience-pq6d2'])('always denies known production project %s, even when labelled staging', projectId => {
     expectSafeError(() => assertAffiliateClickActivationStagingTarget({
       ...validTarget,
       options: {
         ...options,
-        expectedProject: 'ink-and-witness-narratives',
+        expectedProject: projectId,
       },
-      resolvedProjectId: 'ink-and-witness-narratives',
-      stagingProjectAllowlist: 'ink-and-witness-narratives',
-      serviceAccount: { ...SERVICE_ACCOUNT, project_id: 'ink-and-witness-narratives' },
+      resolvedProjectId: projectId,
+      stagingProjectAllowlist: projectId,
+      serviceAccount: { ...SERVICE_ACCOUNT, project_id: projectId },
     }), 'target', 'staging_allowlist_contains_production');
   });
 

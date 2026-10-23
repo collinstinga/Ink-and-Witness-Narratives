@@ -7,11 +7,15 @@ import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 export const AFFILIATE_BACKUP_SCHEMA_VERSION = 5 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
-export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = ['ink-and-witness-narratives'] as const;
+export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = [
+  'ink-and-witness-narratives',
+  'divine-experience-pq6d2'
+] as const;
 
 const LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID = 'literary_circle_resources';
 const AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID = 'affiliate_notifications';
 const LITERARY_CIRCLE_RESOURCE_ASSETS_DATASET_KEY = 'literary_circle_resource_assets';
+const SAFE_FIREBASE_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,29}[a-z0-9]$/;
 
 export interface FirebaseTarget {
   projectId: string;
@@ -530,8 +534,15 @@ export function assertStagingTarget(options: {
   if (!options.expectedProject || options.expectedProject !== options.target.projectId) {
     throw new Error('Refusing database access: --expected-project must exactly match the configured project.');
   }
-  if (process.env.NODE_ENV?.toLowerCase() === 'production' || process.env.VERCEL_ENV?.toLowerCase() === 'production') {
+  if (process.env.NODE_ENV?.trim().toLowerCase() === 'production' || process.env.VERCEL_ENV?.trim().toLowerCase() === 'production') {
     throw new Error('Refusing to run while the process environment is marked as production.');
+  }
+  if (
+    process.env.FIRESTORE_EMULATOR_HOST?.trim()
+    || process.env.FIREBASE_DATABASE_EMULATOR_HOST?.trim()
+    || process.env.FIREBASE_AUTH_EMULATOR_HOST?.trim()
+  ) {
+    throw new Error('Refusing staging database access while a Firebase emulator is configured.');
   }
   const productionProjects = new Set([
     ...KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS,
@@ -542,6 +553,19 @@ export function assertStagingTarget(options: {
   ]);
   if (productionProjects.has(options.target.projectId)) {
     throw new Error('Refusing to run the staging migration against a known production Firebase project.');
+  }
+  const stagingProjects = [...new Set((process.env.LITERARY_CIRCLE_STAGING_PROJECT_IDS || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean))];
+  if (!stagingProjects.length || stagingProjects.some(projectId => !SAFE_FIREBASE_PROJECT_ID_PATTERN.test(projectId))) {
+    throw new Error('Staging database access requires a valid explicit LITERARY_CIRCLE_STAGING_PROJECT_IDS allowlist.');
+  }
+  if (stagingProjects.some(projectId => productionProjects.has(projectId))) {
+    throw new Error('Refusing staging database access because the staging allowlist overlaps a production project.');
+  }
+  if (!stagingProjects.includes(options.target.projectId)) {
+    throw new Error('The configured Firebase project is not in the explicit staging project allowlist.');
   }
 }
 

@@ -90,6 +90,7 @@ describe('committed affiliate notification sources', () => {
       ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
       marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
       marketingConsentAt: '2026-10-23T08:30:00.000Z', allMarketingOptOut: false, releaseUpdates: true,
+      releaseUpdatesEnabledAt: '2026-10-23T08:30:00.000Z',
     };
     return { db: h.client, kind: 'new_release' as const, sourceId: id, affiliateIds: ['partner-one'], now: NOW };
   }

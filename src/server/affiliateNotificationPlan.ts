@@ -106,13 +106,26 @@ export function planAffiliateNotifications(input: {
       exclude(Object.keys(eligibility.reasons)[0] || 'ineligible');
       continue;
     }
+    const approvedMs = Date.parse(affiliate.approvedAt || '');
+    if (!Number.isFinite(approvedMs) || approvedMs <= 0 || approvedMs > nowMs) {
+      exclude('writer_approval_not_effective');
+      continue;
+    }
     // A later opt-in must not turn historical releases into a marketing backlog.
     // Delivery must independently recheck current consent before sending.
     if (source.eventType === 'new_release') {
       const consentAt = affiliate.notificationPreferences?.marketingConsentAt;
       const consentMs = typeof consentAt === 'string' ? Date.parse(consentAt) : NaN;
-      if (!Number.isFinite(consentMs) || consentMs <= 0 || consentMs > occurredMs) {
+      const releaseEnabledAt = affiliate.notificationPreferences?.releaseUpdatesEnabledAt;
+      const releaseEnabledMs = typeof releaseEnabledAt === 'string' ? Date.parse(releaseEnabledAt) : NaN;
+      if (!Number.isFinite(consentMs) || consentMs <= 0 || consentMs > occurredMs
+        || new Date(consentMs).toISOString() !== consentAt) {
         exclude('marketing_consent_after_event');
+        continue;
+      }
+      if (!Number.isFinite(releaseEnabledMs) || releaseEnabledMs <= 0 || releaseEnabledMs > occurredMs
+        || new Date(releaseEnabledMs).toISOString() !== releaseEnabledAt) {
+        exclude('release_opt_in_after_event');
         continue;
       }
     }

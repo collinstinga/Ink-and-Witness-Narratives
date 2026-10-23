@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AffiliateAccount } from '../src/types.js';
 import { createLiteraryCircleMembership } from '../src/server/literaryCircle.js';
 import {
@@ -29,6 +29,7 @@ import {
 const cleanupDirectories: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const directory of cleanupDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -380,13 +381,66 @@ describe('Literary Circle migration safety helpers', () => {
     })).not.toThrow();
   });
 
-  it('always refuses to apply a staging migration to the known production project', () => {
-    const target = { projectId: 'ink-and-witness-narratives', databaseId: '(default)' };
-    expect(() => assertStagingTarget({
-      environment: 'staging',
-      expectedProject: target.projectId,
-      target
-    })).toThrow(/known production Firebase project/i);
+  describe('staging target isolation', () => {
+    const target = { projectId: 'ink-witness-staging', databaseId: '(default)' };
+    const options = { environment: 'staging', expectedProject: target.projectId, target };
+
+    beforeEach(() => {
+      vi.stubEnv('NODE_ENV', 'test');
+      vi.stubEnv('VERCEL_ENV', '');
+      vi.stubEnv('FIRESTORE_EMULATOR_HOST', '');
+      vi.stubEnv('FIREBASE_DATABASE_EMULATOR_HOST', '');
+      vi.stubEnv('FIREBASE_AUTH_EMULATOR_HOST', '');
+      vi.stubEnv('LITERARY_CIRCLE_PRODUCTION_PROJECT_IDS', '');
+      vi.stubEnv('LITERARY_CIRCLE_STAGING_PROJECT_IDS', target.projectId);
+    });
+
+    it('accepts only an exact explicitly allowlisted staging target', () => {
+      vi.stubEnv('LITERARY_CIRCLE_STAGING_PROJECT_IDS', ` other-staging, ${target.projectId},${target.projectId} `);
+      expect(() => assertStagingTarget(options)).not.toThrow();
+      expect(() => assertStagingTarget({ ...options, environment: 'production' })).toThrow(/environment=staging/i);
+      expect(() => assertStagingTarget({ ...options, expectedProject: 'other-staging' })).toThrow(/exactly match/i);
+    });
+
+    it.each(['', ' , ', 'other-staging', 'invalid_project', `${target.projectId},INVALID-STAGING`])(
+      'refuses absent, invalid, or nonmatching staging allowlist: %s', allowlist => {
+        vi.stubEnv('LITERARY_CIRCLE_STAGING_PROJECT_IDS', allowlist);
+        expect(() => assertStagingTarget(options)).toThrow(/allowlist/i);
+      }
+    );
+
+    it.each(['ink-and-witness-narratives', 'divine-experience-pq6d2'])(
+      'always refuses known production project %s even when allowlisted', projectId => {
+        vi.stubEnv('LITERARY_CIRCLE_STAGING_PROJECT_IDS', projectId);
+        expect(() => assertStagingTarget({
+          ...options,
+          expectedProject: projectId,
+          target: { ...target, projectId }
+        })).toThrow(/known production Firebase project/i);
+      }
+    );
+
+    it.each(['ink-and-witness-narratives', 'divine-experience-pq6d2', 'additional-production'])(
+      'refuses the whole allowlist when any production ID overlaps: %s', productionProject => {
+        vi.stubEnv('LITERARY_CIRCLE_PRODUCTION_PROJECT_IDS', ' additional-production ');
+        vi.stubEnv('LITERARY_CIRCLE_STAGING_PROJECT_IDS', `${target.projectId},${productionProject}`);
+        expect(() => assertStagingTarget(options)).toThrow(/overlaps a production project/i);
+      }
+    );
+
+    it.each(['NODE_ENV', 'VERCEL_ENV'])(
+      'refuses production process marker %s', variable => {
+        vi.stubEnv(variable, ' Production ');
+        expect(() => assertStagingTarget(options)).toThrow(/marked as production/i);
+      }
+    );
+
+    it.each(['FIRESTORE_EMULATOR_HOST', 'FIREBASE_DATABASE_EMULATOR_HOST', 'FIREBASE_AUTH_EMULATOR_HOST'])(
+      'refuses configured emulator %s', variable => {
+        vi.stubEnv(variable, ' localhost:8080 ');
+        expect(() => assertStagingTarget(options)).toThrow(/emulator/i);
+      }
+    );
   });
 
   it('validates the same environment-overridden Firebase target that getDb will open', () => {
