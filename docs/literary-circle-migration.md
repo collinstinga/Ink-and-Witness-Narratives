@@ -64,7 +64,7 @@ Before either command:
    deployment and retain both its deployment reference and its `aclk2_...`
    Firestore event ID;
 3. quiesce staging affiliate traffic;
-4. take a new verified schema-v3 backup after the proof event exists; and
+4. take a new verified schema-v4 backup after the proof event exists; and
 5. keep `FIREBASE_SERVICE_ACCOUNT_JSON` available only in the protected local
    process environment. Application-default credentials are refused.
 
@@ -107,16 +107,21 @@ under an approved, git-ignored `data/` location.
 The snapshot contains every document from `affiliates`,
 `affiliate_commissions`, `affiliate_clicks`, `affiliate_payouts`,
 `affiliate_campaigns`, `affiliate_audit`, `affiliate_codes`,
-`affiliate_emails`, `affiliate_commission_outbox`, and
-`affiliate_attribution_claims`; only affiliate-attributed documents from
+`affiliate_emails`, `affiliate_commission_outbox`, `affiliate_attribution_claims`,
+and `affiliate_notification_outbox`; only affiliate-attributed documents from
 `transactions`; and the `affiliate_settings`, `affiliate_literary_circle`,
 `affiliate_notifications`, and `literary_circle_resources` documents from
-`site_configs` when present. Backup schema version 3 includes the preview-only
+`site_configs` when present. Backup schema version 4 includes the preview-only
 affiliate-notification configuration without treating it as subscriber consent
 or a delivery ledger. It also includes exactly every
 `uploaded_assets` document referenced by an `items[].assetId` in that resource
 library, including draft, expired, and private resource artwork. The backup
 aborts if any referenced asset document is missing.
+
+Version 4 adds verbatim notification source and held-intent records. Earlier
+backup files remain untouched, but current migration and click-activation tools
+reject them because they lack the new scope. Take a fresh version-4 backup;
+never relabel an older manifest or synthesize an empty outbox to bypass checks.
 
 `affiliate_sessions` is deliberately excluded because it contains revocable
 bearer credentials rather than historical programme data. The manifest records
@@ -154,8 +159,8 @@ automatic restore command.
 
 Affiliate documents may now contain additive `approvedAt`, `approvedBy`, and
 `notificationPreferences` fields. They are already covered by the verbatim
-`affiliates` backup and equality checks, so backup schema version 3 remains
-valid. Missing preference data means unknown consent and no optional marketing;
+`affiliates` backup and equality checks in schema version 4.
+Missing preference data means unknown consent and no optional marketing;
 accepted programme terms must never be promoted into marketing consent.
 
 Self-registered accounts are created as `pending` and receive no session until
@@ -188,7 +193,7 @@ The local branch contains server-only analytics primitives that can derive a
 versioned, non-reversible buyer pseudonym from a verified reader account or a
 settled Kenyan M-PESA payer phone using HMAC-SHA-256. They are not connected to
 production, do not read an environment secret, and do not store or backfill a
-field. Backup schema version 3 therefore remains unchanged.
+field. Those primitives add no extra dataset beyond the current version-4 scope.
 
 Before enabling new-reader or repeat-purchase analytics, provision a dedicated
 protected `AFFILIATE_ANALYTICS_HMAC_SECRET` with at least 32 bytes in staging,

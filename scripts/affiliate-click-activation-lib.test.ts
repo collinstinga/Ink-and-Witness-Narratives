@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { deriveAffiliateClickAnalyticsKeyFingerprint } from '../src/server/affiliateClickLedger.js';
 import {
   AFFILIATE_BACKUP_DATASETS,
+  AFFILIATE_BACKUP_SCHEMA_VERSION,
   type BackupDatasetPayload,
   type BackupDocument,
   type VerifiedAffiliateBackup,
@@ -57,7 +58,7 @@ function baseArguments(): string[] {
 
 function backupManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schemaVersion: 3,
+    schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
     backupId: 'literary-circle-2026-10-21-staging',
     createdAt: '2026-10-21T08:30:00.000Z',
     projectId: PROJECT_ID,
@@ -131,7 +132,7 @@ function exactBackupState(): {
   const payloads = new Map<string, BackupDatasetPayload>();
   for (const definition of AFFILIATE_BACKUP_DATASETS) {
     payloads.set(definition.key, {
-      schemaVersion: 3,
+      schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
       key: definition.key,
       collection: definition.collection,
       scope: definition.scope,
@@ -141,7 +142,7 @@ function exactBackupState(): {
   const verifiedBackup: VerifiedAffiliateBackup = {
     directory: 'data/backups/test',
     manifest: {
-      schemaVersion: 3,
+      schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
       backupId: 'literary-circle-test-backup',
       createdAt: '2026-10-21T08:30:00.000Z',
       projectId: PROJECT_ID,
@@ -400,7 +401,7 @@ describe('authoritative time and fresh backup guards', () => {
     }), 'precondition', 'invalid_authoritative_time');
   });
 
-  it('accepts a verified schema-v3 backup up to 60 minutes old', () => {
+  it('accepts a verified current-schema backup up to 60 minutes old', () => {
     const evidence = assertFreshAffiliateClickActivationBackup({
       manifest: backupManifest({ createdAt: '2026-10-21T08:00:00.000Z' }),
       authoritativeSnapshot: firestoreSnapshot(AUTHORITATIVE_TIME),
@@ -409,7 +410,7 @@ describe('authoritative time and fresh backup guards', () => {
       expectedAffiliates: 9,
     });
     expect(evidence).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
       affiliateCount: 9,
       ageMs: 60 * 60 * 1_000,
     });
@@ -418,6 +419,7 @@ describe('authoritative time and fresh backup guards', () => {
 
   it.each([
     ['wrong schema', { schemaVersion: 2 }],
+    ['older schema without notification outbox coverage', { schemaVersion: 3 }],
     ['wrong project', { projectId: 'other-staging-project' }],
     ['wrong database', { databaseId: 'another-db' }],
     ['wrong affiliate count', { datasets: [{ key: 'affiliates', count: 8 }] }],

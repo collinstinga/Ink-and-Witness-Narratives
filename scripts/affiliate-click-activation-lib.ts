@@ -572,8 +572,8 @@ export function assertFreshAffiliateClickActivationBackup(input: {
     fail('backup', 'invalid_backup_manifest', 'The verified backup manifest is invalid.');
   }
   const manifest = input.manifest as unknown as AffiliateBackupManifest;
-  if (manifest.schemaVersion !== AFFILIATE_BACKUP_SCHEMA_VERSION || manifest.schemaVersion !== 3) {
-    fail('backup', 'unsupported_backup_schema', 'Activation requires a verified schema-v3 backup.');
+  if (manifest.schemaVersion !== AFFILIATE_BACKUP_SCHEMA_VERSION) {
+    fail('backup', 'unsupported_backup_schema', 'Activation requires a verified current-schema backup.');
   }
   if (
     manifest.projectId !== input.expectedProject
@@ -608,7 +608,7 @@ export function assertFreshAffiliateClickActivationBackup(input: {
     fail('backup', 'backup_affiliate_count_mismatch', 'The verified backup does not contain the exact founding affiliate count.');
   }
   return {
-    schemaVersion: 3,
+    schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
     backupId: manifest.backupId,
     createdAt,
     contentSha256: manifest.contentSha256,

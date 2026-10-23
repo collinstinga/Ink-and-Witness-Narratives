@@ -3,6 +3,7 @@ import type { DocumentReference, DocumentSnapshot, Firestore, Transaction } from
 import { deriveAffiliateClickAnalyticsKeyFingerprint } from '../src/server/affiliateClickLedger.js';
 import {
   AFFILIATE_BACKUP_DATASETS,
+  AFFILIATE_BACKUP_SCHEMA_VERSION,
   type BackupDatasetPayload,
   type BackupDocument,
   type VerifiedAffiliateBackup,
@@ -96,7 +97,7 @@ function verifiedBackup(): VerifiedAffiliateBackup {
   const payloads = new Map<string, BackupDatasetPayload>();
   for (const definition of AFFILIATE_BACKUP_DATASETS) {
     payloads.set(definition.key, {
-      schemaVersion: 3,
+      schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
       key: definition.key,
       collection: definition.collection,
       scope: definition.scope,
@@ -110,7 +111,7 @@ function verifiedBackup(): VerifiedAffiliateBackup {
   return {
     directory: 'data/backups/test',
     manifest: {
-      schemaVersion: 3,
+      schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION,
       backupId: 'literary-circle-test-backup',
       createdAt: '2026-10-21T08:30:00.000Z',
       projectId: PROJECT_ID,

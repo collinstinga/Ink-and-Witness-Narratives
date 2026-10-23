@@ -5,6 +5,7 @@ import type { AffiliateAccount } from '../src/types.js';
 import { createLiteraryCircleMembership } from '../src/server/literaryCircle.js';
 import {
   AFFILIATE_BACKUP_DATASETS,
+  AFFILIATE_BACKUP_SCHEMA_VERSION,
   FOUNDING_AFFILIATE_COUNT,
   assertLiveStateMatchesBackup,
   assertReadOnlyBackupTarget,
@@ -234,6 +235,35 @@ describe('Literary Circle migration safety helpers', () => {
     ])))).rejects.toThrow(/missing uploaded_assets documents: missing-asset/i);
   });
 
+  it('captures notification source and intent records without projecting away evidence', async () => {
+    const records = new Map<string, Record<string, unknown>>([
+      ['affiliate_notification_outbox/ane1_source', { kind: 'source', sourceSha256: 'source-evidence' }],
+      ['affiliate_notification_outbox/ani1_intent', { kind: 'intent', state: 'held', affiliateId: 'affiliate-1' }],
+    ]);
+    const payloads = await captureAffiliateDatasets(fakeFirestore(records));
+    expect(payloads.get('affiliate_notification_outbox')?.documents).toEqual([
+      { id: 'ane1_source', data: records.get('affiliate_notification_outbox/ane1_source') },
+      { id: 'ani1_intent', data: records.get('affiliate_notification_outbox/ani1_intent') },
+    ]);
+  });
+
+  it('round-trips notification outbox evidence and refuses live drift or an older incomplete backup', () => {
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const payloads = completePayloadSet();
+    const definition = AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'affiliate_notification_outbox')!;
+    payloads.set(definition.key, buildDatasetPayload(definition, [{ id: 'held-intent', data: { state: 'held', evidence: 'preserve-exactly' } }]));
+    const written = writeAffiliateBackup({ payloads, target });
+    cleanupDirectories.push(written.directory);
+    const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT });
+    expect(verified.payloads.get(definition.key)?.documents).toEqual(payloads.get(definition.key)?.documents);
+    const live = new Map(payloads);
+    live.set(definition.key, buildDatasetPayload(definition, []));
+    expect(() => assertLiveStateMatchesBackup(verified, live)).toThrow(/affiliate_notification_outbox/);
+    fs.writeFileSync(written.manifestPath, JSON.stringify({ ...written.manifest, schemaVersion: 3 }));
+    expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT }))
+      .toThrow(/Unsupported affiliate backup schema version/);
+  });
+
   it('writes a verifiable snapshot and rejects a changed dataset file', () => {
     const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
     const written = writeAffiliateBackup({
@@ -246,7 +276,7 @@ describe('Literary Circle migration safety helpers', () => {
       target,
       expectedAffiliates: FOUNDING_AFFILIATE_COUNT
     });
-    expect(verified.manifest.schemaVersion).toBe(3);
+    expect(verified.manifest.schemaVersion).toBe(AFFILIATE_BACKUP_SCHEMA_VERSION);
     expect(verified.manifest.contentSha256).toBe(written.manifest.contentSha256);
     expect(verified.payloads.get('literary_circle_resource_assets')?.documents.map(document => document.id))
       .toEqual(['asset-private', 'asset-public']);
