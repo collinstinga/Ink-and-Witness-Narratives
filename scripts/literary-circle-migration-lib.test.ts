@@ -264,6 +264,35 @@ describe('Literary Circle migration safety helpers', () => {
       .toThrow(/Unsupported affiliate backup schema version/);
   });
 
+  it.each([
+    ['newsletter_campaigns', 'newsletter_campaigns'],
+    ['release_source_articles', 'articles'],
+  ])('captures and verifies complete release source evidence: %s', async (key, collection) => {
+    const records = new Map<string, Record<string, unknown>>([
+      [`${collection}/source-one`, { status: 'draft', content: { text: 'private unpublished evidence' }, createdAt: '2026-10-23T08:00:00.000Z' }],
+      [`${collection}/source-two`, { status: 'published', customField: ['preserve', 42] }],
+    ]);
+    const captured = await captureAffiliateDatasets(fakeFirestore(records));
+    expect(captured.get(key)?.documents).toEqual([
+      { id: 'source-one', data: records.get(`${collection}/source-one`) },
+      { id: 'source-two', data: records.get(`${collection}/source-two`) },
+    ]);
+    const payloads = completePayloadSet();
+    payloads.set(key, captured.get(key)!);
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const written = writeAffiliateBackup({ payloads, target });
+    cleanupDirectories.push(written.directory);
+    const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT });
+    expect(verified.payloads.get(key)?.documents).toEqual(captured.get(key)?.documents);
+    const definition = AFFILIATE_BACKUP_DATASETS.find(item => item.key === key)!;
+    const live = new Map(payloads);
+    live.set(key, buildDatasetPayload(definition, []));
+    expect(() => assertLiveStateMatchesBackup(verified, live)).toThrow(key);
+    fs.writeFileSync(written.manifestPath, JSON.stringify({ ...written.manifest, schemaVersion: 4 }));
+    expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT }))
+      .toThrow(/Unsupported affiliate backup schema version/);
+  });
+
   it('writes a verifiable snapshot and rejects a changed dataset file', () => {
     const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
     const written = writeAffiliateBackup({

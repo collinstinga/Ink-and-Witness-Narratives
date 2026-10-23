@@ -4,7 +4,7 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 4 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 5 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = ['ink-and-witness-narratives'] as const;
@@ -166,6 +166,20 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
     key: 'affiliate_notification_outbox',
     collection: 'affiliate_notification_outbox',
     fileName: 'affiliate_notification_outbox.json',
+    scope: 'all_documents',
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: 'newsletter_campaigns',
+    collection: 'newsletter_campaigns',
+    fileName: 'newsletter_campaigns.json',
+    scope: 'all_documents',
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: 'release_source_articles',
+    collection: 'articles',
+    fileName: 'release_source_articles.json',
     scope: 'all_documents',
     sumFields: EMPTY_SUM_FIELDS
   },

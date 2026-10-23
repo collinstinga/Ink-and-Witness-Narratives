@@ -23,6 +23,15 @@ The backup contains personal and financial data. It is written under the
 git-ignored `data/backups/` directory with a timestamped backup ID. Do not
 commit, email, or copy it to an unapproved location.
 
+Current backup schema is v5. It also captures all newsletter campaign and
+article documents, preserving release-notification source evidence, unpublished
+content and publication state without projection. Treat these additional files
+as confidential. Capturing and comparing them requires collection reads; budget
+for the full campaign/article counts and quiesce content edits during rehearsal.
+These datasets are preservation evidence only, not migration write targets.
+Older backups remain unchanged but cannot satisfy the current verifier. Take a
+fresh complete backup; never relabel an older manifest or invent empty datasets.
+
 ## Staging sequence
 
 Use staging credentials and replace the example project and backup path:
@@ -64,7 +73,7 @@ Before either command:
    deployment and retain both its deployment reference and its `aclk2_...`
    Firestore event ID;
 3. quiesce staging affiliate traffic;
-4. take a new verified schema-v4 backup after the proof event exists; and
+4. take a new verified schema-v5 backup after the proof event exists; and
 5. keep `FIREBASE_SERVICE_ACCOUNT_JSON` available only in the protected local
    process environment. Application-default credentials are refused.
 

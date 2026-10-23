@@ -420,6 +420,7 @@ describe('authoritative time and fresh backup guards', () => {
   it.each([
     ['wrong schema', { schemaVersion: 2 }],
     ['older schema without notification outbox coverage', { schemaVersion: 3 }],
+    ['older schema without release source coverage', { schemaVersion: 4 }],
     ['wrong project', { projectId: 'other-staging-project' }],
     ['wrong database', { databaseId: 'another-db' }],
     ['wrong affiliate count', { datasets: [{ key: 'affiliates', count: 8 }] }],
