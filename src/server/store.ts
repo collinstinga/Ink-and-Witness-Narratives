@@ -2822,7 +2822,7 @@ export const store = {
         : article.showReadTime !== false,
       updatedAt: now,
       createdAt: article.createdAt || prevArticle?.createdAt || now,
-      publishedAt: article.status === 'published' ? (article.publishedAt || prevArticle?.publishedAt || now.split('T')[0]) : (article.publishedAt || ''),
+      publishedAt: article.publishedAt || prevArticle?.publishedAt || (article.status === 'published' ? now : ''),
       scheduledAt: article.scheduledAt || undefined,
       coverImage: article.coverImage !== undefined ? article.coverImage : prevArticle?.coverImage,
       coverImageOriginal: article.coverImageOriginal !== undefined ? article.coverImageOriginal : prevArticle?.coverImageOriginal,
@@ -2974,7 +2974,7 @@ export const store = {
       status: nextStatus,
       updatedAt,
       publishedAt: nextStatus === 'published' && !article.publishedAt
-        ? updatedAt.split('T')[0]
+        ? updatedAt
         : article.publishedAt
     };
     const catalogVersion = await persistArticleCatalogMutation(

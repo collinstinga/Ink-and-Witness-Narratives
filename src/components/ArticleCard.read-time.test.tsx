@@ -37,6 +37,12 @@ function renderCard(piece: Article, isUnlocked = true): string {
 }
 
 describe('piece reading-time visibility', () => {
+  it('displays the same calendar date for precise and legacy publication dates', () => {
+    const html = renderCard({ ...article, publishedAt: '2026-09-17T12:34:56.789Z' });
+    expect(html).toContain('2026-09-17');
+    expect(html).not.toContain('T12:34:56.789Z');
+  });
+
   it('keeps the estimate visible for existing pieces without a visibility setting', () => {
     expect(renderCard(article)).toContain('7 min read');
   });

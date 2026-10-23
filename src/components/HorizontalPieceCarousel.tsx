@@ -309,7 +309,7 @@ export const HorizontalPieceCarousel: React.FC<HorizontalPieceCarouselProps> = (
                   )}
                   <span className="flex items-center gap-1 bg-slate-950/80 px-2 py-0.5 rounded border border-slate-800/80 backdrop-blur-sm">
                     <Calendar className="w-3 h-3 text-slate-400" />
-                    <span>{activePiece.publishedAt}</span>
+                    <span>{activePiece.publishedAt?.slice(0, 10)}</span>
                   </span>
                 </div>
               </div>

@@ -106,7 +106,7 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
             )}
             <span className="flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
-              {article.publishedAt}
+              {article.publishedAt?.slice(0, 10)}
             </span>
           </div>
 

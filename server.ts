@@ -4386,7 +4386,7 @@ export async function createApp() {
         currencyOverrides: Array.isArray(currencyOverrides) ? currencyOverrides : undefined,
         readTimeMinutes: Number(readTimeMinutes) || Math.max(3, Math.ceil(content.split(/\s+/).length / 200)),
         showReadTime: showReadTime !== false,
-        publishedAt: status === 'published' ? new Date().toISOString().split('T')[0] : "",
+        publishedAt: status === 'published' ? new Date().toISOString() : "",
         scheduledAt: scheduledAt || undefined,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -4464,7 +4464,7 @@ export async function createApp() {
 
       // If status changed to published and no publishedAt set
       if (updatedArticle.status === 'published' && !updatedArticle.publishedAt) {
-        updatedArticle.publishedAt = new Date().toISOString().split('T')[0];
+        updatedArticle.publishedAt = new Date().toISOString();
       }
 
       const shouldCreateRevision = Boolean(createRevision || revisionSummary);

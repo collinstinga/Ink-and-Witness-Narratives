@@ -2048,7 +2048,7 @@ export const HomepageManager: React.FC<HomepageManagerProps> = ({
                           <span>•</span>
                         </>
                       )}
-                      <span>Published on {piece.publishedAt}</span>
+                      <span>Published on {piece.publishedAt?.slice(0, 10)}</span>
                     </div>
 
                     <h4 className="font-display font-bold text-xl sm:text-2xl text-white">

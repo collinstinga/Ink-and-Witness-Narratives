@@ -1593,7 +1593,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
             <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
               <span className="flex items-center gap-1">
                 <Calendar className="w-3.5 h-3.5" />
-                Published {article.publishedAt}
+                Published {article.publishedAt?.slice(0, 10)}
               </span>
               {article.showReadTime !== false && (
                 <>

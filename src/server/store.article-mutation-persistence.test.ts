@@ -154,6 +154,33 @@ describe('article catalog mutations', () => {
     );
   });
 
+  it('records a precise first publication time and preserves it across edits and republishing', async () => {
+    firestore.documents.set(firestore.keyFor('articles', originalArticle.id), {
+      ...originalArticle, status: 'draft', publishedAt: ''
+    });
+    const { store } = await import('./store.js');
+    await store.init();
+    const published = await store.togglePublish(originalArticle.id);
+    expect(published?.publishedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(published?.publishedAt).toBe(published?.updatedAt);
+    const drafted = await store.saveArticle({ ...published!, status: 'draft', publishedAt: '' });
+    expect(drafted.publishedAt).toBe(published?.publishedAt);
+    const republished = await store.togglePublish(originalArticle.id);
+    expect(republished?.publishedAt).toBe(published?.publishedAt);
+    expect(firestore.documents.get(firestore.keyFor('articles', originalArticle.id))?.publishedAt)
+      .toBe(published?.publishedAt);
+  });
+
+  it('preserves legacy publication dates and timestamps new directly published pieces', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const edited = await store.saveArticle({ ...originalArticle, publishedAt: '', title: 'Updated title' });
+    expect(edited.publishedAt).toBe(originalArticle.publishedAt);
+    const created = await store.saveArticle({ ...originalArticle, id: 'new-published-piece', publishedAt: '' });
+    expect(created.publishedAt).toBe(created.updatedAt);
+    expect(created.publishedAt).toContain('T');
+  });
+
   it('restores archived articles with the catalog marker atomically and preserves cache on commit failure', async () => {
     const { store } = await import('./store.js');
     await store.init();
