@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { Firestore } from 'firebase-admin/firestore';
+import type { Firestore, Transaction } from 'firebase-admin/firestore';
 import type { AffiliatePublicProfile } from '../types.js';
 import {
   DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS,
@@ -61,6 +61,8 @@ export async function storeHeldAffiliateNotifications(input: {
   source: AffiliateNotificationSource;
   affiliateIds: string[];
   now: string;
+  /** Trusted server-side source adapter; runs before any outbox write. */
+  verifySource?: (transaction: Transaction) => Promise<boolean>;
 }): Promise<HeldNotificationStorageResult> {
   if (input.mode === undefined || input.mode === 'disabled') return { status: 'disabled', intentCount: 0 };
   if (input.mode !== 'held' || !Array.isArray(input.affiliateIds)
@@ -84,6 +86,9 @@ export async function storeHeldAffiliateNotifications(input: {
 
   try {
     return await input.db.runTransaction(async transaction => {
+      if (input.verifySource && !await input.verifySource(transaction)) {
+        return { status: 'ineligible' as const, intentCount: 0 };
+      }
       const sourceSnapshot = await transaction.get(sourceRef);
       if (sourceSnapshot.exists) {
         const existing = sourceSnapshot.data() as SourceRecord;

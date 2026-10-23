@@ -11,6 +11,14 @@ export interface FirestoreTargetConfig {
   firestoreDatabaseId: string;
 }
 
+const boundClientTargets = new WeakMap<Firestore, Readonly<FirestoreTargetConfig>>();
+
+/** Target recorded when this module actually constructs the client, not env labels. */
+export function getFirestoreClientTarget(client: Firestore): FirestoreTargetConfig | null {
+  const target = boundClientTargets.get(client);
+  return target ? { ...target } : null;
+}
+
 /**
  * Resolve the exact target used by getDb(). Environment overrides take
  * precedence so maintenance scripts cannot validate one project while the
@@ -68,6 +76,7 @@ export function getDb(): Firestore {
     ? getFirestore(app, databaseId)
     : getFirestore(app);
   dbInstance.settings({ ignoreUndefinedProperties: true });
+  boundClientTargets.set(dbInstance, Object.freeze({ ...config }));
 
   console.log(`[Firestore] Initialized private server connection to project: ${config.projectId}, db: ${databaseId || '(default)'}`);
   return dbInstance;

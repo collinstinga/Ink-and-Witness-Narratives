@@ -47,6 +47,7 @@ import {
   type DurableAffiliateClickEventV2,
 } from './affiliateClickLedger.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
+import { prepareCommittedAffiliateNotification } from './affiliateNotificationEvents.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import {
@@ -2204,6 +2205,9 @@ export const affiliateStore = {
       };
     });
 
+    if (persisted.commission) {
+      await prepareCommittedAffiliateNotification({ db, kind: 'new_commission', sourceId: commissionId });
+    }
     if (persisted.freshSettings) {
       cachedSettings = persisted.freshSettings;
       writeJsonFileSync(SETTINGS_FILE, cachedSettings);

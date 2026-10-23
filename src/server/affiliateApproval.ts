@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { AffiliateAccount, AffiliateAuditLogEntry } from '../types.js';
 import { getDb, sanitizeForFirestore } from './db.js';
+import { prepareCommittedAffiliateNotification } from './affiliateNotificationEvents.js';
 
 const SAFE_AFFILIATE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/;
 
@@ -43,7 +44,7 @@ export async function approveAffiliateAccount(
     : 'Admin';
   const db = getDb();
   const affiliateRef = db.collection('affiliates').doc(affiliateId);
-  return db.runTransaction(async transaction => {
+  const result = await db.runTransaction(async transaction => {
     const snapshot = await transaction.get(affiliateRef);
     if (!snapshot.exists) throw new AffiliateApprovalNotFoundError();
     const previous = { ...(snapshot.data() as AffiliateAccount), id: affiliateId };
@@ -96,4 +97,6 @@ export async function approveAffiliateAccount(
     transaction.set(db.collection('affiliate_audit').doc(audit.id), sanitizeForFirestore(audit), { merge: false });
     return { affiliate, audit };
   });
+  await prepareCommittedAffiliateNotification({ db, kind: 'activation', sourceId: affiliateId });
+  return result;
 }
