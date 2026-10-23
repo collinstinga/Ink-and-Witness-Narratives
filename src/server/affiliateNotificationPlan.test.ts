@@ -43,6 +43,18 @@ function input() {
 }
 
 describe('held partner notification planning', () => {
+  it('uses the verified upgrade destination for tier filters without changing membership', () => {
+    const candidate = input();
+    candidate.source.eventType = 'tier_upgrade';
+    candidate.settings.templates.find(template => template.eventType === 'tier_upgrade')!.eligibility.tierIds = ['literary-ambassador'];
+    expect(planAffiliateNotifications(candidate).intents).toEqual([]);
+    candidate.source.targetTierId = 'literary-ambassador';
+    expect(planAffiliateNotifications(candidate).intents).toHaveLength(1);
+    expect(candidate.affiliates[0].literaryCircle!.tier.id).toBe('literary-partner');
+    candidate.source.eventType = 'new_commission';
+    expect(() => planAffiliateNotifications(candidate)).toThrow('Invalid partner notification planning input.');
+  });
+
   it('creates stable IDs across retries, recipient order and template revisions', () => {
     const first = input();
     const expected = planAffiliateNotifications(first);

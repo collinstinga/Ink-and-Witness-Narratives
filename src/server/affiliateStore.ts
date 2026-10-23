@@ -48,6 +48,7 @@ import {
 } from './affiliateClickLedger.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { prepareCommittedAffiliateNotification } from './affiliateNotificationEvents.js';
+import { buildLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import {
@@ -2061,6 +2062,8 @@ export const affiliateStore = {
         transactionAt
       });
       let monthlyVerifiedSales = 0;
+      let tierHistory: AffiliateSaleCommission[] = [];
+      let tierHistoryComplete = false;
       if (
         !isSelfReferral
         && initialRateResolution.source === 'literary_circle_tier'
@@ -2074,6 +2077,8 @@ export const affiliateStore = {
           ...(document.data() as AffiliateSaleCommission),
           id: document.id
         }));
+        tierHistory = existingCommissions;
+        tierHistoryComplete = existingCommissions.length < 10_000;
         const periodKey = literaryCirclePeriodKey(transactionAt);
         monthlyVerifiedSales = countVerifiedSalesForPeriod(
           existingCommissions,
@@ -2155,6 +2160,12 @@ export const affiliateStore = {
         approvedAt: (!isSelfReferral && autoApprove) ? now : undefined
       };
 
+      const tierTransition = buildLiteraryCircleTierTransition({
+        commission, affiliate: freshAffiliate, settings: transactionLiteraryCircleSettings,
+        history: tierHistory, historyComplete: tierHistoryComplete,
+        monthlyVerifiedSalesAfter: monthlyVerifiedSales, paymentType: tx.type,
+      });
+      if (tierTransition) commission.literaryCircleTierTransition = tierTransition;
       firestoreTransaction.create(commissionRef, commission);
       const affiliateIncrement: Record<string, unknown> = {
         totalSalesCount: FieldValue.increment(1),
@@ -2207,6 +2218,9 @@ export const affiliateStore = {
 
     if (persisted.commission) {
       await prepareCommittedAffiliateNotification({ db, kind: 'new_commission', sourceId: commissionId });
+      if (persisted.commission.literaryCircleTierTransition) {
+        await prepareCommittedAffiliateNotification({ db, kind: 'tier_upgrade', sourceId: commissionId });
+      }
     }
     if (persisted.freshSettings) {
       cachedSettings = persisted.freshSettings;

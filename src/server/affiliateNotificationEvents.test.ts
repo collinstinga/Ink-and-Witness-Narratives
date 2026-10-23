@@ -12,6 +12,9 @@ vi.mock('./db.js', () => ({
   sanitizeForFirestore: (value: unknown) => value,
 }));
 import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS } from './affiliateNotifications.js';
+import { createLiteraryCircleMembership, DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
+import { buildLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
+import type { AffiliateAccount, AffiliateSaleCommission } from '../types.js';
 import { prepareCommittedAffiliateNotification, recoverCommittedAffiliateNotifications } from './affiliateNotificationEvents.js';
 
 const NOW = '2026-10-23T10:00:00.000Z';
@@ -78,6 +81,80 @@ function harness() {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('committed affiliate notification sources', () => {
+  function tierUpgrade(h: ReturnType<typeof harness>) {
+    const idFor = (checkout: string) => `com_tx_${crypto.createHash('sha256').update(checkout).digest('hex').slice(0, 40)}`;
+    const settings = structuredClone(DEFAULT_LITERARY_CIRCLE_SETTINGS);
+    settings.enabled = true;
+    settings.qualificationEffectiveFrom = '2026-01-01T00:00:00.000Z';
+    settings.commissionPolicy = { status: 'active', version: 8, effectiveAt: '2026-01-01T00:00:00.000Z', subscriptionRenewalsEligible: false };
+    settings.tiers.find(tier => tier.id === 'literary-ambassador')!.monthlyVerifiedSalesThreshold = 2;
+    const affiliate = h.documents.get('affiliates/partner-one')!;
+    affiliate.affiliateCode = 'PARTNER';
+    affiliate.literaryCircle = createLiteraryCircleMembership({ now: '2026-10-01T00:00:00.000Z', settings, actor: 'Writer', foundingMember: true, audience: 'existing_upgrade' });
+    h.documents.set('site_configs/affiliate_literary_circle', settings as unknown as Record<string, unknown>);
+    const current = { ...h.documents.get('affiliate_commissions/commission-one')!, id: idFor('checkout-one'),
+      purchaseKind: 'piece', commissionRateSource: 'literary_circle_tier', commissionRate: 20,
+      commissionAmountKes: 100, grossCreatorRevenueKes: 400,
+      literaryCirclePolicyVersion: 8, literaryCircleTierId: 'literary-ambassador' } as unknown as AffiliateSaleCommission;
+    const prior = { ...current, id: idFor('checkout-prior'), checkoutRequestId: 'checkout-prior', transactionId: 'tx-prior',
+      receiptNumber: 'PRIOR-RECEIPT', createdAt: '2026-10-23T08:59:00.000Z',
+      commissionRate: 15, commissionAmountKes: 75, grossCreatorRevenueKes: 425, literaryCircleTierId: 'literary-partner' };
+    const transition = buildLiteraryCircleTierTransition({
+      commission: current, affiliate: { ...affiliate, id: 'partner-one' } as unknown as AffiliateAccount,
+      settings, history: [prior], monthlyVerifiedSalesAfter: 2, historyComplete: true, paymentType: 'PURCHASE',
+    });
+    expect(transition).toBeDefined();
+    current.literaryCircleTierTransition = transition;
+    h.documents.set(`affiliate_commissions/${current.id}`, current as unknown as Record<string, unknown>);
+    h.documents.set(`affiliate_commissions/${prior.id}`, prior as unknown as Record<string, unknown>);
+    h.documents.get('transactions/checkout-one')!.createdAt = current.createdAt;
+    h.documents.set('transactions/checkout-prior', { ...h.documents.get('transactions/checkout-one')!,
+      id: 'tx-prior', checkoutRequestId: 'checkout-prior', mpesaReceiptNumber: 'PRIOR-RECEIPT', createdAt: prior.createdAt });
+    return { request: { db: h.client, kind: 'tier_upgrade' as const, sourceId: current.id, now: NOW }, current, prior };
+  }
+
+  it('prepares one tier alert from committed threshold and backing payment evidence, separate from commission alerts', async () => {
+    const h = harness(); const { request } = tierUpgrade(h);
+    const financial = structuredClone([...h.documents]);
+    expect(await prepareCommittedAffiliateNotification(request, ENV)).toEqual({ status: 'created', intentCount: 1 });
+    expect(await prepareCommittedAffiliateNotification(request, ENV)).toEqual({ status: 'existing', intentCount: 1 });
+    expect(h.writes).toHaveLength(2);
+    expect((await prepareCommittedAffiliateNotification({ ...request, kind: 'new_commission' }, ENV)).status).toBe('created');
+    expect(h.writes).toHaveLength(4);
+    for (const [path, data] of financial) expect(h.documents.get(path)).toEqual(data);
+  });
+
+  it.each(['metadata', 'canonical_id', 'payment_pending', 'prior_tip', 'prior_reversed', 'prior_missing', 'policy_changed', 'current_time', 'prior_time', 'priority_time'] as const)('refuses invalid tier evidence: %s', async change => {
+    const h = harness(); const { request, current, prior } = tierUpgrade(h);
+    if (change === 'metadata') (current.literaryCircleTierTransition!).threshold = 99;
+    if (change === 'canonical_id') current.id = 'different-id';
+    if (change === 'payment_pending') h.documents.get('transactions/checkout-prior')!.status = 'PENDING';
+    if (change === 'prior_tip') h.documents.get('transactions/checkout-prior')!.type = 'TIP';
+    if (change === 'prior_reversed') prior.status = 'REVERSED';
+    if (change === 'prior_missing') h.documents.delete(`affiliate_commissions/${prior.id}`);
+    if (change === 'policy_changed') (h.documents.get('site_configs/affiliate_literary_circle')!.commissionPolicy as { version: number }).version = 9;
+    if (change === 'current_time') h.documents.get('transactions/checkout-one')!.createdAt = '2026-10-22T09:00:00.000Z';
+    if (change === 'prior_time') h.documents.get('transactions/checkout-prior')!.createdAt = '2026-10-22T08:59:00.000Z';
+    if (change === 'priority_time') h.documents.get('transactions/checkout-prior')!.confirmedAt = '2026-10-23T08:58:00.000Z';
+    expect((await prepareCommittedAffiliateNotification(request, ENV)).status).toBe('ineligible');
+    expect(h.writes).toEqual([]);
+  });
+
+  it('rechecks supporting payment evidence in the transaction and suppresses old-period upgrades', async () => {
+    const h = harness(); const { request } = tierUpgrade(h);
+    expect((await prepareCommittedAffiliateNotification({ ...request, now: '2026-11-01T10:00:00.000Z' }, ENV)).status).toBe('ineligible');
+    h.beforeTransaction(() => { h.documents.get('transactions/checkout-prior')!.status = 'FAILED'; });
+    expect((await prepareCommittedAffiliateNotification(request, ENV)).status).toBe('ineligible');
+    expect(h.writes).toEqual([]);
+  });
+
+  it('bounds tier recovery more tightly because supporting payments require extra reads', async () => {
+    const h = harness();
+    await expect(recoverCommittedAffiliateNotifications({ db: h.client, kind: 'tier_upgrade', sourceIds: Array.from({ length: 6 }, (_, i) => `source-${i}`), now: NOW }, ENV))
+      .rejects.toThrow('Invalid partner notification recovery batch.');
+    expect(h.db.getAll).not.toHaveBeenCalled();
+  });
+
   function release(h: ReturnType<typeof harness>) {
     const id = `nlc_${crypto.createHash('sha256').update('release\0piece-one').digest('hex').slice(0, 48)}`;
     h.documents.set(`newsletter_campaigns/${id}`, {

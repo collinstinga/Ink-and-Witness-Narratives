@@ -151,7 +151,7 @@ vi.mock('./db.js', () => ({
 }));
 
 import { affiliateStore } from './affiliateStore.js';
-import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
+import { createLiteraryCircleMembership, DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
 
 const now = '2026-09-08T08:00:00.000Z';
 const affiliate = {
@@ -296,6 +296,62 @@ describe('affiliate commission durability', () => {
     firestoreMock.documents.set(`affiliates/${affiliate.id}`, structuredClone(affiliate));
     firestoreMock.documents.set(`affiliate_campaigns/${campaign.id}`, structuredClone(campaign));
     await affiliateStore.init();
+  });
+
+  async function automaticTierPolicy() {
+    const settings = structuredClone(DEFAULT_LITERARY_CIRCLE_SETTINGS);
+    settings.enabled = true;
+    settings.commissionPolicy = { status: 'active', version: 8, effectiveAt: '2026-01-01T00:00:00.000Z', subscriptionRenewalsEligible: false };
+    settings.tiers.find(tier => tier.id === 'literary-ambassador')!.monthlyVerifiedSalesThreshold = 2;
+    firestoreMock.documents.set('site_configs/affiliate_literary_circle', settings);
+    firestoreMock.documents.set(`affiliates/${affiliate.id}`, {
+      ...structuredClone(affiliate),
+      literaryCircle: createLiteraryCircleMembership({ now, settings, actor: 'Writer', foundingMember: true, audience: 'existing_upgrade' }),
+    });
+    await affiliateStore.init();
+  }
+
+  function tierSale(index: number) {
+    return { ...confirmedAffiliateTransaction(), campaignCode: undefined,
+      checkoutRequestId: `checkout_tier_${index}`, id: `tx_tier_${index}`, mpesaReceiptNumber: `TIER-${index}` };
+  }
+
+  it('atomically snapshots a real automatic threshold crossing exactly once across concurrent sales and retries', async () => {
+    await automaticTierPolicy();
+    const [first, second] = await Promise.all([
+      affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode),
+      affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode),
+    ]);
+    expect(first?.literaryCircleTierTransition).toBeUndefined();
+    expect(second?.literaryCircleTierTransition).toMatchObject({
+      schemaVersion: 1, periodKey: '2026-09', policyVersion: 8,
+      fromTierId: 'literary-partner', toTierId: 'literary-ambassador',
+      verifiedSalesBefore: 1, verifiedSalesAfter: 2, threshold: 2,
+      qualifyingCommissionIds: [first?.id],
+    });
+    expect(await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode)).toEqual(second);
+    const third = await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode);
+    expect(third?.literaryCircleTierTransition).toBeUndefined();
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)).toMatchObject({ totalSalesCount: 3, totalRevenueKes: 1500, totalCommissionEarnedKes: 275, balanceAvailableKes: 275 });
+  });
+
+  it('leaves no transition or financial increments after a failed commit and safely retries', async () => {
+    await automaticTierPolicy();
+    await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
+    const before = structuredClone([...firestoreMock.documents]);
+    firestoreMock.failCommit();
+    await expect(affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode)).rejects.toThrow('injected commission commit failure');
+    expect([...firestoreMock.documents]).toEqual(before);
+    expect((await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode))?.literaryCircleTierTransition?.threshold).toBe(2);
+  });
+
+  it('does not repeat a milestone after a prior sale is reversed and the threshold is crossed again', async () => {
+    await automaticTierPolicy();
+    const first = await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
+    const second = await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode);
+    expect(second?.literaryCircleTierTransition).toBeDefined();
+    firestoreMock.documents.get(`affiliate_commissions/${first!.id}`).status = 'REVERSED';
+    expect((await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode))?.literaryCircleTierTransition).toBeUndefined();
   });
 
   it('creates one deterministic commission and increments affiliate and campaign totals once across concurrent retries', async () => {

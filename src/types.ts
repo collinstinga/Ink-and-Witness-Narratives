@@ -1498,6 +1498,22 @@ export interface AffiliateSession {
   expiresAt: number;
 }
 
+export interface LiteraryCircleTierTransition {
+  schemaVersion: 1;
+  periodKey: string;
+  policyVersion: number;
+  fromTierId: string;
+  toTierId: string;
+  fromRank: number;
+  toRank: number;
+  threshold: number;
+  verifiedSalesBefore: number;
+  verifiedSalesAfter: number;
+  occurredAt: string;
+  /** Prior commissions supporting this crossing; current commission is implicit. */
+  qualifyingCommissionIds: string[];
+}
+
 export interface AffiliateSaleCommission {
   id: string;
   orderId?: string;
@@ -1532,6 +1548,7 @@ export interface AffiliateSaleCommission {
   commissionRateSource?: 'campaign' | 'piece_override' | 'affiliate_override' | 'literary_circle_tier' | 'global_default';
   literaryCircleTierId?: string;
   literaryCirclePolicyVersion?: number;
+  literaryCircleTierTransition?: LiteraryCircleTierTransition;
   createdAt: string;
   approvedAt?: string;
   paidAt?: string;

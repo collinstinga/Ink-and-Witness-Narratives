@@ -2,14 +2,18 @@ import crypto from 'crypto';
 import type { Firestore, DocumentReference } from 'firebase-admin/firestore';
 import type { AffiliateNotificationSource } from './affiliateNotificationPlan.js';
 import { getFirestoreClientTarget } from './db.js';
+import type { AffiliateAccount, AffiliateSaleCommission } from '../types.js';
+import { literaryCirclePeriodKey, normalizeLiteraryCircleSettings, resolveLiteraryCircleSettingsForTransaction } from './literaryCircle.js';
+import { MAX_TIER_TRANSITION_PRIOR_COMMISSIONS, validateStoredLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
 
-type SourceKind = 'activation' | 'new_commission' | 'new_release';
+type SourceKind = 'activation' | 'new_commission' | 'new_release' | 'tier_upgrade';
 type PreparationStatus = 'disabled' | 'blocked' | 'ineligible' | 'created' | 'existing' | 'failed';
 interface PreparationResult { status: PreparationStatus; intentCount: number }
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const SAFE_PROJECT = /^[a-z][a-z0-9-]{4,29}[a-z0-9]$/;
 const KNOWN_PRODUCTION = ['ink-and-witness-narratives', 'divine-experience-pq6d2'];
 export const MAX_AFFILIATE_NOTIFICATION_RECOVERY_IDS = 25;
+export const MAX_TIER_NOTIFICATION_RECOVERY_IDS = 5;
 
 function gate(db: Firestore, env: NodeJS.ProcessEnv): 'held' | 'disabled' | 'blocked' {
   const mode = (env.AFFILIATE_NOTIFICATION_EVENT_MODE || 'off').trim().toLowerCase();
@@ -50,6 +54,26 @@ function positive(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1_000_000;
 }
 
+function matchesConfirmedPurchase(commission: Record<string, unknown>, payment: Record<string, unknown>): boolean {
+  const receipt = payment.mpesaReceiptNumber || payment.bankReference || `CHECKOUT-${payment.checkoutRequestId || payment.id}`;
+  return typeof payment.status === 'string' && ['CONFIRMED', 'SUCCESS', 'PAID'].includes(payment.status) && payment.type === 'PURCHASE'
+    && typeof payment.paymentMethod === 'string' && ['mpesa', 'bank'].includes(payment.paymentMethod)
+    && payment.checkoutRequestId === commission.checkoutRequestId
+    && typeof payment.id === 'string' && payment.id === commission.transactionId
+    && payment.articleId === commission.articleId && payment.amount === commission.saleAmountKes
+    && typeof commission.affiliateCode === 'string' && Boolean(commission.affiliateCode.trim())
+    && typeof payment.affiliateCode === 'string'
+    && payment.affiliateCode.trim().toUpperCase() === commission.affiliateCode.trim().toUpperCase()
+    && typeof receipt === 'string' && Boolean(receipt.trim()) && receipt.length <= 256
+    && receipt === commission.receiptNumber;
+}
+
+function matchesSettlementTime(commission: Record<string, unknown>, payment: Record<string, unknown>): boolean {
+  const selected = [payment.confirmedAt, payment.settledAt, payment.completedAt, payment.createdAt]
+    .find(value => typeof value === 'string' && Number.isFinite(Date.parse(value)));
+  return typeof selected === 'string' && selected === commission.createdAt;
+}
+
 /** Internal post-commit adapter. Defaults off and can prepare held records only in staging. */
 export async function prepareCommittedAffiliateNotification(input: {
   db: Firestore;
@@ -70,7 +94,7 @@ export async function prepareCommittedAffiliateNotification(input: {
     const suppliedNow = input.now;
     const mode = gate(db, env);
     if (mode !== 'held') return result(mode);
-    if (!['activation', 'new_commission', 'new_release'].includes(kind)
+    if (!['activation', 'new_commission', 'new_release', 'tier_upgrade'].includes(kind)
       || typeof sourceId !== 'string' || !SAFE_ID.test(sourceId)) return result('ineligible');
     if (input.affiliateIds !== undefined && !Array.isArray(input.affiliateIds)) return result('ineligible');
     const audience = input.affiliateIds === undefined ? undefined : [...input.affiliateIds];
@@ -124,20 +148,51 @@ export async function prepareCommittedAffiliateNotification(input: {
       const [paymentSnapshot] = await db.getAll(paymentRef);
       if (!paymentSnapshot?.exists) return result('ineligible');
       const payment = paymentSnapshot.data()!;
-      const receipt = payment.mpesaReceiptNumber || payment.bankReference || `CHECKOUT-${payment.checkoutRequestId || payment.id}`;
-      if (!['CONFIRMED', 'SUCCESS', 'PAID'].includes(payment.status) || payment.type !== 'PURCHASE'
-        || !['mpesa', 'bank'].includes(payment.paymentMethod)
-        || payment.checkoutRequestId !== primary.checkoutRequestId
-        || typeof payment.id !== 'string' || payment.id !== primary.transactionId
-        || payment.articleId !== primary.articleId || payment.amount !== primary.saleAmountKes
-        || typeof primary.affiliateCode !== 'string' || !primary.affiliateCode.trim()
-        || typeof payment.affiliateCode !== 'string'
-        || payment.affiliateCode.trim().toUpperCase() !== primary.affiliateCode.trim().toUpperCase()
-        || typeof receipt !== 'string' || !receipt.trim() || receipt.length > 256
-        || receipt !== primary.receiptNumber) return result('ineligible');
+      if (!matchesConfirmedPurchase(primary, payment)) return result('ineligible');
       refs.push(paymentRef);
       expected.push(fingerprint(payment));
-      source = { eventType: 'new_commission', sourceId: primaryRef.id, sourceVersion: 1, occurredAt, targetAffiliateId: primary.affiliateId };
+      if (kind === 'tier_upgrade') {
+        if (!matchesSettlementTime(primary, payment)) return result('ineligible');
+        const priorIds: unknown = primary.literaryCircleTierTransition?.qualifyingCommissionIds;
+        if (!Array.isArray(priorIds) || priorIds.length > MAX_TIER_TRANSITION_PRIOR_COMMISSIONS
+          || Array.from(priorIds).some(id => typeof id !== 'string' || !SAFE_ID.test(id) || id === primaryRef.id)
+          || new Set(priorIds).size !== priorIds.length
+          || primary.id !== primaryRef.id
+          || literaryCirclePeriodKey(occurredAt) !== literaryCirclePeriodKey(now)) return result('ineligible');
+        const settingsRef = db.collection('site_configs').doc('affiliate_literary_circle');
+        const affiliateRef = db.collection('affiliates').doc(primary.affiliateId);
+        const priorRefs = priorIds.map(id => db.collection('affiliate_commissions').doc(id));
+        const snapshots = await db.getAll(settingsRef, affiliateRef, ...priorRefs);
+        const byPath = new Map(snapshots.map(snapshot => [snapshot.ref.path, snapshot]));
+        if ([settingsRef, affiliateRef, ...priorRefs].some(ref => !byPath.get(ref.path)?.exists)
+          || priorRefs.some(ref => byPath.get(ref.path)!.data()?.id !== ref.id)) return result('ineligible');
+        const settings = resolveLiteraryCircleSettingsForTransaction(normalizeLiteraryCircleSettings(byPath.get(settingsRef.path)!.data()), occurredAt);
+        const affiliate = { ...byPath.get(affiliateRef.path)!.data(), id: affiliateRef.id } as AffiliateAccount;
+        const history = priorRefs.map(ref => ({ ...byPath.get(ref.path)!.data(), id: ref.id } as AffiliateSaleCommission));
+        if (!validateStoredLiteraryCircleTierTransition({
+          commission: { ...primary, id: primaryRef.id } as AffiliateSaleCommission,
+          affiliate, settings, history, paymentType: 'PURCHASE',
+        })) return result('ineligible');
+        const priorPaymentRefs = history.map(commission => db.collection('transactions').doc(commission.checkoutRequestId!));
+        if (priorPaymentRefs.length) {
+          const priorPayments = await db.getAll(...priorPaymentRefs);
+          const paymentsByPath = new Map(priorPayments.map(snapshot => [snapshot.ref.path, snapshot]));
+          if (history.some((commission, index) => {
+            const snapshot = paymentsByPath.get(priorPaymentRefs[index].path);
+            return !snapshot?.exists || !matchesConfirmedPurchase(commission as unknown as Record<string, unknown>, snapshot.data()!)
+              || !matchesSettlementTime(commission as unknown as Record<string, unknown>, snapshot.data()!);
+          })) return result('ineligible');
+          for (const ref of priorPaymentRefs) {
+            refs.push(ref); expected.push(fingerprint(paymentsByPath.get(ref.path)!.data()));
+          }
+        }
+        for (const ref of [settingsRef, affiliateRef, ...priorRefs]) {
+          refs.push(ref); expected.push(fingerprint(byPath.get(ref.path)!.data()));
+        }
+      }
+      source = { eventType: kind === 'tier_upgrade' ? 'tier_upgrade' : 'new_commission', sourceId: primaryRef.id, sourceVersion: 1, occurredAt, targetAffiliateId: primary.affiliateId,
+        ...(kind === 'tier_upgrade' ? { targetTierId: primary.literaryCircleTierTransition.toTierId } : {}),
+      };
     }
     const { storeHeldAffiliateNotifications } = await import('./affiliateNotificationOutbox.js');
     return await storeHeldAffiliateNotifications({
@@ -169,6 +224,7 @@ export async function recoverCommittedAffiliateNotifications(input: {
   const mode = gate(db, env);
   if (mode !== 'held') return { attempted: 0, counts: { [mode]: 1 } };
   if (!Array.isArray(input.sourceIds) || input.sourceIds.length > MAX_AFFILIATE_NOTIFICATION_RECOVERY_IDS
+    || (kind === 'tier_upgrade' && input.sourceIds.length > MAX_TIER_NOTIFICATION_RECOVERY_IDS)
     || input.sourceIds.some(id => typeof id !== 'string' || !SAFE_ID.test(id))
     || new Set(input.sourceIds).size !== input.sourceIds.length) {
     throw new Error('Invalid partner notification recovery batch.');

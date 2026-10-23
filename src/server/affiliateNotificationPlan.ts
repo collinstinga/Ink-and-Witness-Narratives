@@ -10,6 +10,7 @@ import {
 const DIRECT_EVENTS = ['activation', 'new_release', 'new_commission', 'tier_upgrade'] as const;
 type DirectEvent = typeof DIRECT_EVENTS[number];
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
+const SAFE_TIER_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 export const MAX_AFFILIATE_NOTIFICATION_PLAN_RECIPIENTS = 200;
 
 export interface AffiliateNotificationSource {
@@ -18,6 +19,8 @@ export interface AffiliateNotificationSource {
   sourceVersion: number;
   occurredAt: string;
   targetAffiliateId?: string;
+  /** Verified destination from a committed tier transition, not a profile edit. */
+  targetTierId?: string;
 }
 
 export interface HeldAffiliateNotificationIntent {
@@ -68,10 +71,12 @@ export function planAffiliateNotifications(input: {
 }): AffiliateNotificationPlan {
   const source = input.source;
   if (!source || typeof source !== 'object' || Array.isArray(source)
-    || Object.keys(source).some(key => !['eventType', 'sourceId', 'sourceVersion', 'occurredAt', 'targetAffiliateId'].includes(key))
+    || Object.keys(source).some(key => !['eventType', 'sourceId', 'sourceVersion', 'occurredAt', 'targetAffiliateId', 'targetTierId'].includes(key))
     || !DIRECT_EVENTS.includes(source.eventType)
     || typeof source.sourceId !== 'string' || !SAFE_ID.test(source.sourceId)
     || !Number.isSafeInteger(source.sourceVersion) || source.sourceVersion < 1) invalid();
+  if (source.targetTierId !== undefined && (source.eventType !== 'tier_upgrade'
+    || typeof source.targetTierId !== 'string' || !SAFE_TIER_ID.test(source.targetTierId))) invalid();
   const occurredMs = isoMilliseconds(source.occurredAt);
   const nowMs = isoMilliseconds(input.now);
   if (occurredMs > nowMs) invalid();
@@ -101,7 +106,11 @@ export function planAffiliateNotifications(input: {
   for (const affiliate of input.affiliates) {
     if (targeted && affiliate.id !== source.targetAffiliateId) { exclude('not_event_recipient'); continue; }
     if (!settings.enabled || !template.enabled) { exclude('notifications_disabled'); continue; }
-    const eligibility = summarizeAffiliateNotificationEligibility([affiliate], template);
+    const eligibilityAffiliate = source.eventType === 'tier_upgrade' && source.targetTierId && affiliate.literaryCircle
+      ? { ...affiliate, literaryCircle: { ...affiliate.literaryCircle,
+        tier: { ...affiliate.literaryCircle.tier, id: source.targetTierId } } }
+      : affiliate;
+    const eligibility = summarizeAffiliateNotificationEligibility([eligibilityAffiliate], template);
     if (!eligibility.eligible) {
       exclude(Object.keys(eligibility.reasons)[0] || 'ineligible');
       continue;
