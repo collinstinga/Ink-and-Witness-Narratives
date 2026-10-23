@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { getMpesaRequestLockId, store, type MpesaCallbackIntent } from './store.js';
 import { MpesaConfig, PaymentTransaction } from '../types.js';
+import { assertMpesaNetworkEnabled, mpesaNetworkBlockReason } from './mpesaNetworkPolicy.js';
 import {
   attachCallbackCapability,
   generatePaymentAttemptId,
@@ -200,6 +201,8 @@ export function isDefinitiveDarajaStkRejection(status: number, payload: unknown)
  * Secure server-side basic authentication with token caching
  */
 export async function getDarajaAccessToken(): Promise<{ token: string | null; error?: string }> {
+  const networkBlockReason = mpesaNetworkBlockReason();
+  if (networkBlockReason) return { token: null, error: networkBlockReason };
   const mpesaSettings = store.getMpesaSettings();
   const consumerKey = (process.env.MPESA_CONSUMER_KEY || process.env.MPESA_TILL_CONSUMER_KEY || mpesaSettings.consumerKey || '').trim();
   const consumerSecret = (process.env.MPESA_CONSUMER_SECRET || process.env.MPESA_TILL_SECRET_KEY || mpesaSettings.consumerSecret || '').trim();
@@ -237,6 +240,7 @@ export async function getDarajaAccessToken(): Promise<{ token: string | null; er
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        assertMpesaNetworkEnabled();
         const res = await fetch(`${DARAJA_PRODUCTION_URL}/oauth/v1/generate?grant_type=client_credentials`, {
           method: 'GET',
           headers: {
@@ -342,6 +346,8 @@ export interface StkPushResult {
  * Directly calls Safaricom Daraja production endpoint
  */
 export async function initiateStkPush(params: InitiateStkPushParams): Promise<StkPushResult> {
+  const networkBlockReason = mpesaNetworkBlockReason();
+  if (networkBlockReason) return { success: false, error: networkBlockReason };
   const {
     phoneNumber,
     amount,
@@ -533,6 +539,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
   console.log(`[STK REQUEST SENT] Phone: ${masked}, Amount: KES ${cleanAmount}, ShortCode: ${businessShortCode}, PartyB: ${partyB}, AccountRef: ${accountReference}`);
 
   try {
+    assertMpesaNetworkEnabled();
     const stkRes = await fetch(`${DARAJA_PRODUCTION_URL}/mpesa/stkpush/v1/processrequest`, {
       method: 'POST',
       headers: {
@@ -554,6 +561,7 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
       await new Promise(r => setTimeout(r, 2000));
       const freshTokenResult = await getDarajaAccessToken();
       if (freshTokenResult.token) {
+        assertMpesaNetworkEnabled();
         const retryRes = await fetch(`${DARAJA_PRODUCTION_URL}/mpesa/stkpush/v1/processrequest`, {
           method: 'POST',
           headers: {
@@ -977,6 +985,9 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
     };
   }
 
+  const networkBlockReason = mpesaNetworkBlockReason();
+  if (networkBlockReason) return { status: 'PENDING', resultDesc: networkBlockReason };
+
   const recordQueryTerminalResult = async (
     status: 'FAILED' | 'CANCELLED' | 'TIMEOUT',
     resultCode: number,
@@ -1065,6 +1076,7 @@ export async function queryPaymentStatus(checkoutRequestId: string): Promise<{
       CheckoutRequestID: checkoutRequestId
     };
 
+    assertMpesaNetworkEnabled();
     const queryRes = await fetch(`${DARAJA_PRODUCTION_URL}/mpesa/stkpushquery/v1/query`, {
       method: 'POST',
       headers: {
