@@ -3,7 +3,7 @@ import type { Firestore, DocumentReference } from 'firebase-admin/firestore';
 import type { AffiliateNotificationSource } from './affiliateNotificationPlan.js';
 import { getFirestoreClientTarget } from './db.js';
 
-type SourceKind = 'activation' | 'new_commission';
+type SourceKind = 'activation' | 'new_commission' | 'new_release';
 type PreparationStatus = 'disabled' | 'blocked' | 'ineligible' | 'created' | 'existing' | 'failed';
 interface PreparationResult { status: PreparationStatus; intentCount: number }
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -55,6 +55,11 @@ export async function prepareCommittedAffiliateNotification(input: {
   db: Firestore;
   kind: SourceKind;
   sourceId: string;
+  /** Explicit frozen audience for a release; never a client-supplied list.
+   * One campaign supports at most 200 selected affiliates. Do not split it
+   * into separate calls: an audience change intentionally conflicts.
+   */
+  affiliateIds?: string[];
   now?: string;
 }, env: NodeJS.ProcessEnv = process.env): Promise<PreparationResult> {
   const result = (status: PreparationStatus): PreparationResult => ({ status, intentCount: 0 });
@@ -65,12 +70,18 @@ export async function prepareCommittedAffiliateNotification(input: {
     const suppliedNow = input.now;
     const mode = gate(db, env);
     if (mode !== 'held') return result(mode);
-    if (!['activation', 'new_commission'].includes(kind)
+    if (!['activation', 'new_commission', 'new_release'].includes(kind)
       || typeof sourceId !== 'string' || !SAFE_ID.test(sourceId)) return result('ineligible');
+    if (input.affiliateIds !== undefined && !Array.isArray(input.affiliateIds)) return result('ineligible');
+    const audience = input.affiliateIds === undefined ? undefined : [...input.affiliateIds];
+    if (kind === 'new_release' ? !audience || audience.length < 1 || audience.length > 200
+      || audience.some(id => typeof id !== 'string' || !SAFE_ID.test(id)) || new Set(audience).size !== audience.length
+      : audience !== undefined) return result('ineligible');
     const now = suppliedNow || new Date().toISOString();
     const nowMs = Date.parse(now);
     if (!Number.isFinite(nowMs) || new Date(nowMs).toISOString() !== now) return result('ineligible');
-    const primaryRef = db.collection(kind === 'activation' ? 'affiliates' : 'affiliate_commissions').doc(sourceId);
+    const primaryRef = db.collection(kind === 'activation' ? 'affiliates'
+      : kind === 'new_release' ? 'newsletter_campaigns' : 'affiliate_commissions').doc(sourceId);
     const [primarySnapshot] = await db.getAll(primaryRef);
     if (!primarySnapshot?.exists) return result('ineligible');
     const primary = primarySnapshot.data()!;
@@ -82,6 +93,24 @@ export async function prepareCommittedAffiliateNotification(input: {
       if (primary.status !== 'active' || !approvedAt || typeof primary.approvedBy !== 'string'
         || !primary.approvedBy.trim()) return result('ineligible');
       source = { eventType: 'activation', sourceId: primaryRef.id, sourceVersion: Date.parse(approvedAt), occurredAt: approvedAt, targetAffiliateId: primaryRef.id };
+    } else if (kind === 'new_release') {
+      const occurredAt = canonicalTime(primary.queuedAt, nowMs);
+      const createdAt = canonicalTime(primary.createdAt, nowMs);
+      const pieceId = primary.content?.pieceId;
+      if (primary.kind !== 'release' || !['queued', 'sending', 'sent', 'partially_sent'].includes(primary.status)
+        || !occurredAt || !createdAt || primary.queuedAt !== occurredAt || primary.createdAt !== createdAt
+        || createdAt > occurredAt
+        || typeof pieceId !== 'string' || !SAFE_ID.test(pieceId)
+        || typeof primary.createdBy !== 'string' || !primary.createdBy.trim()
+        || primaryRef.id !== `nlc_${crypto.createHash('sha256').update(`release\0${pieceId}`).digest('hex').slice(0, 48)}`) {
+        return result('ineligible');
+      }
+      const articleRef = db.collection('articles').doc(pieceId);
+      const [articleSnapshot] = await db.getAll(articleRef);
+      if (!articleSnapshot?.exists || articleSnapshot.data()?.status !== 'published') return result('ineligible');
+      refs.push(articleRef);
+      expected.push(fingerprint(articleSnapshot.data()));
+      source = { eventType: 'new_release', sourceId: primaryRef.id, sourceVersion: 1, occurredAt };
     } else {
       const occurredAt = canonicalTime(primary.createdAt, nowMs);
       if (!['PENDING', 'APPROVED', 'PAID'].includes(primary.status)
@@ -112,7 +141,7 @@ export async function prepareCommittedAffiliateNotification(input: {
     }
     const { storeHeldAffiliateNotifications } = await import('./affiliateNotificationOutbox.js');
     return await storeHeldAffiliateNotifications({
-      db, mode: 'held', source, affiliateIds: [source.targetAffiliateId!], now,
+      db, mode: 'held', source, affiliateIds: audience || [source.targetAffiliateId!], now,
       verifySource: async transaction => {
         const snapshots = await transaction.getAll(...refs);
         const byPath = new Map(snapshots.map(snapshot => [snapshot.ref.path, snapshot]));
@@ -132,7 +161,7 @@ export async function prepareCommittedAffiliateNotification(input: {
 
 /** Explicit bounded recovery: no collection scan, cursor, cron, or email dispatch. */
 export async function recoverCommittedAffiliateNotifications(input: {
-  db: Firestore; kind: SourceKind; sourceIds: string[]; now?: string;
+  db: Firestore; kind: Exclude<SourceKind, 'new_release'>; sourceIds: string[]; now?: string;
 }, env: NodeJS.ProcessEnv = process.env): Promise<{ attempted: number; counts: Partial<Record<PreparationStatus, number>> }> {
   const db = input.db;
   const kind = input.kind;

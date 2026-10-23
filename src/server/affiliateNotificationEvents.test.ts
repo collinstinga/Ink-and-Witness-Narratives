@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Firestore } from 'firebase-admin/firestore';
+import crypto from 'crypto';
+import { AFFILIATE_MARKETING_DISCLOSURE_VERSION, DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES } from './affiliateNotificationPreferences.js';
 
 vi.mock('./db.js', () => ({
   getFirestoreClientTarget: (client: { projectId?: string; databaseId?: string }) => ({
@@ -76,6 +78,82 @@ function harness() {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('committed affiliate notification sources', () => {
+  function release(h: ReturnType<typeof harness>) {
+    const id = `nlc_${crypto.createHash('sha256').update('release\0piece-one').digest('hex').slice(0, 48)}`;
+    h.documents.set(`newsletter_campaigns/${id}`, {
+      kind: 'release', status: 'queued', createdBy: 'Writer',
+      createdAt: '2026-10-23T08:00:00.000Z', queuedAt: '2026-10-23T09:00:00.000Z',
+      content: { pieceId: 'piece-one' },
+    });
+    h.documents.set('articles/piece-one', { status: 'published', publishedAt: '2026-09-01' });
+    h.documents.get('affiliates/partner-one')!.notificationPreferences = {
+      ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+      marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+      marketingConsentAt: '2026-10-23T08:30:00.000Z', allMarketingOptOut: false, releaseUpdates: true,
+    };
+    return { db: h.client, kind: 'new_release' as const, sourceId: id, affiliateIds: ['partner-one'], now: NOW };
+  }
+
+  it('prepares a committed release once using queue time, not the article display date', async () => {
+    const h = harness();
+    const input = release(h);
+    expect(await prepareCommittedAffiliateNotification(input, ENV)).toEqual({ status: 'created', intentCount: 1 });
+    h.documents.get(`newsletter_campaigns/${input.sourceId}`)!.status = 'sent';
+    h.documents.get('articles/piece-one')!.publishedAt = '2026-10-23T09:30:00.000Z';
+    expect(await prepareCommittedAffiliateNotification(input, ENV)).toEqual({ status: 'existing', intentCount: 1 });
+    expect(h.writes).toHaveLength(2);
+    const source = [...h.documents.values()].find(record => record.kind === 'source');
+    expect(source?.source).toMatchObject({ occurredAt: '2026-10-23T09:00:00.000Z', sourceVersion: 1 });
+  });
+
+  it.each(['draft', 'cancelled', 'failed'])('rejects release campaign status %s', async status => {
+    const h = harness(); const input = release(h);
+    h.documents.get(`newsletter_campaigns/${input.sourceId}`)!.status = status;
+    expect((await prepareCommittedAffiliateNotification(input, ENV)).status).toBe('ineligible');
+    expect(h.writes).toEqual([]);
+  });
+
+  it('rejects missing, future or backwards campaign chronology', async () => {
+    for (const queuedAt of [undefined, 'tomorrow', '2026-10-23', '2026-10-24T00:00:00.000Z', '2026-10-23T07:00:00.000Z']) {
+      const h = harness(); const input = release(h);
+      h.documents.get(`newsletter_campaigns/${input.sourceId}`)!.queuedAt = queuedAt;
+      expect((await prepareCommittedAffiliateNotification(input, ENV)).status).toBe('ineligible');
+      expect(h.writes).toEqual([]);
+    }
+  });
+
+  it('rejects unpublished pieces and races with unpublishing', async () => {
+    const h = harness(); const input = release(h);
+    h.documents.get('articles/piece-one')!.status = 'draft';
+    expect((await prepareCommittedAffiliateNotification(input, ENV)).status).toBe('ineligible');
+    h.documents.get('articles/piece-one')!.status = 'published';
+    h.beforeTransaction(() => { h.documents.get('articles/piece-one')!.status = 'draft'; });
+    expect((await prepareCommittedAffiliateNotification(input, ENV)).status).toBe('ineligible');
+    expect(h.writes).toEqual([]);
+  });
+
+  it.each([
+    { kind: 'announcement' }, { createdBy: '' }, { content: { pieceId: 'different-piece' } },
+    { createdAt: '2026-10-23' },
+  ])('rejects tampered release identity or approval evidence: %j', patch => {
+    const h = harness(); const input = release(h);
+    Object.assign(h.documents.get(`newsletter_campaigns/${input.sourceId}`)!, patch);
+    return prepareCommittedAffiliateNotification(input, ENV).then(result => {
+      expect(result.status).toBe('ineligible'); expect(h.writes).toEqual([]);
+    });
+  });
+
+  it('requires a bounded explicit audience and preserves it across retries', async () => {
+    const h = harness(); const input = release(h);
+    for (const affiliateIds of [undefined, [], ['partner-one', 'partner-one'], Array.from({ length: 201 }, (_, i) => `p${i}`)]) {
+      expect((await prepareCommittedAffiliateNotification({ ...input, affiliateIds }, ENV)).status).toBe('ineligible');
+    }
+    expect(h.db.getAll).not.toHaveBeenCalled();
+    expect((await prepareCommittedAffiliateNotification(input, ENV)).status).toBe('created');
+    expect((await prepareCommittedAffiliateNotification({ ...input, affiliateIds: ['partner-two'] }, ENV)).status).toBe('failed');
+    expect(h.writes).toHaveLength(2);
+  });
+
   it('defaults off without database reads or transactions', async () => {
     const h = harness();
     expect(await prepareCommittedAffiliateNotification({ db: h.client, kind: 'activation', sourceId: 'partner-one' }, {}))
