@@ -1,5 +1,7 @@
 # Literary Circle: protected staging verified, production release still gated
 
+Latest continuation: [fresh affiliate sign-in and registration verification](2026-10-24-affiliate-auth-and-registration.md). It supersedes the functional deployment below and records the deliberate addition of one suspended staging test affiliate. The exact-nine preservation/migration evidence in this older checkpoint remains historical; do not blindly rerun its count assertions against the changed staging database.
+
 Date: 24 October 2026 (Africa/Nairobi).
 Current phase: **staging verification / production release preparation**, not a completed production rollout or final security assessment.
 
