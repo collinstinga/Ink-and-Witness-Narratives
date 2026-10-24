@@ -52,6 +52,7 @@ import {
   type DurableAffiliateClickEventV2,
 } from './affiliateClickLedger.js';
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
+import { AffiliateLoginIdentityUnavailableError, readAffiliateLoginIdentity } from './affiliateLoginIdentity.js';
 import { prepareCommittedAffiliateNotification } from './affiliateNotificationEvents.js';
 import { buildLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
 import {
@@ -1259,6 +1260,25 @@ export const affiliateStore = {
     return cachedAffiliates.find(a => a.email.toLowerCase() === clean);
   },
 
+  async getAffiliateForLoginFresh(login: unknown): Promise<AffiliateAccount | undefined> {
+    try {
+      const value = typeof login === 'string' ? login.trim() : '';
+      const field = value.includes('@') ? 'email' : 'affiliateCode';
+      const normalized = field === 'email' ? value.toLowerCase() : value.toUpperCase();
+      const legacyCandidates = normalized ? cachedAffiliates.filter(account => {
+        const identity = account[field];
+        return typeof identity === 'string'
+          && (field === 'email' ? identity.trim().toLowerCase() : identity.trim().toUpperCase()) === normalized;
+      }) : [];
+      if (legacyCandidates.length > 1) throw new AffiliateLoginIdentityUnavailableError();
+      // Return the transaction's credential, not a cache projection selected by
+      // wallet revision. Financial recency cannot authorize a stale password.
+      return await readAffiliateLoginIdentity(getDb(), login, legacyCandidates[0]?.id);
+    } catch {
+      throw new AffiliateLoginIdentityUnavailableError();
+    }
+  },
+
   async getAffiliateByIdFresh(id: string): Promise<AffiliateAccount | undefined> {
     if (!id) return undefined;
     const fresh = await getFirestoreDoc<AffiliateAccount>('affiliates', id);
@@ -1713,7 +1733,70 @@ export const affiliateStore = {
     return published;
   },
 
-  async updateAffiliateCredential(id: string, passwordHash: string, actor = 'System'): Promise<AffiliateAccount> {
+  async updateAffiliateCredential(
+    id: string,
+    passwordHash: string,
+    actor = 'System',
+    expectedVerifiedCredential?: { passwordHash: string; sessionVersion?: string },
+  ): Promise<AffiliateAccount> {
+    if (expectedVerifiedCredential !== undefined) {
+      // Login-time migration is a compare-and-swap, not a password reset.
+      // Never overwrite a credential or reactivation decision made after the
+      // password was verified, including on another warm server instance.
+      const changed = () => Object.assign(new Error('Your account changed while signing in. Please sign in again with the current password.'), {
+        statusCode: 401, code: 'CREDENTIALS_CHANGED',
+      });
+      if (!walletIdentifier(id) || !expectedVerifiedCredential
+        || typeof expectedVerifiedCredential.passwordHash !== 'string' || !expectedVerifiedCredential.passwordHash
+        || (expectedVerifiedCredential.sessionVersion !== undefined && typeof expectedVerifiedCredential.sessionVersion !== 'string')) {
+        throw changed();
+      }
+      if (!isCurrentAffiliatePasswordHash(passwordHash)) {
+        throw new Error('A current Argon2id affiliate credential is required.');
+      }
+      const verifiedPasswordHash = expectedVerifiedCredential.passwordHash;
+      const verifiedSessionVersion = expectedVerifiedCredential.sessionVersion;
+      const cacheSessionAtStart = cachedAffiliates.find(affiliate => affiliate.id === id)?.sessionVersion;
+      const updatedAt = new Date().toISOString();
+      const sessionVersion = createAffiliateSessionVersion();
+      let committed: { affiliate: AffiliateAccount; audit: AffiliateAuditLogEntry };
+      try {
+        const db = getDb();
+        const reference = db.collection('affiliates').doc(id);
+        committed = await db.runTransaction(async transaction => {
+          const snapshot = await transaction.get(reference);
+          if (!snapshot.exists) throw changed();
+          const previous = readAffiliateProfileRecord(snapshot.data(), id);
+          if (previous.status !== 'active'
+            || previous.passwordHash !== verifiedPasswordHash
+            || previous.sessionVersion !== verifiedSessionVersion) {
+            throw changed();
+          }
+          const affiliate: AffiliateAccount = { ...previous, passwordHash, sessionVersion, updatedAt };
+          const audit: AffiliateAuditLogEntry = {
+            id: `aud_credential_${crypto.randomBytes(16).toString('hex')}`,
+            timestamp: updatedAt, actor, action: 'affiliate_credential_updated', targetType: 'affiliate', targetId: id,
+            summary: 'Migrated a freshly verified affiliate credential and rotated its sessions.',
+            previousValue: { status: previous.status },
+            newValue: { status: affiliate.status, credentialFormat: 'argon2id', sessionsRotated: true },
+          };
+          // Preserve wallet, identity, approval, membership and profile fields.
+          // The audit has no credential hashes, salts, or session generations.
+          transaction.set(reference, { passwordHash, sessionVersion, updatedAt }, { merge: true });
+          transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
+          return { affiliate, audit };
+        });
+      } catch (error) {
+        if (error instanceof Error && (error as Error & { code?: string }).code === 'CREDENTIALS_CHANGED') throw error;
+        throw Object.assign(new Error('Affiliate credential migration could not be committed. Please retry signing in.'), { statusCode: 503 });
+      }
+      publishAffiliateProfileCommit(committed.affiliate, cacheSessionAtStart);
+      forgetCachedAffiliateSessionsForAffiliate(id);
+      this.rememberCommittedAudit(committed.audit);
+      // A newer cached wallet/profile is not proof of the verified credential.
+      // Session creation must compare this exact committed generation again.
+      return committed.affiliate;
+    }
     if (!cachedAffiliates.some(affiliate => affiliate.id === id)) {
       throw new Error('Affiliate not found.');
     }

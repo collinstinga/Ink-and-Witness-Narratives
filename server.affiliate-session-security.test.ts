@@ -3,6 +3,7 @@ import { AddressInfo } from 'net';
 import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AffiliateFinancialReadError } from './src/server/affiliateFinancialRead.js';
+import { verifyAffiliatePassword } from './src/server/affiliateCredentials.js';
 
 vi.hoisted(() => {
   process.env.VERCEL = '1';
@@ -125,6 +126,7 @@ const affiliateMocks = vi.hoisted(() => ({
   invalidateAffiliateSession: vi.fn(),
   getAffiliateByEmail: vi.fn(),
   getAffiliateByCode: vi.fn(),
+  getAffiliateForLoginFresh: vi.fn(),
   getAffiliateById: vi.fn(),
   getAffiliateByIdFresh: vi.fn(),
   getCommissions: vi.fn(),
@@ -333,6 +335,7 @@ describe('affiliate session route boundaries', () => {
     affiliateMocks.invalidateAffiliateSession.mockResolvedValue(undefined);
     affiliateMocks.getAffiliateByEmail.mockReturnValue({ ...privateAffiliate });
     affiliateMocks.getAffiliateByCode.mockReturnValue(undefined);
+    affiliateMocks.getAffiliateForLoginFresh.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.getAffiliateById.mockReturnValue({ ...privateAffiliate });
     affiliateMocks.getAffiliateByIdFresh.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.getCommissions.mockReturnValue([]);
@@ -605,6 +608,61 @@ describe('affiliate session route boundaries', () => {
 
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ success: false, code: 'SESSION_UNAVAILABLE' });
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('signs in a shared account absent from the warm instance directory', async () => {
+    affiliateMocks.getAffiliateByEmail.mockReturnValue(undefined);
+    affiliateMocks.getAffiliateByCode.mockReturnValue(undefined);
+    const response = await fetch(`${baseUrl}/api/affiliate/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ login: privateAffiliate.email, password: 'CorrectPassword123!' })
+    });
+    expect(response.status).toBe(200);
+    expect(affiliateMocks.getAffiliateForLoginFresh).toHaveBeenCalledWith(privateAffiliate.email);
+    expect(affiliateMocks.getAffiliateByEmail).not.toHaveBeenCalled();
+    expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
+  });
+
+  it('does not create a session from a cached identity when the shared lookup fails', async () => {
+    affiliateMocks.getAffiliateForLoginFresh.mockRejectedValueOnce(Object.assign(
+      new Error('Affiliate sign-in is temporarily unavailable. Please retry.'), { statusCode: 503 }
+    ));
+    const response = await fetch(`${baseUrl}/api/affiliate/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ login: privateAffiliate.email, password: 'CorrectPassword123!' })
+    });
+    expect(response.status).toBe(503);
+    expect(affiliateMocks.createAffiliateSession).not.toHaveBeenCalled();
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('binds a legacy password upgrade to the exact freshly verified credential', async () => {
+    vi.mocked(verifyAffiliatePassword).mockResolvedValueOnce({ valid: true, needsRehash: true });
+    affiliateMocks.updateAffiliate.mockResolvedValueOnce({
+      ...privateAffiliate, passwordHash: '$argon2id$new-hash', sessionVersion: 'f'.repeat(64)
+    });
+    const response = await fetch(`${baseUrl}/api/affiliate/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ login: privateAffiliate.email, password: 'CorrectPassword123!' })
+    });
+    expect(response.status).toBe(200);
+    expect(affiliateMocks.updateAffiliateCredential).toHaveBeenCalledWith(privateAffiliate.id, '$argon2id$rehash',
+      'System (credential migration)', { passwordHash: privateAffiliate.passwordHash, sessionVersion: privateAffiliate.sessionVersion });
+  });
+
+  it('rejects a concurrent writer reset during password upgrade without issuing a session', async () => {
+    vi.mocked(verifyAffiliatePassword).mockResolvedValueOnce({ valid: true, needsRehash: true });
+    affiliateMocks.updateAffiliateCredential.mockRejectedValueOnce(Object.assign(new Error('Controlled credential conflict'), {
+      statusCode: 401, code: 'CREDENTIALS_CHANGED'
+    }));
+    const response = await fetch(`${baseUrl}/api/affiliate/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ login: privateAffiliate.email, password: 'CorrectPassword123!' })
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ code: 'CREDENTIALS_CHANGED' });
+    expect(affiliateMocks.createAffiliateSession).not.toHaveBeenCalled();
     expect(response.headers.get('set-cookie')).toBeNull();
   });
 

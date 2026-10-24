@@ -1,60 +1,63 @@
 import path from 'path';
+import { pathToFileURL } from 'url';
+import { getDb } from '../src/server/db.js';
 import {
-  FOUNDING_AFFILIATE_COUNT,
-  assertReadOnlyBackupTarget,
   captureAffiliateDatasets,
   configuredFirebaseTarget,
   validateFoundingAffiliateDocuments,
   verifyAffiliateBackup,
   writeAffiliateBackup
 } from './literary-circle-migration-lib.js';
+import {
+  LiteraryCircleBackupSafeError,
+  assertBackupFirestoreTarget,
+  assertConfiguredBackupTarget,
+  parseLiteraryCircleBackupArgs,
+  safeLiteraryCircleBackupError
+} from './literary-circle-backup-target.js';
 
-function argumentValue(name: string): string | undefined {
-  const prefix = `--${name}=`;
-  return process.argv.find(argument => argument.startsWith(prefix))?.slice(prefix.length);
-}
+export async function executeLiteraryCircleBackup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  try {
+    const options = parseLiteraryCircleBackupArgs(argv);
+    const target = Object.freeze(configuredFirebaseTarget());
+    const expectedAffiliates = options.expectedAffiliates;
+    assertConfiguredBackupTarget(options, target);
+    const db = getDb();
+    assertBackupFirestoreTarget(db, target);
 
-function expectedAffiliateCount(): number {
-  const value = Number(argumentValue('expected-affiliates'));
-  if (value !== FOUNDING_AFFILIATE_COUNT) {
-    throw new Error(`This migration checkpoint requires --expected-affiliates=${FOUNDING_AFFILIATE_COUNT}.`);
+    // Pass the checked client explicitly: never let a later helper select a
+    // different default client while labelling its output with this target.
+    const payloads = await captureAffiliateDatasets(db);
+    const affiliatePayload = payloads.get('affiliates');
+    if (!affiliatePayload) throw new Error('Affiliate dataset was not captured.');
+    validateFoundingAffiliateDocuments(affiliatePayload.documents, expectedAffiliates);
+
+    assertBackupFirestoreTarget(db, target);
+    const written = writeAffiliateBackup({ payloads, target });
+    const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates });
+    assertBackupFirestoreTarget(db, target);
+    console.log(JSON.stringify({
+      status: 'verified',
+      backupId: verified.manifest.backupId,
+      backupDirectory: path.relative(process.cwd(), verified.directory),
+      manifestSha256: verified.manifest.contentSha256,
+      affiliateCount: affiliatePayload.documents.length,
+      datasets: verified.manifest.datasets.map(dataset => ({
+        key: dataset.key,
+        count: dataset.count,
+        sums: dataset.sums,
+        sha256: dataset.sha256
+      }))
+    }, null, 2));
+  } catch (error) {
+    throw new LiteraryCircleBackupSafeError(safeLiteraryCircleBackupError(error));
   }
-  return value;
 }
 
-async function main(): Promise<void> {
-  const target = configuredFirebaseTarget();
-  const expectedAffiliates = expectedAffiliateCount();
-  assertReadOnlyBackupTarget({
-    environment: argumentValue('environment') || process.env.LITERARY_CIRCLE_ENV,
-    expectedProject: argumentValue('expected-project'),
-    allowProductionReadOnly: process.argv.includes('--allow-production-read-only'),
-    target
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
+if (invokedPath === import.meta.url) {
+  executeLiteraryCircleBackup().catch(error => {
+    console.error(safeLiteraryCircleBackupError(error));
+    process.exitCode = 1;
   });
-
-  const payloads = await captureAffiliateDatasets();
-  const affiliatePayload = payloads.get('affiliates');
-  if (!affiliatePayload) throw new Error('Affiliate dataset was not captured.');
-  validateFoundingAffiliateDocuments(affiliatePayload.documents, expectedAffiliates);
-
-  const written = writeAffiliateBackup({ payloads, target });
-  const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates });
-  console.log(JSON.stringify({
-    status: 'verified',
-    backupId: verified.manifest.backupId,
-    backupDirectory: path.relative(process.cwd(), verified.directory),
-    manifestSha256: verified.manifest.contentSha256,
-    affiliateCount: affiliatePayload.documents.length,
-    datasets: verified.manifest.datasets.map(dataset => ({
-      key: dataset.key,
-      count: dataset.count,
-      sums: dataset.sums,
-      sha256: dataset.sha256
-    }))
-  }, null, 2));
 }
-
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : 'Literary Circle backup failed.');
-  process.exitCode = 1;
-});

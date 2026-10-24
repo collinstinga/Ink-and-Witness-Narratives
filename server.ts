@@ -6363,15 +6363,8 @@ ${currentDraft || prompt}
       }
 
       const cleanLogin = String(rawLogin).trim();
-      let aff = store.affiliates.getAffiliateByEmail(cleanLogin) || store.affiliates.getAffiliateByCode(cleanLogin);
+      let aff = await store.affiliates.getAffiliateForLoginFresh(cleanLogin);
 
-      if (!aff) {
-        return res.status(401).json({ success: false, error: "Invalid login credentials. Please check your email or affiliate code." });
-      }
-
-      // Authentication must use the current shared credential/status rather
-      // than a possibly stale per-instance startup cache.
-      aff = await store.affiliates.getAffiliateByIdFresh(aff.id);
       if (!aff) {
         return res.status(401).json({ success: false, error: "Invalid login credentials. Please check your email or affiliate code." });
       }
@@ -6387,7 +6380,9 @@ ${currentDraft || prompt}
 
       if (passwordVerification.needsRehash) {
         const upgradedHash = await rehashVerifiedAffiliatePassword(password);
-        aff = await store.affiliates.updateAffiliateCredential(aff.id, upgradedHash, 'System (credential migration)');
+        aff = await store.affiliates.updateAffiliateCredential(aff.id, upgradedHash, 'System (credential migration)', {
+          passwordHash: aff.passwordHash, sessionVersion: aff.sessionVersion
+        });
       }
 
       // Update last login timestamp
@@ -6417,6 +6412,10 @@ ${currentDraft || prompt}
         message: `Welcome back, ${aff.name}!`
       });
     } catch (err: any) {
+      if (err?.code === 'CREDENTIALS_CHANGED' && err?.statusCode === 401) {
+        return res.status(401).json({ success: false, code: 'CREDENTIALS_CHANGED',
+          error: 'Your account changed while signing in. Please sign in again with the current password.' });
+      }
       console.error("Affiliate login error:", err);
       res.status(err?.statusCode === 503 ? 503 : 500).json({ success: false, error: err.message || "Failed to authenticate affiliate." });
     }

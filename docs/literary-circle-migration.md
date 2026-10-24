@@ -23,8 +23,13 @@ target that the Firebase server client opens. Do not rely on the
 
 The backup command is read-only and may target staging or production. A
 production backup additionally requires `--allow-production-read-only`, the
-exact project ID, and the exact nine-account count. That flag never enables a
-database write.
+exact project ID, an explicit `--expected-database`, and the exact nine-account
+count. That flag never enables a database write. The command rejects duplicate,
+unknown, empty or ambiguous arguments, emulator configuration, and production
+targets or processes labelled as staging. Before capture and before publishing
+backup evidence, it verifies the initialized client's recorded project/database
+against that exact target; missing or cross-target bindings fail closed. Provider,
+filesystem and payload errors are redacted instead of printing raw details.
 
 The backup contains personal and financial data. It is written under the
 git-ignored `data/backups/` directory with a timestamped backup ID. Do not
@@ -75,7 +80,7 @@ are redacted, rather than exposing source payloads or credential details.
 Use staging credentials and replace the example project and backup path:
 
 ```powershell
-npm run literary-circle:backup -- --environment=staging --expected-project=ink-witness-staging --expected-affiliates=9
+npm run literary-circle:backup -- --environment=staging --expected-project=ink-witness-staging --expected-database="(default)" --expected-affiliates=9
 
 npm run literary-circle:migrate:dry-run -- --environment=staging --expected-project=ink-witness-staging --expected-database="(default)" --expected-affiliates=9 --backup=data/backups/literary-circle-TIMESTAMP/manifest.json
 
@@ -86,7 +91,7 @@ Before any eventual production migration, capture and verify the live records
 without enabling writes:
 
 ```powershell
-npm run literary-circle:backup -- --environment=production --allow-production-read-only --expected-project=EXACT_PRODUCTION_PROJECT_ID --expected-affiliates=9
+npm run literary-circle:backup -- --environment=production --allow-production-read-only --expected-project=EXACT_PRODUCTION_PROJECT_ID --expected-database="(default)" --expected-affiliates=9
 ```
 
 There is deliberately no production-apply flag in this checkpoint. Production
