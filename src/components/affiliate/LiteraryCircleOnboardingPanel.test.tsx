@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AffiliateLiteraryCircleMembership } from '../../types.js';
+import { normalizeLiteraryCircleOnboardingContent } from '../../utils/literaryCircleOnboarding.js';
 import {
   LITERARY_CIRCLE_ONBOARDING_STEPS,
   LiteraryCircleOnboardingPanel,
@@ -20,6 +21,19 @@ const onboarding = (
 });
 
 describe('LiteraryCircleOnboardingPanel', () => {
+  it('uses saved writer copy while retaining existing progress and stable action IDs', () => {
+    const content = normalizeLiteraryCircleOnboardingContent({ upgradeTitle: 'A personal welcome from Jake',
+      description: 'Read honestly. Recommend thoughtfully.',
+      steps: [{ id: 'commissions', title: 'Transparent partnership earnings', description: 'Only confirmed purchases qualify.' }] });
+    const markup = renderToStaticMarkup(<LiteraryCircleOnboardingPanel
+      onboarding={onboarding({ status: 'in_progress', completedStepIds: ['welcome', 'complimentary_access'] })}
+      affiliateCode="AMINA9" content={content} recommendedPieces={[]} onUpdate={vi.fn(async () => undefined)} />);
+    expect(markup).toContain('A personal welcome from Jake');
+    expect(markup).toContain('Read honestly. Recommend thoughtfully.');
+    expect(markup).toContain('Transparent partnership earnings');
+    expect(markup).toContain('Only confirmed purchases qualify.');
+    expect(markup).toContain('One-time guided welcome · 3 of 8');
+  });
   it('renders the eight-step existing-affiliate upgrade without implying a new account', () => {
     const markup = renderToStaticMarkup(
       <LiteraryCircleOnboardingPanel

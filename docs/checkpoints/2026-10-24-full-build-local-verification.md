@@ -1,5 +1,7 @@
 # Full build: verified local implementation, staging preparation
 
+Latest continuation: see `2026-10-24-staging-preservation-rehearsal.md`. It records the completed six source-review remediations, 127-suite/1,589-test pass, fresh schema-8 production read-only backup, real staging migration and verified repeat-apply preservation. The pending statements below describe the earlier checkpoint, not the latest state.
+
 Date: 24 October 2026 (Africa/Nairobi).
 Branch: `feature/literary-circle-upgrade`; prior committed baseline `b93adbb`.
 This is not a production-deployment or final-audit-completion claim.

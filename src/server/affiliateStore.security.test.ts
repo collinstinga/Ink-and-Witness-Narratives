@@ -316,7 +316,7 @@ describe('affiliate store credential boundaries', () => {
     expect(affiliateStore.getAffiliateById(created.id)?.passwordHash).toBe(TEST_HASH);
   });
 
-  it('does not silently reassign a reserved affiliate code or email after deletion', async () => {
+  it('preserves the account and reserved affiliate identity after reversible removal', async () => {
     const created = await affiliateStore.createAffiliate({
       name: 'Reserved Identity Affiliate',
       email: 'reserved-identity@example.test',
@@ -325,6 +325,11 @@ describe('affiliate store credential boundaries', () => {
       affiliateCode: 'RESERVED99'
     });
     expect(await affiliateStore.deleteAffiliate(created.id, 'Test')).toBe(true);
+    expect(firestore.documents.get(`affiliates/${created.id}`)).toMatchObject({
+      id: created.id, status: 'suspended', linksDisabled: true,
+      email: created.email, affiliateCode: created.affiliateCode
+    });
+    expect(firestore.deleteDoc).not.toHaveBeenCalledWith('affiliates', created.id);
 
     await expect(affiliateStore.createAffiliate({
       name: 'Code Reassignment Attempt',
@@ -407,7 +412,7 @@ describe('affiliate store credential boundaries', () => {
       passwordHash: TEST_HASH
     });
 
-    const updated = affiliateStore.updateAffiliate(created.id, {
+    const updated = await affiliateStore.updateAffiliate(created.id, {
       name: 'Patch Test Affiliate Updated',
       email: 'security-patch-reassigned@example.test',
       affiliateCode: 'REASSIGNED03',
@@ -420,13 +425,8 @@ describe('affiliate store credential boundaries', () => {
     expect(updated.affiliateCode).toBe(created.affiliateCode);
     expect(updated.passwordHash).toBe(TEST_HASH);
     expect(updated.sessionVersion).toBe(created.sessionVersion);
-    const profileWrite = firestore.setDoc.mock.calls.find(call =>
-      call[0] === 'affiliates' && call[1] === created.id && call[2]?.name === updated.name
-    );
-    expect(profileWrite?.[2]).not.toHaveProperty('email');
-    expect(profileWrite?.[2]).not.toHaveProperty('affiliateCode');
-    expect(profileWrite?.[2]).not.toHaveProperty('passwordHash');
-    expect(profileWrite?.[2]).not.toHaveProperty('sessionVersion');
+    expect(firestore.runTransaction).toHaveBeenCalled();
+    expect(firestore.setDoc).not.toHaveBeenCalledWith('affiliates', created.id, expect.anything());
     expect(firestore.documents.get(`affiliates/${created.id}`)).toMatchObject({
       name: 'Patch Test Affiliate Updated',
       email: created.email,

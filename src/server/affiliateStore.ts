@@ -35,6 +35,11 @@ import {
 } from '../types.js';
 import { buildAffiliateAnalyticsReport, resolveAffiliateAnalyticsWindow } from './affiliateAnalytics.js';
 import {
+  affiliateFinancialTotals,
+  readAffiliateFinancialSnapshot,
+  type AffiliateFinancialSnapshot,
+} from './affiliateFinancialRead.js';
+import {
   readDurableAffiliateClickWindow,
   type DurableAffiliateClickWindowResult,
 } from './affiliateClickAnalyticsStore.js';
@@ -49,6 +54,13 @@ import {
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { prepareCommittedAffiliateNotification } from './affiliateNotificationEvents.js';
 import { buildLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
+import {
+  appendAffiliateTierPeriodSale,
+  countAffiliateTierPeriodSales,
+  readAffiliateTierPeriodForSale,
+  readAffiliateTierPeriodReversal,
+  validateAffiliateTierPeriodPayment,
+} from './affiliateTierPeriods.js';
 import { campaignNotificationAuditId, literaryCircleNotificationAuditId } from './affiliateNotificationAudit.js';
 import {
   buildCommittedAffiliateBuyerAnalyticsEvidence,
@@ -57,7 +69,7 @@ import {
   resolveAffiliateBuyerAnalyticsRuntime,
   withoutAffiliateBuyerAnalytics,
 } from './affiliateBuyerAnalytics.js';
-import { recordedAffiliateCommissionPaidKes, resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
+import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import {
   AFFILIATE_SESSION_MAX_AGE_MS,
@@ -86,6 +98,7 @@ import {
   literaryCirclePeriodKey,
   normalizeLiteraryCircleSettings,
   resolveAffiliateCommissionRate,
+  resolveLiteraryCircleTier,
   resolveLiteraryCircleSettingsForTransaction,
   shouldApplyLiteraryCircleCommissionPolicy,
   validateLiteraryCircleSettings
@@ -611,6 +624,180 @@ function cacheFreshAffiliateRecord(id: string, fresh: AffiliateAccount | null): 
   return refreshed;
 }
 
+function financialSnapshotIsOutdated(snapshot: AffiliateFinancialSnapshot): boolean {
+  // Compare only against commits already observed locally, never substitute
+  // cached balances for database facts or publish a read into mutable caches.
+  return [
+    [snapshot.affiliates, cachedAffiliates],
+    [snapshot.commissions, cachedCommissions],
+    [snapshot.payouts, cachedPayouts],
+  ].some(([freshRows, knownRows]) => freshRows.some(row => {
+    const known = knownRows.find(candidate => candidate.id === row.id);
+    return (known?.walletRevision || 0) > (row.walletRevision || 0);
+  }));
+}
+
+function financialCircleSettings(snapshot: AffiliateFinancialSnapshot): LiteraryCircleSettings {
+  return normalizeLiteraryCircleSettings(snapshot.literaryCircleSettings || {
+    ...DEFAULT_LITERARY_CIRCLE_SETTINGS, enabled: false,
+    community: { ...DEFAULT_LITERARY_CIRCLE_SETTINGS.community, enabled: false },
+  });
+}
+
+type AffiliateProfileRecord = AffiliateAccount & { profileRevision?: number };
+
+export class AffiliateProfileValidationError extends Error {
+  readonly statusCode = 400;
+  constructor(message: string) { super(message); this.name = 'AffiliateProfileValidationError'; }
+}
+
+function affiliateProfileCommitFailure(error: unknown): never {
+  if (error instanceof AffiliateProfileValidationError || error instanceof AffiliateWalletValidationError) throw error;
+  const failure = new Error('Affiliate profile changes could not be committed. Please retry.');
+  Object.assign(failure, { statusCode: 503 });
+  throw failure;
+}
+
+function validateAffiliateProfileTarget(id: string, actor: string) {
+  if (!walletIdentifier(id)) throw new AffiliateProfileValidationError('A valid affiliate identifier is required.');
+  if (typeof actor !== 'string' || !actor.trim() || actor.length > 200 || /[\u0000-\u001f\u007f]/.test(actor)) {
+    throw new AffiliateProfileValidationError('A valid profile-change actor is required.');
+  }
+}
+
+function profileText(value: unknown, label: string, maximum: number, allowEmpty = true): string {
+  if (typeof value !== 'string' || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)
+    || (!allowEmpty && !value.trim())) throw new AffiliateProfileValidationError(`${label} is invalid.`);
+  return value.trim();
+}
+
+function validateAffiliateProfilePatch(patch: Partial<AffiliateAccount>): Partial<AffiliateAccount> {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new AffiliateProfileValidationError('Affiliate profile changes must be an object.');
+  }
+  if (Object.keys(patch).some(key => /^(balance|total|wallet|activePayout|payoutPaid|payoutReserved|reservedPayout)/i.test(key))) {
+    throw new AffiliateWalletValidationError('Wallet balances and financial records cannot be changed through profile edits. Use the audited wallet workflow.');
+  }
+  // Credentials, reserved identities, approval and membership fields remain
+  // outside this API, including when older clients submit their full model.
+  const safe: Partial<AffiliateAccount> = {};
+  if (patch.name !== undefined) safe.name = profileText(patch.name, 'Affiliate name', 120, false);
+  if (patch.phone !== undefined) safe.phone = profileText(patch.phone, 'Affiliate phone', 40);
+  if (patch.notes !== undefined) safe.notes = profileText(patch.notes, 'Affiliate notes', 2_000);
+  if (patch.customCommissionRate !== undefined) {
+    if (patch.customCommissionRate !== null && (typeof patch.customCommissionRate !== 'number'
+      || !Number.isFinite(patch.customCommissionRate) || patch.customCommissionRate <= 0 || patch.customCommissionRate > 100)) {
+      throw new AffiliateProfileValidationError('Custom commission must be greater than zero and at most 100, or null to inherit the programme rate.');
+    }
+    safe.customCommissionRate = patch.customCommissionRate;
+  }
+  if (patch.attributionDays !== undefined) {
+    if (patch.attributionDays !== null && (!Number.isSafeInteger(patch.attributionDays)
+      || patch.attributionDays < 1 || patch.attributionDays > MAX_ATTRIBUTION_DAYS)) {
+      throw new AffiliateProfileValidationError('Attribution days must be between 1 and 90, or null to inherit the programme window.');
+    }
+    safe.attributionDays = patch.attributionDays;
+  }
+  if (patch.payoutMethod !== undefined) {
+    if (!['mpesa', 'bank', 'paypal'].includes(patch.payoutMethod)) throw new AffiliateProfileValidationError('Payout method is invalid.');
+    safe.payoutMethod = patch.payoutMethod;
+  }
+  if (patch.payoutDetails !== undefined) {
+    const details = patch.payoutDetails;
+    if (!details || typeof details !== 'object' || Array.isArray(details)) throw new AffiliateProfileValidationError('Payout details must be an object.');
+    const allowed = new Set(['mpesaPhone', 'mpesaName', 'bankName', 'bankAccountNumber', 'bankAccountName', 'bankBranch', 'bankSwiftCode', 'paypalEmail', 'notes']);
+    if (Object.keys(details).some(key => !allowed.has(key))) throw new AffiliateProfileValidationError('Payout details contain unsupported fields.');
+    safe.payoutDetails = Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, profileText(value, `Payout ${key}`, key === 'notes' ? 2_000 : 200)]));
+  }
+  if (patch.allowedPieceIds !== undefined) {
+    if (!Array.isArray(patch.allowedPieceIds) || patch.allowedPieceIds.length > 500
+      || patch.allowedPieceIds.some(id => !walletIdentifier(id))) throw new AffiliateProfileValidationError('Allowed pieces must be a bounded list of valid piece identifiers.');
+    safe.allowedPieceIds = [...new Set(patch.allowedPieceIds)];
+  }
+  if (patch.acceptedTerms !== undefined) {
+    if (typeof patch.acceptedTerms !== 'boolean') throw new AffiliateProfileValidationError('Terms acceptance must be a boolean.');
+    safe.acceptedTerms = patch.acceptedTerms;
+  }
+  if (patch.termsVersion !== undefined) safe.termsVersion = profileText(patch.termsVersion, 'Terms version', 80, false);
+  for (const field of ['termsAcceptedAt', 'lastLoginAt'] as const) {
+    if (patch[field] === undefined) continue;
+    const value = patch[field];
+    if (typeof value !== 'string' || value.length > 40 || !Number.isFinite(Date.parse(value))
+      || Date.parse(value) > Date.now() + 5 * 60_000) throw new AffiliateProfileValidationError(`${field} must be a valid current or past timestamp.`);
+    safe[field] = new Date(value).toISOString();
+  }
+  return safe;
+}
+
+function nextAffiliateProfileRevision(record: AffiliateProfileRecord): number {
+  const revision = record.profileRevision ?? 0;
+  if (!Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) {
+    throw new AffiliateProfileValidationError('Affiliate profile history requires writer review.');
+  }
+  return revision + 1;
+}
+
+function readAffiliateProfileRecord(data: unknown, id: string): AffiliateProfileRecord {
+  if (!data || typeof data !== 'object' || Array.isArray(data)
+    || ((data as AffiliateAccount).id !== undefined && (data as AffiliateAccount).id !== id)) {
+    throw new AffiliateProfileValidationError('Affiliate profile requires writer review.');
+  }
+  const record = { ...data, id } as AffiliateProfileRecord;
+  nextAffiliateProfileRevision(record);
+  return record;
+}
+
+function affiliateProfileAudit(actor: string, action: string, previous: AffiliateProfileRecord,
+  next: AffiliateProfileRecord, fields: string[]): AffiliateAuditLogEntry {
+  const selected = (record: AffiliateProfileRecord) => Object.fromEntries(fields
+    .filter(field => Object.prototype.hasOwnProperty.call(record, field))
+    .map(field => [field, record[field as keyof AffiliateProfileRecord]]));
+  return {
+    id: `aud_profile_${crypto.randomBytes(16).toString('hex')}`, timestamp: next.updatedAt,
+    actor, action, targetType: 'affiliate', targetId: next.id,
+    summary: action === 'affiliate_archived'
+      ? 'Suspended affiliate account and referral activity; identity and all historical records preserved.'
+      : 'Committed affiliate profile/settings changes.',
+    previousValue: sanitizeAuditValue(selected(previous)), newValue: sanitizeAuditValue(selected(next))
+  };
+}
+
+function publishAffiliateProfileCommit(saved: AffiliateProfileRecord, sessionVersionAtStart: string | undefined): AffiliateAccount {
+  const index = cachedAffiliates.findIndex(row => row.id === saved.id);
+  const current = cachedAffiliates[index] as AffiliateProfileRecord | undefined;
+  if (current && (current.profileRevision || 0) > (saved.profileRevision || 0)) return current;
+  const published = { ...saved };
+  if (current) {
+    // A wallet or session operation may have committed while this profile
+    // response was in flight. Do not publish an older non-profile snapshot.
+    if ((current.walletRevision || 0) > (saved.walletRevision || 0)) {
+      for (const field of ['walletLedgerVersion', 'walletRevision', 'balanceAvailableKes', 'balancePendingKes',
+        'balanceReservedKes', 'activePayoutId', 'totalCommissionEarnedKes', 'totalCommissionPaidKes',
+        'totalCommissionReversedKes'] as const) {
+        if (current[field] !== undefined) Object.assign(published, { [field]: current[field] });
+        else Reflect.deleteProperty(published, field);
+      }
+    }
+    for (const field of ['totalClicks', 'uniqueVisitors', 'totalSalesCount', 'totalRevenueKes'] as const) {
+      if (Number.isFinite(current[field]) && current[field] > (published[field] || 0)) published[field] = current[field];
+    }
+    for (const field of ['lastLoginAt', 'lastActivityAt', 'lastReferralAt', 'lastVerifiedSaleAt', 'lastDashboardAt'] as const) {
+      if (Date.parse(current[field] || '') > (Date.parse(published[field] || '') || 0)) published[field] = current[field];
+    }
+    if (current.sessionVersion !== sessionVersionAtStart) {
+      for (const field of ['sessionVersion', 'passwordHash', 'status', 'linksDisabled'] as const) {
+        if (current[field] !== undefined) Object.assign(published, { [field]: current[field] });
+        else Reflect.deleteProperty(published, field);
+      }
+    }
+  }
+  if (index >= 0) cachedAffiliates[index] = published;
+  else cachedAffiliates.unshift(published);
+  writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
+  return published;
+}
+
 export const affiliateStore = {
   async init() {
     if (!process.env.VERCEL && !fs.existsSync(DATA_DIR)) {
@@ -905,6 +1092,7 @@ export const affiliateStore = {
       value.community,
       'posts'
     );
+    const preserveExistingOnboarding = !Object.prototype.hasOwnProperty.call(value, 'onboardingContent');
     const now = new Date().toISOString();
     const requestedRevision = Number.isSafeInteger(expectedRevision) && Number(expectedRevision) >= 0
       ? Number(expectedRevision)
@@ -935,15 +1123,16 @@ export const affiliateStore = {
       // Clients released before the private bulletin did not send `posts`.
       // Preserve the durable list for those otherwise-valid saves instead of
       // treating an omitted, newly-added field as an instruction to erase it.
-      const requested = preserveExistingCommunityPosts
-        ? normalizeLiteraryCircleSettings({
-            ...validated,
-            community: {
-              ...validated.community,
-              posts: previous.community.posts || []
-            }
-          })
-        : validated;
+      const requested = normalizeLiteraryCircleSettings({
+        ...validated,
+        ...(preserveExistingOnboarding ? { onboardingContent: previous.onboardingContent } : {}),
+        ...(preserveExistingCommunityPosts ? {
+          community: {
+            ...validated.community,
+            posts: previous.community.posts || []
+          }
+        } : {})
+      });
 
       const policyChanged = isLiteraryCircleCommissionPolicyChange(previous, requested);
       const policyVersion = policyChanged
@@ -1477,80 +1666,51 @@ export const affiliateStore = {
     return newAffiliate;
   },
 
-  acceptAffiliateTerms(id: string, termsVersion = '2026.1', actor = 'Affiliate'): AffiliateAccount {
-    const index = cachedAffiliates.findIndex(affiliate => affiliate.id === id);
-    if (index < 0) {
-      throw new Error("Affiliate not found.");
-    }
-    const prev = { ...cachedAffiliates[index] };
-    const now = new Date().toISOString();
-    const affiliate: AffiliateAccount = {
-      ...prev,
+  async acceptAffiliateTerms(id: string, termsVersion = '2026.1', actor = 'Affiliate'): Promise<AffiliateAccount> {
+    return this.updateAffiliate(id, {
       acceptedTerms: true,
       termsVersion,
-      termsAcceptedAt: now,
-      updatedAt: now
-    };
-
-    cachedAffiliates[index] = affiliate;
-    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    setFirestoreDoc('affiliates', affiliate.id, {
-      acceptedTerms: affiliate.acceptedTerms,
-      termsVersion: affiliate.termsVersion,
-      termsAcceptedAt: affiliate.termsAcceptedAt,
-      updatedAt: affiliate.updatedAt
-    }).catch(() => {});
-    this.recordAudit(actor, 'terms_accepted', 'affiliate', `Affiliate ${affiliate.name} accepted Terms & Conditions (Version: ${termsVersion})`, id, prev, affiliate);
-    return affiliate;
+      termsAcceptedAt: new Date().toISOString()
+    }, actor);
   },
 
-  updateAffiliate(id: string, patch: Partial<AffiliateAccount>, actor = 'Admin'): AffiliateAccount {
-    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Affiliate profile changes must be an object.');
-    if (Object.keys(patch).some(key => /^(balance|total|wallet|activePayout|payoutPaid|payoutReserved|reservedPayout)/i.test(key))) {
-      throw new AffiliateWalletValidationError('Wallet balances and financial records cannot be changed through profile edits. Use the audited wallet workflow.');
+  async updateAffiliate(id: string, patch: Partial<AffiliateAccount>, actor = 'Admin'): Promise<AffiliateAccount> {
+    validateAffiliateProfileTarget(id, actor);
+    const safePatch = validateAffiliateProfilePatch(patch);
+    const sessionVersionAtStart = cachedAffiliates.find(row => row.id === id)?.sessionVersion;
+    let persisted: { affiliate: AffiliateProfileRecord; audit?: AffiliateAuditLogEntry };
+    try {
+      const db = getDb();
+      const reference = db.collection('affiliates').doc(id);
+      persisted = await db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists) throw new AffiliateProfileValidationError('Affiliate not found.');
+        const previous = readAffiliateProfileRecord(snapshot.data(), id);
+        if (Object.keys(safePatch).length === 0) return { affiliate: previous };
+        const persistencePatch: Partial<AffiliateProfileRecord> = {
+          ...safePatch,
+          ...(safePatch.payoutDetails ? {
+            payoutDetails: { ...previous.payoutDetails, ...safePatch.payoutDetails }
+          } : {}),
+          ...(safePatch.lastLoginAt && Date.parse(previous.lastLoginAt || '') > Date.parse(safePatch.lastLoginAt)
+            ? { lastLoginAt: previous.lastLoginAt } : {}),
+          profileRevision: nextAffiliateProfileRevision(previous),
+          updatedAt: new Date().toISOString()
+        };
+        const affiliate = { ...previous, ...persistencePatch };
+        const audit = affiliateProfileAudit(actor, 'affiliate_updated', previous, affiliate, Object.keys(safePatch));
+        // Patch only this allowlist. A fresh wallet, credential, membership or
+        // session rotation can never be overwritten by a stale profile form.
+        transaction.set(reference, persistencePatch, { merge: true });
+        transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
+        return { affiliate, audit };
+      });
+    } catch (error) {
+      affiliateProfileCommitFailure(error);
     }
-    const index = cachedAffiliates.findIndex(a => a.id === id);
-    if (index < 0) {
-      throw new Error("Affiliate not found.");
-    }
-
-    const prev = { ...cachedAffiliates[index] };
-    const {
-      passwordHash: _ignoredPasswordHash,
-      sessionVersion: _ignoredSessionVersion,
-      // Identity keys are bound to permanent reservation documents when an
-      // affiliate is created. Keep them immutable until a future update path
-      // can move those reservations atomically.
-      email: _ignoredEmail,
-      affiliateCode: _ignoredAffiliateCode,
-      ...candidatePatch
-    } = patch;
-    const editable = new Set(['name', 'phone', 'customCommissionRate', 'payoutMethod', 'payoutDetails',
-      'allowedPieceIds', 'attributionDays', 'notes', 'acceptedTerms', 'termsVersion', 'termsAcceptedAt', 'lastLoginAt']);
-    const safePatch = Object.fromEntries(Object.entries(candidatePatch).filter(([key]) => editable.has(key))) as Partial<AffiliateAccount>;
-    const updated: AffiliateAccount = {
-      ...prev,
-      ...safePatch,
-      payoutDetails: {
-        ...prev.payoutDetails,
-        ...(safePatch.payoutDetails || {})
-      },
-      updatedAt: new Date().toISOString()
-    };
-
-    cachedAffiliates[index] = updated;
-    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    const persistencePatch: Partial<AffiliateAccount> = {
-      ...safePatch,
-      updatedAt: updated.updatedAt
-    };
-    if (safePatch.payoutDetails) {
-      persistencePatch.payoutDetails = updated.payoutDetails;
-    }
-    setFirestoreDoc('affiliates', updated.id, persistencePatch).catch(() => {});
-    this.recordAudit(actor, 'affiliate_updated', 'affiliate', `Updated profile/settings for ${updated.name} (${updated.affiliateCode})`, id, prev, updated);
-
-    return updated;
+    const published = publishAffiliateProfileCommit(persisted.affiliate, sessionVersionAtStart);
+    if (persisted.audit) this.rememberCommittedAudit(persisted.audit);
+    return published;
   },
 
   async updateAffiliateCredential(id: string, passwordHash: string, actor = 'System'): Promise<AffiliateAccount> {
@@ -1632,14 +1792,38 @@ export const affiliateStore = {
   },
 
   async deleteAffiliate(id: string, actor = 'Admin'): Promise<boolean> {
-    const idx = cachedAffiliates.findIndex(a => a.id === id);
-    if (idx < 0) return false;
-    const deleted = cachedAffiliates[idx];
-    await deleteFirestoreDoc('affiliates', id);
-    cachedAffiliates.splice(idx, 1);
+    validateAffiliateProfileTarget(id, actor);
+    const sessionVersionAtStart = cachedAffiliates.find(row => row.id === id)?.sessionVersion;
+    let persisted: { affiliate: AffiliateProfileRecord; audit?: AffiliateAuditLogEntry } | null;
+    try {
+      const db = getDb();
+      const reference = db.collection('affiliates').doc(id);
+      persisted = await db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists) return null;
+        const previous = readAffiliateProfileRecord(snapshot.data(), id);
+        if (previous.status === 'suspended' && previous.linksDisabled === true) return { affiliate: previous };
+        // Keep the legacy endpoint compatible, but make removal reversible.
+        // No account, referral reservation, sale, wallet or payout is deleted.
+        const patch: Partial<AffiliateProfileRecord> = {
+          status: 'suspended', linksDisabled: true,
+          sessionVersion: createAffiliateSessionVersion(),
+          profileRevision: nextAffiliateProfileRevision(previous),
+          updatedAt: new Date().toISOString()
+        };
+        const affiliate = { ...previous, ...patch };
+        const audit = affiliateProfileAudit(actor, 'affiliate_archived', previous, affiliate, ['status', 'linksDisabled']);
+        transaction.set(reference, patch, { merge: true });
+        transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
+        return { affiliate, audit };
+      });
+    } catch (error) {
+      affiliateProfileCommitFailure(error);
+    }
+    if (!persisted) return false;
+    publishAffiliateProfileCommit(persisted.affiliate, sessionVersionAtStart);
     forgetCachedAffiliateSessionsForAffiliate(id);
-    writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    this.recordAudit(actor, 'affiliate_deleted', 'affiliate', `Deleted affiliate ${deleted.name} (${deleted.affiliateCode})`, id);
+    if (persisted.audit) this.rememberCommittedAudit(persisted.audit);
     return true;
   },
 
@@ -2232,36 +2416,44 @@ export const affiliateStore = {
       let monthlyVerifiedSales = 0;
       let tierHistory: AffiliateSaleCommission[] = [];
       let tierHistoryComplete = false;
-      if (
-        !isSelfReferral
-        && initialRateResolution.source === 'literary_circle_tier'
-        && freshAffiliate.literaryCircle?.tier.source !== 'manual'
-      ) {
-        const commissionQuery = db.collection('affiliate_commissions')
-          .where('affiliateId', '==', freshAffiliate.id)
-          .limit(10_000);
-        const commissionSnapshot = await firestoreTransaction.get(commissionQuery) as any;
-        const existingCommissions = (commissionSnapshot.docs || []).map((document: any) => ({
-          ...(document.data() as AffiliateSaleCommission),
-          id: document.id
-        }));
-        tierHistory = existingCommissions;
-        tierHistoryComplete = existingCommissions.length < 10_000;
-        const periodKey = literaryCirclePeriodKey(transactionAt);
-        monthlyVerifiedSales = countVerifiedSalesForPeriod(
-          existingCommissions,
-          periodKey,
-          transactionLiteraryCircleSettings.qualificationEffectiveFrom
-        );
-        const qualificationStartsAt = Date.parse(
-          transactionLiteraryCircleSettings.qualificationEffectiveFrom || '1970-01-01T00:00:00.000Z'
-        );
-        if (
-          periodKey
-          && literaryCirclePeriodKey(transactionAt) === periodKey
-          && Date.parse(transactionAt) >= qualificationStartsAt
-        ) {
-          monthlyVerifiedSales += 1;
+      const automaticTierRate = !isSelfReferral && initialRateResolution.source === 'literary_circle_tier'
+        && freshAffiliate.literaryCircle?.tier.source !== 'manual';
+      // Once initialized, every eligible sale (including campaign/manual-rate
+      // sales) maintains the same monthly evidence. No lifetime scan is used.
+      const tierPeriod = !isSelfReferral ? await readAffiliateTierPeriodForSale({
+        db, transaction: firestoreTransaction, affiliate: freshAffiliate, transactionAt, initialize: automaticTierRate,
+      }) : undefined;
+      let periodPurchase = false;
+      if (tierPeriod) {
+        periodPurchase = await validateAffiliateTierPeriodPayment({ db, transaction: firestoreTransaction, affiliate: freshAffiliate, paymentType: tx.type,
+          commission: { id: commissionId, affiliateId: freshAffiliate.id, affiliateCode: freshAffiliate.affiliateCode,
+            checkoutRequestId: tx.checkoutRequestId, transactionId: tx.id, articleId: tx.articleId,
+            saleAmountKes, commissionAmountKes: 0, commissionRate: 0, createdAt: transactionAt,
+            paymentMethod: tx.paymentMethod || 'mpesa', purchaseKind: tx.purchaseKind || 'piece',
+            ...(tx.purchaseKind === 'subscription' ? { subscriptionPlanId: tx.subscriptionPlanId, subscriptionRenewal: tx.subscriptionRenewal } : {}),
+            receiptNumber: tx.mpesaReceiptNumber || tx.bankReference || `CHECKOUT-${tx.checkoutRequestId || tx.id}`,
+          } as AffiliateSaleCommission,
+        });
+        const effectiveFrom = transactionLiteraryCircleSettings.qualificationEffectiveFrom;
+        const before = countAffiliateTierPeriodSales(tierPeriod.period, effectiveFrom, transactionAt);
+        monthlyVerifiedSales = before + (periodPurchase && (!effectiveFrom || transactionAt >= effectiveFrom) ? 1 : 0);
+        const fromTier = resolveLiteraryCircleTier(transactionLiteraryCircleSettings, before);
+        const toTier = resolveLiteraryCircleTier(transactionLiteraryCircleSettings, monthlyVerifiedSales);
+        const milestoneKey = `${transactionLiteraryCircleSettings.commissionPolicy.version}:${toTier.id}`;
+        if (automaticTierRate && periodPurchase && fromTier.id !== toTier.id
+          && !tierPeriod.period.awardedMilestones.includes(milestoneKey)) {
+          const prior = tierPeriod.period.members.filter(member => member.createdAt <= transactionAt
+            && (!effectiveFrom || member.createdAt >= effectiveFrom));
+          // Notifications retain their independent <=100 backing-row proof.
+          // A larger exact counter still prices correctly without an email.
+          if (prior.length <= 100) {
+            tierHistory = await Promise.all(prior.map(async member => {
+              const snapshot = await firestoreTransaction.get(db.collection('affiliate_commissions').doc(member.id));
+              if (!snapshot.exists) throw new Error('Monthly affiliate qualification evidence needs writer review.');
+              return { ...(snapshot.data() as AffiliateSaleCommission), id: snapshot.id };
+            }));
+            tierHistoryComplete = true;
+          }
         }
       }
       const rateResolution = resolveAffiliateCommissionRate({
@@ -2338,6 +2530,9 @@ export const affiliateStore = {
         commission, transaction: tx, runtime: buyerAnalyticsRuntime,
       });
       if (buyerEvidence) commission.affiliateBuyerAnalytics = buyerEvidence;
+      if (tierPeriod && periodPurchase) {
+        firestoreTransaction.set(tierPeriod.ref, appendAffiliateTierPeriodSale(tierPeriod, commission), { merge: false });
+      }
       firestoreTransaction.create(commissionRef, commission);
       const affiliateIncrement: Record<string, unknown> = {
         totalSalesCount: FieldValue.increment(1),
@@ -2492,6 +2687,9 @@ export const affiliateStore = {
       };
       const audit = walletAudit(actor, 'commission_status_change', 'commission', commissionId,
         { status: commission.status }, { status, amountKes: amount, reason: reason || null });
+      const tierPeriodReversal = status === 'REJECTED' || status === 'REVERSED'
+        ? await readAffiliateTierPeriodReversal({ db, transaction, commission }) : undefined;
+      if (tierPeriodReversal) transaction.set(tierPeriodReversal.ref, tierPeriodReversal.period, { merge: false });
       transaction.set(commissionRef, next, { merge: false });
       transaction.set(affiliateRef, accountPatch, { merge: true });
       transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
@@ -2522,6 +2720,19 @@ export const affiliateStore = {
       list = list.filter(p => p.status === filter.status);
     }
     return list;
+  },
+
+  async getPayoutsFresh(filter?: { affiliateId?: string; status?: string }): Promise<AffiliatePayoutRequest[]> {
+    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), affiliateId: filter?.affiliateId,
+      isOutdated: financialSnapshotIsOutdated });
+    return (snapshot?.payouts || []).filter(payout => !filter?.status || payout.status === filter.status);
+  },
+
+  async getCommissionsFresh(filter?: { affiliateId?: string; status?: string }): Promise<AffiliateSaleCommission[]> {
+    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), affiliateId: filter?.affiliateId,
+      isOutdated: financialSnapshotIsOutdated });
+    return (snapshot?.commissions || []).filter(commission => !filter?.status || commission.status === filter.status)
+      .map(withoutAffiliateBuyerAnalytics);
   },
 
   async requestPayout(affiliateId: string, requestedAmountKes?: number, notes?: string): Promise<AffiliatePayoutRequest> {
@@ -2933,36 +3144,40 @@ export const affiliateStore = {
   },
 
   // STRICTLY PRIVATE AFFILIATE DASHBOARD
-  getAffiliateDashboard(affiliateId: string): AffiliateDashboardStats | null {
-    const affiliate = this.getAffiliateById(affiliateId);
+  async getAffiliateDashboardFresh(affiliateId: string, publishedPieceIds: readonly string[] = []): Promise<AffiliateDashboardStats | null> {
+    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), affiliateId,
+      isOutdated: financialSnapshotIsOutdated });
+    return snapshot ? this.getAffiliateDashboard(affiliateId, snapshot, publishedPieceIds) : null;
+  },
+
+  getAffiliateDashboard(affiliateId: string, snapshot?: AffiliateFinancialSnapshot, publishedPieceIds: readonly string[] = []): AffiliateDashboardStats | null {
+    const affiliate = snapshot ? snapshot.affiliates.find(row => row.id === affiliateId) : this.getAffiliateById(affiliateId);
     if (!affiliate) return null;
+    const settings = snapshot ? normalizeAffiliateSettings(snapshot.settings) : cachedSettings;
+    const circleSettings = snapshot ? financialCircleSettings(snapshot) : cachedLiteraryCircleSettings;
 
     // Filter ONLY this affiliate's sales with ANONYMIZED customer info
-    const sales = cachedCommissions
+    const sales = (snapshot?.commissions || cachedCommissions)
       .filter(c => c.affiliateId === affiliate.id)
       .map(toAffiliateSaleCommission);
 
-    const payouts = cachedPayouts.filter(p => p.affiliateId === affiliate.id);
-    const activeCampaigns = cachedCampaigns.filter(c => c.isActive);
+    const payouts = (snapshot?.payouts || cachedPayouts).filter(p => p.affiliateId === affiliate.id);
+    const activeCampaigns = (snapshot?.campaigns || cachedCampaigns).filter(c => c.isActive);
 
-    const commissionEarned = sales.reduce((acc, s) => acc + s.commissionAmountKes, 0);
-    const commissionPending = sales.filter(s => s.status === 'PENDING').reduce((acc, s) => acc + s.commissionAmountKes, 0);
-    const commissionApproved = sales.filter(s => s.status === 'APPROVED').reduce((acc, s) => acc + s.commissionAmountKes - recordedAffiliateCommissionPaidKes(s), 0);
-    const commissionPaid = sales.reduce((acc, s) => acc + recordedAffiliateCommissionPaidKes(s), 0);
-    const totalRevenue = sales.reduce((acc, s) => acc + s.saleAmountKes, 0);
+    const totals = affiliateFinancialTotals(sales);
     const dashboardAt = new Date().toISOString();
     const dashboardPolicy = resolveLiteraryCircleSettingsForTransaction(
-      cachedLiteraryCircleSettings,
+      circleSettings,
       dashboardAt
     );
     const activeRate = calculateCommissionRateFromRecords(
       affiliate,
       '',
-      cachedSettings,
+      settings,
       undefined,
       dashboardPolicy,
       countVerifiedSalesForPeriod(
-        sales,
+        totals.verified,
         literaryCirclePeriodKey(dashboardAt),
         dashboardPolicy.qualificationEffectiveFrom
       ),
@@ -2978,37 +3193,48 @@ export const affiliateStore = {
       affiliate: safeAffiliate,
       clicks: affiliate.totalClicks || 0,
       uniqueVisitors: affiliate.uniqueVisitors || 0,
-      totalPiecesSold: sales.length,
-      totalConfirmedSales: sales.filter(s => ['PENDING', 'APPROVED', 'PAID'].includes(s.status)).length,
-      totalRevenueGeneratedKes: totalRevenue,
-      commissionEarnedKes: commissionEarned,
-      commissionPendingKes: commissionPending,
-      commissionApprovedKes: commissionApproved,
-      commissionPaidKes: commissionPaid,
+      totalPiecesSold: totals.sales,
+      totalConfirmedSales: totals.sales,
+      totalRevenueGeneratedKes: totals.revenueKes,
+      commissionEarnedKes: totals.earnedKes,
+      commissionPendingKes: totals.pendingKes,
+      commissionApprovedKes: totals.approvedKes,
+      commissionPaidKes: totals.paidKes,
       availableBalanceKes: affiliate.balanceAvailableKes || 0,
-      minPayoutThresholdKes: cachedSettings.minPayoutThresholdKes || 1000,
+      minPayoutThresholdKes: settings.minPayoutThresholdKes || 1000,
       sales,
       payouts,
       campaigns: activeCampaigns,
       settings: {
-        defaultCommissionRate: cachedSettings.defaultCommissionRate || 15,
+        defaultCommissionRate: settings.defaultCommissionRate || 15,
         activeCommissionRate: activeRate,
-        attributionDays: affiliate.attributionDays || cachedSettings.defaultAttributionDays || 30,
-        minPayoutThresholdKes: cachedSettings.minPayoutThresholdKes || 1000
+        attributionDays: affiliate.attributionDays || settings.defaultAttributionDays || 30,
+        minPayoutThresholdKes: settings.minPayoutThresholdKes || 1000
       },
       literaryCircle: buildLiteraryCircleDashboardSummary({
         affiliate,
         // Never pass the global ledger into an affiliate-facing summary.
-        commissions: sales,
-        settings: cachedLiteraryCircleSettings
+        commissions: totals.verified,
+        settings: circleSettings,
+        publishedPieceIds
       })
     };
   },
 
   // ADMIN OVERVIEW & CONTROL CENTER
-  getAdminAffiliatesSummary(): AdminAffiliatesSummary {
-    const defaultRate = cachedSettings.defaultCommissionRate || 15;
-    const affiliates = cachedAffiliates.map(a => ({
+  async getAdminAffiliatesSummaryFresh(): Promise<AdminAffiliatesSummary> {
+    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), isOutdated: financialSnapshotIsOutdated });
+    if (!snapshot) throw new Error('Current affiliate records are unavailable.');
+    return this.getAdminAffiliatesSummary(snapshot);
+  },
+
+  getAdminAffiliatesSummary(snapshot?: AffiliateFinancialSnapshot): AdminAffiliatesSummary {
+    const settings = snapshot ? normalizeAffiliateSettings(snapshot.settings) : cachedSettings;
+    const circleSettings = snapshot ? financialCircleSettings(snapshot) : cachedLiteraryCircleSettings;
+    const commissions = snapshot?.commissions || cachedCommissions;
+    const totals = affiliateFinancialTotals(commissions);
+    const defaultRate = settings.defaultCommissionRate || 15;
+    const affiliates = (snapshot?.affiliates || cachedAffiliates).map(a => ({
       ...sanitizeAffiliateForResponse(a),
       commissionRate: (a.customCommissionRate !== null && a.customCommissionRate !== undefined && a.customCommissionRate > 0)
         ? a.customCommissionRate
@@ -3020,18 +3246,17 @@ export const affiliateStore = {
     const pendingAffiliates = affiliates.filter(a => a.status === 'pending').length;
 
     const totalAffiliateClicks = affiliates.reduce((sum, a) => sum + (a.totalClicks || 0), 0);
-    const totalAffiliateSales = cachedCommissions.length;
-    const totalRevenueGeneratedKes = cachedCommissions.reduce((sum, c) => sum + c.saleAmountKes, 0);
-    const totalCommissionsKes = cachedCommissions.reduce((sum, c) => sum + c.commissionAmountKes, 0);
-    const pendingCommissionsKes = cachedCommissions.filter(c => c.status === 'PENDING').reduce((sum, c) => sum + c.commissionAmountKes, 0);
-    const approvedCommissionsKes = cachedCommissions.filter(c => c.status === 'APPROVED').reduce((sum, c) => sum + c.commissionAmountKes - recordedAffiliateCommissionPaidKes(c), 0);
-    const paidCommissionsKes = cachedCommissions.reduce((sum, c) => sum + recordedAffiliateCommissionPaidKes(c), 0);
+    const totalAffiliateSales = totals.sales;
+    const totalRevenueGeneratedKes = totals.revenueKes;
+    const totalCommissionsKes = totals.earnedKes;
+    const pendingCommissionsKes = totals.pendingKes;
+    const approvedCommissionsKes = totals.approvedKes;
+    const paidCommissionsKes = totals.paidKes;
     const outstandingBalanceKes = affiliates.reduce((sum, a) => sum + (a.balanceAvailableKes || 0) + (a.balanceReservedKes || 0), 0);
 
-    const flaggedCount = cachedCommissions.filter(c => c.fraudFlag?.flagged && !c.fraudFlag.reviewed).length;
+    const flaggedCount = commissions.filter(c => c.fraudFlag?.flagged && !c.fraudFlag.reviewed).length;
     const affiliateIdsWithVerifiedSales = new Set(
-      cachedCommissions
-        .filter(isVerifiedAffiliateCommission)
+      totals.verified
         .map(commission => commission.affiliateId)
     );
     const affiliatesWithLifetimeSales = affiliates.filter(affiliate =>
@@ -3042,7 +3267,7 @@ export const affiliateStore = {
     // Top performers (strictly admin only)
     const topAffiliates = affiliates
       .map(a => {
-        const sales = cachedCommissions.filter(c => c.affiliateId === a.id);
+        const sales = totals.verified.filter(c => c.affiliateId === a.id);
         const revenue = sales.reduce((sum, s) => sum + s.saleAmountKes, 0);
         const earned = sales.reduce((sum, s) => sum + s.commissionAmountKes, 0);
         const clicks = a.totalClicks || 0;
@@ -3068,8 +3293,8 @@ export const affiliateStore = {
         ? { manuallyAssignedTierId: affiliate.literaryCircle.tier.id }
         : {}),
       periods: buildLiteraryCirclePerformancePeriods({
-        commissions: cachedCommissions.filter(commission => commission.affiliateId === affiliate.id),
-        settings: cachedLiteraryCircleSettings,
+        commissions: totals.verified.filter(commission => commission.affiliateId === affiliate.id),
+        settings: circleSettings,
         now: performanceNow,
         periodCount: 6,
       }),
@@ -3089,18 +3314,26 @@ export const affiliateStore = {
       paidCommissionsKes,
       outstandingBalanceKes,
       affiliates,
-      recentSales: cachedCommissions.slice(0, 50).map(withoutAffiliateBuyerAnalytics),
-      payouts: cachedPayouts,
-      campaigns: cachedCampaigns,
-      settings: cachedSettings,
-      auditLogs: this.getAuditLogs(50),
+      recentSales: [...commissions].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)).slice(0, 50).map(withoutAffiliateBuyerAnalytics),
+      payouts: snapshot?.payouts || cachedPayouts,
+      campaigns: snapshot?.campaigns || cachedCampaigns,
+      settings,
+      auditLogs: snapshot ? snapshot.auditLogs.map(entry => sanitizeAuditValue(entry)) : this.getAuditLogs(50),
       flaggedCount,
       affiliatesWithLifetimeSales,
       affiliatesWithoutSales,
-      literaryCircleSettings: normalizeLiteraryCircleSettings(cachedLiteraryCircleSettings),
+      literaryCircleSettings: normalizeLiteraryCircleSettings(circleSettings),
       literaryCirclePerformance,
       topAffiliates
     };
+  },
+
+  async getAdminAffiliateAnalyticsFresh(options: {
+    startDate?: string; endDate?: string; filters?: AffiliateAnalyticsFilters; now?: Date;
+  } = {}): Promise<AffiliateAnalyticsReport> {
+    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), isOutdated: financialSnapshotIsOutdated });
+    if (!snapshot) throw new Error('Current affiliate records are unavailable.');
+    return this.getAdminAffiliateAnalytics(options, snapshot);
   },
 
   async getAdminAffiliateAnalytics(options: {
@@ -3108,7 +3341,7 @@ export const affiliateStore = {
     endDate?: string;
     filters?: AffiliateAnalyticsFilters;
     now?: Date;
-  } = {}): Promise<AffiliateAnalyticsReport> {
+  } = {}, financialSnapshot?: AffiliateFinancialSnapshot): Promise<AffiliateAnalyticsReport> {
     const now = options.now && Number.isFinite(options.now.getTime()) ? options.now : new Date();
     const window = resolveAffiliateAnalyticsWindow({
       startDate: options.startDate,
@@ -3140,12 +3373,16 @@ export const affiliateStore = {
         });
     const useLegacyClickFallback = durableClicks.source === 'legacy';
     const buyerRuntime = resolveAffiliateBuyerAnalyticsRuntime();
-    let analyticsCommissions = cachedCommissions;
+    let analyticsCommissions = financialSnapshot?.commissions || cachedCommissions;
     let buyerProjection = projectStoredAffiliateBuyerAnalytics({
       commissions: [], runtime: buyerRuntime, historyComplete: false,
     });
     let buyerReadReason: 'query_failed' | 'truncated' | undefined;
-    if (buyerRuntime.enabled) {
+    if (buyerRuntime.enabled && financialSnapshot) {
+      buyerProjection = projectStoredAffiliateBuyerAnalytics({
+        commissions: analyticsCommissions, runtime: buyerRuntime, historyComplete: true,
+      });
+    } else if (buyerRuntime.enabled) {
       try {
         // Read a fresh, bounded all-affiliate history: filtering first would steal acquisition credit.
         const snapshot = await getDb().collection('affiliate_commissions').limit(MAX_AFFILIATE_BUYER_HISTORY + 1).get();
@@ -3165,7 +3402,7 @@ export const affiliateStore = {
       }
     }
     return buildAffiliateAnalyticsReport({
-      affiliates: cachedAffiliates,
+      affiliates: financialSnapshot?.affiliates || cachedAffiliates,
       commissions: analyticsCommissions,
       ...(!buyerReadReason && buyerProjection.keysByCommissionId
         ? { buyerKeysByCommissionId: buyerProjection.keysByCommissionId } : {}),

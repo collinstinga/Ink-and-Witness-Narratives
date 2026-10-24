@@ -2,11 +2,12 @@ import crypto from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type FakeRef = { collectionName: string; id: string; key: string };
-type FakeQuery = { kind: 'query'; collectionName: string; field: string; value: unknown; limitCount: number };
+type FakeQuery = { kind: 'query'; collectionName: string; filters: Array<[string, string, unknown]>; limitCount: number };
 type IncrementSentinel = { __operation: 'increment'; amount: number };
 
 const firestoreMock = vi.hoisted(() => {
   const documents = new Map<string, any>();
+  const transactionQueries: FakeQuery[] = [];
   let queue: Promise<void> = Promise.resolve();
   let failNextCommit = false;
 
@@ -23,12 +24,15 @@ const firestoreMock = vi.hoisted(() => {
       .filter(([key]) => key.startsWith(`${collectionName}/`)).slice(0, limitCount)
       .map(([key, value]) => ({ id: key.slice(collectionName.length + 1), data: () => clone(value) })),
   }));
+  const filteredQuery = (collectionName: string, filters: Array<[string, string, unknown]> = [], limitCount = Infinity): any => ({
+    kind: 'query', collectionName, filters, limitCount,
+    where: (field: string, operator: string, value: unknown) => filteredQuery(collectionName, [...filters, [field, operator, value]], limitCount),
+    limit: (count: number) => filteredQuery(collectionName, filters, count),
+  });
   const collection = (collectionName: string) => ({
     doc: (id: string): FakeRef => makeRef(collectionName, id),
     limit: (count: number) => ({ get: () => queryRead(collectionName, count) }),
-    where: (field: string, _operator: string, value: unknown) => ({
-      limit: (limitCount: number): FakeQuery => ({ kind: 'query', collectionName, field, value, limitCount })
-    })
+    where: (field: string, operator: string, value: unknown) => filteredQuery(collectionName, [[field, operator, value]])
   });
   const runTransaction = vi.fn(async (operation: (transaction: any) => Promise<any>) => {
     let release!: () => void;
@@ -43,11 +47,18 @@ const firestoreMock = vi.hoisted(() => {
       > = [];
       const result = await operation({
         get: async (ref: FakeRef | FakeQuery) => {
+          if (writes.length) throw new Error('Transaction read after write');
           if ('kind' in ref) {
+            transactionQueries.push(ref);
             const prefix = `${ref.collectionName}/`;
             return {
               docs: Array.from(documents.entries())
-                .filter(([key, value]) => key.startsWith(prefix) && value?.[ref.field] === ref.value)
+                .filter(([key, value]) => key.startsWith(prefix) && ref.filters.every(([field, operator, expected]) => {
+                  if (operator === '==') return value?.[field] === expected;
+                  if (operator === '>=') return value?.[field] >= (expected as string);
+                  if (operator === '<') return value?.[field] < (expected as string);
+                  throw new Error('Unexpected query operator');
+                }))
                 .slice(0, ref.limitCount)
                 .map(([key, value]) => {
                   const documentRef = makeRef(ref.collectionName, key.slice(prefix.length));
@@ -101,11 +112,13 @@ const firestoreMock = vi.hoisted(() => {
 
   return {
     documents,
+    transactionQueries,
     db: { collection, runTransaction },
     runTransaction,
     queryRead,
     reset() {
       documents.clear();
+      transactionQueries.length = 0;
       queue = Promise.resolve();
       failNextCommit = false;
       runTransaction.mockClear();
@@ -382,8 +395,10 @@ describe('affiliate commission durability', () => {
   }
 
   function tierSale(index: number) {
-    return { ...confirmedAffiliateTransaction(), campaignCode: undefined,
+    const transaction = { ...confirmedAffiliateTransaction(), campaignCode: undefined,
       checkoutRequestId: `checkout_tier_${index}`, id: `tx_tier_${index}`, mpesaReceiptNumber: `TIER-${index}` };
+    firestoreMock.documents.set(`transactions/${transaction.checkoutRequestId}`, structuredClone(transaction));
+    return transaction;
   }
 
   it('atomically snapshots a real automatic threshold crossing exactly once across concurrent sales and retries', async () => {
@@ -408,9 +423,10 @@ describe('affiliate commission durability', () => {
   it('leaves no transition or financial increments after a failed commit and safely retries', async () => {
     await automaticTierPolicy();
     await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
+    const nextSale = tierSale(2);
     const before = structuredClone([...firestoreMock.documents]);
     firestoreMock.failCommit();
-    await expect(affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode)).rejects.toThrow('injected commission commit failure');
+    await expect(affiliateStore.recordAffiliateSale(nextSale, affiliate.affiliateCode)).rejects.toThrow('injected commission commit failure');
     expect([...firestoreMock.documents]).toEqual(before);
     expect((await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode))?.literaryCircleTierTransition?.threshold).toBe(2);
   });
@@ -420,8 +436,63 @@ describe('affiliate commission durability', () => {
     const first = await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
     const second = await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode);
     expect(second?.literaryCircleTierTransition).toBeDefined();
-    firestoreMock.documents.get(`affiliate_commissions/${first!.id}`).status = 'REVERSED';
+    await affiliateStore.updateCommissionStatus(first!.id, 'REVERSED', 'Writer', 'Confirmed refund');
     expect((await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode))?.literaryCircleTierTransition).toBeUndefined();
+  });
+
+  it('initializes qualification from this Nairobi month only and stops querying commission history after bootstrap', async () => {
+    await automaticTierPolicy();
+    for (let index = 0; index < 500; index++) {
+      firestoreMock.documents.set(`affiliate_commissions/legacy_old_${index}`, {
+        id: `legacy_old_${index}`, affiliateId: affiliate.id, createdAt: '2026-08-20T08:00:00.000Z', status: 'APPROVED',
+        commissionAmountKes: 75, saleAmountKes: 500,
+      });
+    }
+    const priorRecords = structuredClone([...firestoreMock.documents].filter(([key]) => key.startsWith('affiliate_commissions/')));
+    const first = await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
+    expect(first?.commissionRate).toBe(15);
+    expect(firestoreMock.transactionQueries.filter(query => query.collectionName === 'affiliate_commissions')).toHaveLength(1);
+    expect(firestoreMock.transactionQueries.find(query => query.collectionName === 'affiliate_commissions')?.filters).toEqual([
+      ['affiliateId', '==', affiliate.id], ['createdAt', '>=', '2026-08-31T21:00:00.000Z'], ['createdAt', '<', '2026-09-30T21:00:00.000Z'],
+    ]);
+    const second = await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode);
+    expect(second?.commissionRate).toBe(20);
+    expect(firestoreMock.transactionQueries.filter(query => query.collectionName === 'affiliate_commissions')).toHaveLength(1);
+    for (const [key, value] of priorRecords) expect(firestoreMock.documents.get(key)).toEqual(value);
+    const periods = [...firestoreMock.documents].filter(([key]) => key.startsWith('affiliate_tier_periods/'));
+    expect(periods).toHaveLength(1); expect(periods[0][1].members).toHaveLength(2);
+  });
+
+  it('does not generate a tier-priced commission from missing durable payment evidence', async () => {
+    await automaticTierPolicy();
+    const transaction = tierSale(1);
+    firestoreMock.documents.delete(`transactions/${transaction.checkoutRequestId}`);
+    const before = structuredClone([...firestoreMock.documents]);
+    await expect(affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode)).rejects.toThrow(/qualification evidence needs writer review/);
+    expect([...firestoreMock.documents]).toEqual(before);
+  });
+
+  it('never silently underprices when the bounded month bootstrap is incomplete', async () => {
+    await automaticTierPolicy();
+    for (let index = 0; index < 401; index++) firestoreMock.documents.set(`affiliate_commissions/legacy_month_${index}`, {
+      id: `legacy_month_${index}`, affiliateId: affiliate.id, createdAt: now, status: 'APPROVED',
+    });
+    const transaction = tierSale(1);
+    const before = structuredClone([...firestoreMock.documents]);
+    await expect(affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode)).rejects.toThrow(/qualification evidence needs writer review/);
+    expect([...firestoreMock.documents]).toEqual(before);
+  });
+
+  it('does not qualify a commissioned tip as a verified purchase toward monthly tiers', async () => {
+    await automaticTierPolicy();
+    firestoreMock.documents.get('site_configs/affiliate_settings').allowTipsCommission = true;
+    const transaction = { ...tierSale(1), type: 'TIP' as const };
+    firestoreMock.documents.set(`transactions/${transaction.checkoutRequestId}`, transaction);
+    expect((await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode))?.commissionRate).toBe(15);
+    const firstPurchase = await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode);
+    expect(firstPurchase?.commissionRate).toBe(15);
+    expect(firstPurchase?.literaryCircleTierTransition).toBeUndefined();
+    expect((await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode))?.commissionRate).toBe(20);
   });
 
   it('creates one deterministic commission and increments affiliate and campaign totals once across concurrent retries', async () => {

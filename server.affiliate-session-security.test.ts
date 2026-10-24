@@ -2,6 +2,7 @@ import http, { Server } from 'http';
 import { AddressInfo } from 'net';
 import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AffiliateFinancialReadError } from './src/server/affiliateFinancialRead.js';
 
 vi.hoisted(() => {
   process.env.VERCEL = '1';
@@ -127,7 +128,9 @@ const affiliateMocks = vi.hoisted(() => ({
   getAffiliateById: vi.fn(),
   getAffiliateByIdFresh: vi.fn(),
   getCommissions: vi.fn(),
+  getCommissionsFresh: vi.fn(),
   getPayouts: vi.fn(),
+  getPayoutsFresh: vi.fn(),
   processPayout: vi.fn(),
   updateCommissionStatus: vi.fn(),
   getCampaigns: vi.fn(),
@@ -135,12 +138,15 @@ const affiliateMocks = vi.hoisted(() => ({
   getAuditLogs: vi.fn(),
   getAuditLogsFresh: vi.fn(),
   getAdminAffiliateAnalytics: vi.fn(),
+  getAdminAffiliateAnalyticsFresh: vi.fn(),
+  getAdminAffiliatesSummaryFresh: vi.fn(),
   createAffiliate: vi.fn(),
   updateAffiliate: vi.fn(),
   updateAffiliateCredential: vi.fn(),
   setAffiliateStatus: vi.fn(),
   toggleAffiliateLinks: vi.fn(),
   getAffiliateDashboard: vi.fn(),
+  getAffiliateDashboardFresh: vi.fn(),
   getSettings: vi.fn(),
   getSettingsFresh: vi.fn(),
   saveSettings: vi.fn(),
@@ -331,6 +337,10 @@ describe('affiliate session route boundaries', () => {
     affiliateMocks.getAffiliateByIdFresh.mockResolvedValue({ ...privateAffiliate });
     affiliateMocks.getCommissions.mockReturnValue([]);
     affiliateMocks.getPayouts.mockReturnValue([]);
+    affiliateMocks.getCommissionsFresh.mockImplementation(async (...args) => affiliateMocks.getCommissions(...args));
+    affiliateMocks.getPayoutsFresh.mockImplementation(async (...args) => affiliateMocks.getPayouts(...args));
+    affiliateMocks.getAdminAffiliateAnalyticsFresh.mockImplementation(async (...args) => affiliateMocks.getAdminAffiliateAnalytics(...args));
+    affiliateMocks.getAdminAffiliatesSummaryFresh.mockResolvedValue({ affiliates: [], recentSales: [], payouts: [] });
     affiliateMocks.getCampaigns.mockReturnValue([]);
     affiliateMocks.getCampaignsFresh.mockResolvedValue([]);
     affiliateMocks.getAuditLogs.mockReturnValue([]);
@@ -378,6 +388,10 @@ describe('affiliate session route boundaries', () => {
         phone: privateAffiliate.phone,
         status: privateAffiliate.status
       }
+    });
+    affiliateMocks.getAffiliateDashboardFresh.mockImplementation(async (...args) => {
+      const dashboard = affiliateMocks.getAffiliateDashboard(...args);
+      return dashboard ? { sales: [], payouts: [], minPayoutThresholdKes: 1000, ...dashboard } : dashboard;
     });
     affiliateMocks.getSettings.mockReturnValue({
       allowSelfRegistration: true,
@@ -1062,7 +1076,7 @@ describe('affiliate session route boundaries', () => {
       headers: { cookie: `iw_session=${adminSessionToken}` }
     });
     expect(detailResponse.status).toBe(200);
-    expect(affiliateMocks.getAffiliateById).toHaveBeenCalledWith(privateAffiliate.id);
+    expect(affiliateMocks.getAffiliateDashboardFresh).toHaveBeenCalledWith(privateAffiliate.id);
   });
 
   it('keeps aggregate affiliate analytics writer-only, no-store, and query allow-listed', async () => {
@@ -1282,6 +1296,38 @@ describe('affiliate session route boundaries', () => {
     });
     expect(affiliateMocks.verifyAffiliateSession).toHaveBeenCalledWith(expect.any(String), { forceFresh: true });
     expect(JSON.stringify(body)).not.toContain(publicArticleFixture.content);
+  });
+
+  it('uses current scoped financial dashboard values rather than the session/startup balance', async () => {
+    affiliateMocks.getAffiliateDashboardFresh.mockResolvedValueOnce({
+      affiliate: { ...privateAffiliate, balanceAvailableKes: 325, walletRevision: 4 },
+      sales: [], payouts: [], availableBalanceKes: 325, minPayoutThresholdKes: 250,
+    });
+    const response = await fetch(`${baseUrl}/api/affiliate/dashboard`, { headers: { cookie: validCookie } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ availableBalanceKes: 325,
+      payoutSettings: { minimumPayout: 250 }, affiliate: { walletRevision: 4 } });
+    expect(affiliateMocks.getAffiliateDashboardFresh).toHaveBeenCalledWith(privateAffiliate.id);
+  });
+
+  it('does not return a cached financial dashboard when authoritative reads fail', async () => {
+    affiliateMocks.getAffiliateDashboardFresh.mockRejectedValueOnce(new AffiliateFinancialReadError());
+    const response = await fetch(`${baseUrl}/api/affiliate/dashboard`, { headers: { cookie: validCookie } });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ success: false, error: expect.stringContaining('no cached balances') });
+    expect(affiliateMocks.getAffiliateDashboard).not.toHaveBeenCalled();
+  });
+
+  it('loads writer financial summary through the fresh bounded view and reports overflow as unavailable', async () => {
+    const currentSummary = { affiliates: [], totalAffiliateSales: 3, totalCommissionsKes: 225 };
+    affiliateMocks.getAdminAffiliatesSummaryFresh.mockResolvedValueOnce(currentSummary);
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/summary`, { headers: { cookie: `iw_session=${adminSessionToken}` } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(currentSummary);
+    affiliateMocks.getAdminAffiliatesSummaryFresh.mockRejectedValueOnce(new AffiliateFinancialReadError('Partial totals were not displayed.'));
+    const unavailable = await fetch(`${baseUrl}/api/admin/affiliates/summary`, { headers: { cookie: `iw_session=${adminSessionToken}` } });
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({ error: 'Partial totals were not displayed.' });
   });
 
   it('never releases private community content through the cached dashboard payload', async () => {

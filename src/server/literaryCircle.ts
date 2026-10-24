@@ -12,6 +12,14 @@ import type {
   LiteraryCircleSettings,
   LiteraryCircleTierDefinition
 } from '../types.js';
+import {
+  LITERARY_CIRCLE_ONBOARDING_STEP_IDS,
+  DEFAULT_LITERARY_CIRCLE_ONBOARDING_CONTENT,
+  LiteraryCircleOnboardingValidationError,
+  normalizeLiteraryCircleOnboardingContent,
+  projectLiteraryCircleOnboardingContent,
+  validateLiteraryCircleOnboardingContent
+} from '../utils/literaryCircleOnboarding.js';
 
 const SAFE_TIER_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const MAX_TIERS = 12;
@@ -31,16 +39,7 @@ const COMMUNITY_POST_TYPES = new Set<LiteraryCircleCommunityPostType>([
 
 export const LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID = 'affiliate_literary_circle';
 export const LITERARY_CIRCLE_SCHEMA_VERSION = 1 as const;
-export const LITERARY_CIRCLE_ONBOARDING_STEPS = [
-  'welcome',
-  'complimentary_access',
-  'commissions',
-  'referral_links',
-  'recommended_reads',
-  'first_link',
-  'promotional_resources',
-  'community_invitation'
-] as const;
+export const LITERARY_CIRCLE_ONBOARDING_STEPS = LITERARY_CIRCLE_ONBOARDING_STEP_IDS;
 
 export const DEFAULT_LITERARY_CIRCLE_SETTINGS: LiteraryCircleSettings = {
   schemaVersion: LITERARY_CIRCLE_SCHEMA_VERSION,
@@ -50,6 +49,7 @@ export const DEFAULT_LITERARY_CIRCLE_SETTINGS: LiteraryCircleSettings = {
   qualificationTimezone: 'Africa/Nairobi',
   introductoryPeriodDays: 30,
   onboardingVersion: 1,
+  onboardingContent: DEFAULT_LITERARY_CIRCLE_ONBOARDING_CONTENT,
   tiers: [
     {
       id: 'literary-partner',
@@ -324,6 +324,7 @@ export function normalizeLiteraryCircleSettings(value: unknown): LiteraryCircleS
       1,
       1_000_000
     ),
+    onboardingContent: normalizeLiteraryCircleOnboardingContent(settings.onboardingContent),
     tiers: uniqueTiers,
     commissionPolicy: {
       status: policy.status === 'active' ? 'active' : 'draft',
@@ -463,6 +464,14 @@ export function validateLiteraryCircleSettings(value: unknown): LiteraryCircleSe
     throw new LiteraryCircleValidationError('Literary Circle settings must be an object.');
   }
   const candidate = value as Partial<LiteraryCircleSettings>;
+  if (Object.prototype.hasOwnProperty.call(candidate, 'onboardingContent')) {
+    try {
+      validateLiteraryCircleOnboardingContent(candidate.onboardingContent);
+    } catch (error) {
+      if (error instanceof LiteraryCircleOnboardingValidationError) throw new LiteraryCircleValidationError(error.message);
+      throw error;
+    }
+  }
   if (!Array.isArray(candidate.tiers) || candidate.tiers.length < 1 || candidate.tiers.length > MAX_TIERS) {
     throw new LiteraryCircleValidationError(`Configure between 1 and ${MAX_TIERS} Literary Circle tiers.`);
   }
@@ -855,6 +864,7 @@ export function buildLiteraryCircleDashboardSummary(options: {
   commissions: AffiliateSaleCommission[];
   settings: LiteraryCircleSettings;
   now?: string;
+  publishedPieceIds?: readonly string[];
 }): LiteraryCircleDashboardSummary {
   const settings = normalizeLiteraryCircleSettings(options.settings);
   const now = safeOptionalIso(options.now) || new Date().toISOString();
@@ -912,6 +922,9 @@ export function buildLiteraryCircleDashboardSummary(options: {
     progressToNextTierPercent,
     salesToNextTier,
     onboarding: membership.onboarding,
+    ...(settings.enabled ? {
+      onboardingContent: projectLiteraryCircleOnboardingContent(settings.onboardingContent, options.publishedPieceIds)
+    } : {}),
     introductoryPeriodActive: Number.isFinite(introEnd) && Date.parse(now) <= introEnd,
     commissionPolicyStatus: settings.commissionPolicy.status,
     community: projectLiteraryCircleCommunityForAffiliate(settings, now),

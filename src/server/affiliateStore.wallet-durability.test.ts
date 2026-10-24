@@ -293,11 +293,11 @@ describe('atomic affiliate wallet and payout preservation', () => {
     mock.documents.set('site_configs/affiliate_settings', { minPayoutThresholdKes: 800 });
     await expect(affiliateStore.requestPayout(account.id, 750)).rejects.toThrow(/configured minimum.*800/i);
     await expect(affiliateStore.requestPayout(account.id, 1_600)).rejects.toThrow(/available balance.*1,500/i);
-    expect(() => affiliateStore.updateAffiliate(account.id, { balanceAvailableKes: 50_000 })).toThrow(/cannot be changed through profile/i);
-    affiliateStore.updateAffiliate(account.id, { name: 'Renamed Partner' });
+    await expect(affiliateStore.updateAffiliate(account.id, { balanceAvailableKes: 50_000 })).rejects.toThrow(/cannot be changed through profile/i);
+    await affiliateStore.updateAffiliate(account.id, { name: 'Renamed Partner' });
     expect(durableAccount()).toMatchObject({ name: 'Renamed Partner', balanceAvailableKes: 1_500 });
-    const profileWrite = mock.setDoc.mock.calls.find(call => call[0] === 'affiliates' && call[1] === account.id);
-    expect(profileWrite?.[2]).toEqual({ name: 'Renamed Partner', updatedAt: expect.any(String) });
+    expect(affiliateStore.getAffiliateById(account.id)).toMatchObject({ name: 'Renamed Partner', balanceAvailableKes: 1_500 });
+    expect(mock.setDoc.mock.calls.some(call => call[0] === 'affiliates' && call[1] === account.id)).toBe(false);
   });
 
   it('keeps the maximum reviewed allocation below the transaction write limit', async () => {

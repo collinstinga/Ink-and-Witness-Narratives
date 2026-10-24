@@ -15,7 +15,12 @@ import {
 import type {
   AffiliateLiteraryCircleMembership,
   LiteraryCircleOnboardingStatus,
+  LiteraryCircleOnboardingContent,
 } from '../../types.js';
+import {
+  DEFAULT_LITERARY_CIRCLE_ONBOARDING_STEPS,
+  normalizeLiteraryCircleOnboardingContent
+} from '../../utils/literaryCircleOnboarding.js';
 import { getSafeCommunityInviteUrl } from './LiteraryCircleMembershipOverview.js';
 
 export interface LiteraryCircleOnboardingUpdate {
@@ -32,6 +37,7 @@ interface LiteraryCircleOnboardingPanelProps {
   onboarding: AffiliateLiteraryCircleMembership['onboarding'];
   affiliateCode: string;
   recommendedPieces: RecommendedPiece[];
+  content?: LiteraryCircleOnboardingContent;
   community?: {
     enabled: boolean;
     title: string;
@@ -43,53 +49,13 @@ interface LiteraryCircleOnboardingPanelProps {
   onOpenPromotionalResources?: () => void;
 }
 
-export const LITERARY_CIRCLE_ONBOARDING_STEPS = [
-  {
-    id: 'welcome',
-    title: 'Welcome to the Circle',
-    description: 'Meet your upgraded partnership space and the privileges attached to your membership.',
-  },
-  {
-    id: 'complimentary_access',
-    title: 'Unlock your reading',
-    description: 'Every published piece and chapter is available to read while your complimentary access is active.',
-  },
-  {
-    id: 'commissions',
-    title: 'Understand earnings',
-    description: 'Eligible commissions begin with verified purchases. Draft tier rates do not replace an existing arrangement until activated.',
-  },
-  {
-    id: 'referral_links',
-    title: 'Know your referral link',
-    description: 'Your existing affiliate identity remains yours, including the link and history already attached to it.',
-  },
-  {
-    id: 'recommended_reads',
-    title: 'Choose three pieces',
-    description: 'Start with a short reading list so your first recommendations come from genuine experience.',
-  },
-  {
-    id: 'first_link',
-    title: 'Create your first share',
-    description: 'Build a link to the homepage, a piece, collection, bundle, or Reader Pass, then share it with the readers you know best.',
-  },
-  {
-    id: 'promotional_resources',
-    title: 'Use campaign resources',
-    description: 'Pair your links with writer-approved campaign material, captions, covers, and release guidance.',
-  },
-  {
-    id: 'community_invitation',
-    title: 'Join the private community',
-    description: 'Receive writer announcements and campaign direction; joining any external group is always your choice.',
-  },
-] as const;
+export const LITERARY_CIRCLE_ONBOARDING_STEPS = DEFAULT_LITERARY_CIRCLE_ONBOARDING_STEPS;
 
 export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPanelProps> = ({
   onboarding,
   affiliateCode,
   recommendedPieces,
+  content,
   community,
   onUpdate,
   onOpenCatalogue,
@@ -98,15 +64,17 @@ export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPan
 }) => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const displayContent = useMemo(() => normalizeLiteraryCircleOnboardingContent(content), [content]);
+  const steps = displayContent.steps;
   const completedIds = useMemo(() => new Set(onboarding.completedStepIds), [onboarding.completedStepIds]);
-  const firstIncompleteIndex = LITERARY_CIRCLE_ONBOARDING_STEPS.findIndex(step => !completedIds.has(step.id));
+  const firstIncompleteIndex = steps.findIndex(step => !completedIds.has(step.id));
   const currentIndex = firstIncompleteIndex === -1
-    ? LITERARY_CIRCLE_ONBOARDING_STEPS.length - 1
+    ? steps.length - 1
     : firstIncompleteIndex;
-  const currentStep = LITERARY_CIRCLE_ONBOARDING_STEPS[currentIndex];
-  const completedCount = LITERARY_CIRCLE_ONBOARDING_STEPS.filter(step => completedIds.has(step.id)).length;
-  const visibleStepNumber = Math.min(completedCount + 1, LITERARY_CIRCLE_ONBOARDING_STEPS.length);
-  const isLastStep = currentIndex === LITERARY_CIRCLE_ONBOARDING_STEPS.length - 1;
+  const currentStep = steps[currentIndex];
+  const completedCount = steps.filter(step => completedIds.has(step.id)).length;
+  const visibleStepNumber = Math.min(completedCount + 1, steps.length);
+  const isLastStep = currentIndex === steps.length - 1;
   const safeCommunityInviteUrl = community?.enabled
     ? getSafeCommunityInviteUrl(community.whatsappInviteUrl)
     : null;
@@ -144,15 +112,15 @@ export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPan
           </div>
           <div>
             <p className="font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-cyan-300">
-              One-time guided welcome · {visibleStepNumber} of {LITERARY_CIRCLE_ONBOARDING_STEPS.length}
+              One-time guided welcome · {visibleStepNumber} of {steps.length}
             </p>
             <h2 id="literary-circle-onboarding-heading" className="mt-1 font-serif text-xl font-bold text-white">
-              {upgradeWelcome ? 'Your Literary Circle upgrade is ready' : 'Welcome to the Literary Circle'}
+              {upgradeWelcome ? displayContent.upgradeTitle : displayContent.welcomeTitle}
             </h2>
             <p className="mt-1 text-xs leading-relaxed text-slate-400">
-              {upgradeWelcome
+              {displayContent.description || (upgradeWelcome
                 ? 'Your account, referral identity, sales history, commissions, and wallet remain intact.'
-                : 'Take a quick tour, choose your first reads, and prepare your first authentic recommendation.'}
+                : 'Take a quick tour, choose your first reads, and prepare your first authentic recommendation.')}
             </p>
           </div>
         </div>
@@ -169,7 +137,7 @@ export const LiteraryCircleOnboardingPanel: React.FC<LiteraryCircleOnboardingPan
       </div>
 
       <ol aria-label="Literary Circle onboarding steps" className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {LITERARY_CIRCLE_ONBOARDING_STEPS.map((step, index) => {
+        {steps.map((step, index) => {
           const complete = completedIds.has(step.id);
           const current = step.id === currentStep.id;
           return (

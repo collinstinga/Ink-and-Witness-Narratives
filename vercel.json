@@ -1,5 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": {
+      "feature/literary-circle-upgrade": false
+    }
+  },
   "regions": ["cpt1"],
   "headers": [
     {

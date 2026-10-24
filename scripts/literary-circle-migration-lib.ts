@@ -4,7 +4,7 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 7 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 8 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = [
@@ -104,6 +104,13 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
       commissionAmountKes: ['commissionAmountKes'],
       grossCreatorRevenueKes: ['grossCreatorRevenueKes']
     }
+  },
+  {
+    key: 'affiliate_tier_periods',
+    collection: 'affiliate_tier_periods',
+    fileName: 'affiliate_tier_periods.json',
+    scope: 'all_documents',
+    sumFields: EMPTY_SUM_FIELDS
   },
   {
     key: 'affiliate_clicks',

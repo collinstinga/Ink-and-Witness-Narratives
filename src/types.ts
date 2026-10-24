@@ -1447,6 +1447,18 @@ export interface AffiliateLiteraryCircleMembership {
   };
 }
 
+export type LiteraryCircleOnboardingStepId = 'welcome' | 'complimentary_access' | 'commissions' | 'referral_links'
+  | 'recommended_reads' | 'first_link' | 'promotional_resources' | 'community_invitation';
+
+export interface LiteraryCircleOnboardingContent {
+  welcomeTitle: string;
+  upgradeTitle: string;
+  /** Empty uses the original audience-specific introductory message. */
+  description: string;
+  steps: Array<{ id: LiteraryCircleOnboardingStepId; title: string; description: string }>;
+  recommendedPieceIds: string[];
+}
+
 export interface LiteraryCircleSettings {
   schemaVersion: 1;
   /** Monotonic server-managed revision used to reject stale full-document saves. */
@@ -1457,6 +1469,8 @@ export interface LiteraryCircleSettings {
   qualificationEffectiveFrom?: string;
   introductoryPeriodDays: number;
   onboardingVersion: number;
+  /** Copy and curation only; never changes existing progress or membership. */
+  onboardingContent?: LiteraryCircleOnboardingContent;
   tiers: LiteraryCircleTierDefinition[];
   commissionPolicy: {
     status: LiteraryCircleCommissionPolicyStatus;
@@ -1782,6 +1796,8 @@ export interface LiteraryCircleDashboardSummary {
   progressToNextTierPercent: number;
   salesToNextTier: number;
   onboarding: AffiliateLiteraryCircleMembership['onboarding'];
+  /** Authenticated projection; recommendation IDs are limited to published pieces. */
+  onboardingContent?: LiteraryCircleOnboardingContent;
   introductoryPeriodActive: boolean;
   commissionPolicyStatus: LiteraryCircleCommissionPolicyStatus;
   community: LiteraryCircleSettings['community'];

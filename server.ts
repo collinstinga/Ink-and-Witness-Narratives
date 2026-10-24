@@ -57,7 +57,8 @@ import {
   sanitizeAffiliateForResponse,
   type AffiliateClickLedgerMode,
 } from "./src/server/affiliateStore.js";
-import { AffiliateAnalyticsValidationError } from "./src/server/affiliateAnalytics.js";
+import { AffiliateAnalyticsValidationError, verifiedCanonicalAffiliateCommissions } from "./src/server/affiliateAnalytics.js";
+import { AffiliateFinancialReadError } from "./src/server/affiliateFinancialRead.js";
 import { parseAffiliateAnalyticsQuery } from "./src/server/affiliateAnalyticsRequest.js";
 import {
   isAffiliateComplimentaryAccessActive,
@@ -519,6 +520,14 @@ function projectAffiliateDashboard(
       }
     } : {})
   };
+}
+
+function publishedLiteraryCircleOnboardingPieceIds(): string[] {
+  const now = Date.now();
+  return store.getArticles(false)
+    .filter(article => article.status === 'published'
+      && (!article.publishedAt || !Number.isFinite(Date.parse(article.publishedAt)) || Date.parse(article.publishedAt) <= now))
+    .map(article => article.id);
 }
 
 function publicCoverUrl(article: Article): string | undefined {
@@ -6319,19 +6328,19 @@ ${currentDraft || prompt}
   });
 
   // Affiliate: Accept Terms & Conditions (For existing affiliates)
-  app.post("/api/affiliate/accept-terms", requireAffiliateAuth, (req: Request, res: Response) => {
+  app.post("/api/affiliate/accept-terms", requireAffiliateAuth, async (req: Request, res: Response) => {
     try {
       const affiliate = (req as any).affiliate;
       const { termsVersion } = req.body;
       const now = new Date().toISOString();
 
-      const updated = store.affiliates.updateAffiliate(affiliate.id, {
+      const updated = await store.affiliates.updateAffiliate(affiliate.id, {
         acceptedTerms: true,
         termsVersion: termsVersion || '2026.1',
         termsAcceptedAt: now
       }, `Affiliate (${affiliate.name})`);
 
-      const dashboard = store.affiliates.getAffiliateDashboard(updated.id);
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(updated.id);
       res.json({
         success: true,
         message: "Terms & Conditions accepted successfully. Your dashboard is now fully unlocked.",
@@ -6339,7 +6348,7 @@ ${currentDraft || prompt}
         dashboard: projectAffiliateDashboard(dashboard)
       });
     } catch (err: any) {
-      res.status(400).json({ success: false, error: err.message || "Failed to record Terms acceptance." });
+      res.status(err?.statusCode === 503 ? 503 : 400).json({ success: false, error: err.message || "Failed to record Terms acceptance." });
     }
   });
 
@@ -6382,7 +6391,13 @@ ${currentDraft || prompt}
       }
 
       // Update last login timestamp
-      aff = store.affiliates.updateAffiliate(aff.id, { lastLoginAt: new Date().toISOString() }, 'System');
+      const verifiedCredential = { passwordHash: aff.passwordHash, sessionVersion: aff.sessionVersion };
+      aff = await store.affiliates.updateAffiliate(aff.id, { lastLoginAt: new Date().toISOString() }, 'System');
+      if (aff.status !== 'active' || aff.passwordHash !== verifiedCredential.passwordHash
+        || aff.sessionVersion !== verifiedCredential.sessionVersion) {
+        return res.status(401).json({ success: false, code: 'CREDENTIALS_CHANGED',
+          error: 'Your account changed while signing in. Please sign in again with the current password.' });
+      }
 
       let token: string;
       try {
@@ -6395,16 +6410,15 @@ ${currentDraft || prompt}
         });
       }
       setAffiliateSessionCookie(res, token);
-      const dashboard = store.affiliates.getAffiliateDashboard(aff.id);
 
       res.json({
         success: true,
-        affiliate: dashboard?.affiliate,
+        affiliate: sanitizeAffiliateForResponse(aff),
         message: `Welcome back, ${aff.name}!`
       });
     } catch (err: any) {
       console.error("Affiliate login error:", err);
-      res.status(500).json({ success: false, error: err.message || "Failed to authenticate affiliate." });
+      res.status(err?.statusCode === 503 ? 503 : 500).json({ success: false, error: err.message || "Failed to authenticate affiliate." });
     }
   });
 
@@ -6425,8 +6439,8 @@ ${currentDraft || prompt}
   });
 
   // Helper for generating safe payout settings
-  const formatSafePayoutSettings = (affiliate: any) => {
-    const settings = store.affiliates.getSettings();
+  const formatSafePayoutSettings = (affiliate: any, minimumPayout?: number) => {
+    const minimum = minimumPayout ?? store.affiliates.getSettings().minPayoutThresholdKes;
     const method = affiliate.payoutMethod || 'mpesa';
     let accountName = '';
     let accountNumberMasked = '';
@@ -6449,7 +6463,7 @@ ${currentDraft || prompt}
       method,
       accountName,
       accountNumberMasked,
-      minimumPayout: settings.minPayoutThresholdKes || 1000,
+      minimumPayout: minimum || 1000,
       automaticPayoutsEnabled: true,
       payoutSchedule: "weekly",
       status: affiliate.status || "active"
@@ -6458,6 +6472,7 @@ ${currentDraft || prompt}
 
   // Affiliate: Get My Dashboard / Overview (Supports /me, /dashboard, /stats, /overview)
   const handleGetAffiliateDashboard = async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       try {
         await store.drainAffiliateCommissionOutbox(25);
@@ -6465,7 +6480,7 @@ ${currentDraft || prompt}
         console.warn('[Affiliate Commission Outbox] Affiliate-led reconciliation will retry later.');
       }
       const affiliate = (req as any).affiliate;
-      const dashboard = store.affiliates.getAffiliateDashboard(affiliate.id);
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(affiliate.id);
       if (!dashboard) {
         return res.status(404).json({ success: false, error: "Affiliate account not found." });
       }
@@ -6473,11 +6488,11 @@ ${currentDraft || prompt}
       const safeDashboard = projectAffiliateDashboard(dashboard);
       res.json({
         success: true,
-        payoutSettings: formatSafePayoutSettings(affiliate),
+        payoutSettings: formatSafePayoutSettings(dashboard.affiliate, dashboard.minPayoutThresholdKes),
         ...safeDashboard
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch affiliate dashboard." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ success: false, error: err.message || "Failed to fetch affiliate dashboard." });
     }
   };
 
@@ -6503,7 +6518,7 @@ ${currentDraft || prompt}
         },
         `Affiliate (${affiliate.name})`
       );
-      const dashboard = store.affiliates.getAffiliateDashboard(updated.id);
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(updated.id);
       res.setHeader('Cache-Control', 'private, no-store');
       return res.json({
         success: true,
@@ -6533,7 +6548,7 @@ ${currentDraft || prompt}
       try {
         const affiliate = (req as any).affiliate;
         const settings = await store.affiliates.getLiteraryCircleSettingsFresh();
-        const dashboard = store.affiliates.getAffiliateDashboard(affiliate.id);
+        const dashboard = await store.affiliates.getAffiliateDashboardFresh(affiliate.id, publishedLiteraryCircleOnboardingPieceIds());
         if (!dashboard?.literaryCircle) {
           throw new Error('Fresh Literary Circle summary is unavailable.');
         }
@@ -6636,23 +6651,24 @@ ${currentDraft || prompt}
   });
 
   // Affiliate: Payout Settings (GET)
-  const handleGetPayoutSettings = (req: Request, res: Response) => {
+  const handleGetPayoutSettings = async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
-      const affiliate = (req as any).affiliate;
-      const settings = store.affiliates.getSettings();
-      const safeAff = sanitizeAffiliateForResponse(affiliate);
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh((req as any).affiliate.id);
+      if (!dashboard) return res.status(404).json({ success: false, error: 'Affiliate account not found.' });
+      const affiliate = dashboard.affiliate;
 
       res.json({
         success: true,
-        payoutSettings: formatSafePayoutSettings(affiliate),
+        payoutSettings: formatSafePayoutSettings(affiliate, dashboard.minPayoutThresholdKes),
         availableBalance: affiliate.balanceAvailableKes || 0,
-        minThreshold: settings.minPayoutThresholdKes || 1000,
+        minThreshold: dashboard.minPayoutThresholdKes,
         payoutMethod: affiliate.payoutMethod || 'mpesa',
         payoutDetails: affiliate.payoutDetails || {},
-        affiliate: safeAff
+        affiliate
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to load payout settings." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ success: false, error: err.message || "Failed to load payout settings." });
     }
   };
 
@@ -6662,19 +6678,19 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/profile", requireAffiliateAuth, handleGetPayoutSettings);
 
   // Affiliate: Update Payout / Contact Details (POST / PUT on /profile & /payout-settings)
-  const handleUpdateProfile = (req: Request, res: Response) => {
+  const handleUpdateProfile = async (req: Request, res: Response) => {
     try {
       const affiliate = (req as any).affiliate;
       const { name, phone, payoutMethod, payoutDetails } = req.body;
 
-      const updated = store.affiliates.updateAffiliate(affiliate.id, {
+      const updated = await store.affiliates.updateAffiliate(affiliate.id, {
         name: name ? name.trim() : affiliate.name,
         phone: phone ? phone.trim() : affiliate.phone,
         payoutMethod: payoutMethod || affiliate.payoutMethod,
         payoutDetails: payoutDetails || affiliate.payoutDetails
       }, `Affiliate (${affiliate.name})`);
 
-      const dashboard = store.affiliates.getAffiliateDashboard(updated.id);
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(updated.id);
       res.json({
         success: true,
         message: "Profile and payout details updated successfully.",
@@ -6682,7 +6698,7 @@ ${currentDraft || prompt}
         ...(projectAffiliateDashboard(dashboard) || {})
       });
     } catch (err: any) {
-      res.status(400).json({ success: false, error: err.message || "Failed to update affiliate profile." });
+      res.status(err?.statusCode === 503 ? 503 : 400).json({ success: false, error: err.message || "Failed to update affiliate profile." });
     }
   };
 
@@ -6824,6 +6840,7 @@ ${currentDraft || prompt}
 
   // Affiliate: Sales Ledger / Commissions
   const handleGetSales = async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       try {
         await store.drainAffiliateCommissionOutbox(25);
@@ -6831,16 +6848,17 @@ ${currentDraft || prompt}
         console.warn('[Affiliate Commission Outbox] Affiliate-led reconciliation will retry later.');
       }
       const affiliate = (req as any).affiliate;
-      const sales = store.affiliates.getCommissions({ affiliateId: affiliate.id });
+      const sales = await store.affiliates.getCommissionsFresh({ affiliateId: affiliate.id });
       const safeSales = sales.map(toAffiliateSaleCommission);
       res.json({
         success: true,
         sales: safeSales,
         commissions: safeSales,
-        totalSalesCount: safeSales.length
+        totalSalesCount: verifiedCanonicalAffiliateCommissions(safeSales).length,
+        ledgerRecordCount: safeSales.length
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch sales ledger." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ success: false, error: err.message || "Failed to fetch sales ledger." });
     }
   };
 
@@ -6849,22 +6867,24 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/ledger", requireAffiliateAuth, handleGetSales);
 
   // Affiliate: Payouts List / Balance
-  const handleGetPayouts = (req: Request, res: Response) => {
+  const handleGetPayouts = async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       const affiliate = (req as any).affiliate;
-      const payouts = store.affiliates.getPayouts({ affiliateId: affiliate.id });
-      const settings = store.affiliates.getSettings();
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(affiliate.id);
+      if (!dashboard) return res.status(404).json({ success: false, error: 'Affiliate account not found.' });
+      const currentAffiliate = dashboard.affiliate;
 
       res.json({
         success: true,
-        availableBalanceKes: affiliate.balanceAvailableKes || 0,
-        pendingBalanceKes: affiliate.balancePendingKes || 0,
-        paidBalanceKes: affiliate.totalCommissionPaidKes || 0,
-        minThresholdKes: settings.minPayoutThresholdKes || 1000,
-        payouts
+        availableBalanceKes: currentAffiliate.balanceAvailableKes || 0,
+        pendingBalanceKes: currentAffiliate.balancePendingKes || 0,
+        paidBalanceKes: currentAffiliate.totalCommissionPaidKes || 0,
+        minThresholdKes: dashboard.minPayoutThresholdKes,
+        payouts: dashboard.payouts
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch payouts." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ success: false, error: err.message || "Failed to fetch payouts." });
     }
   };
 
@@ -6885,7 +6905,7 @@ ${currentDraft || prompt}
         hasRequestedAmount ? Number(requestedAmt) : undefined,
         notes
       );
-      const dashboard = store.affiliates.getAffiliateDashboard(affiliate.id);
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(affiliate.id);
 
       res.json({
         success: true,
@@ -6906,13 +6926,14 @@ ${currentDraft || prompt}
   // ==========================================
 
   // Admin: Complete Affiliates Overview
-  app.get("/api/admin/affiliates/summary", requireAdminAuth, (_req: Request, res: Response) => {
+  app.get("/api/admin/affiliates/summary", requireAdminAuth, async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
-      const summary = store.affiliates.getAdminAffiliatesSummary();
+      const summary = await store.affiliates.getAdminAffiliatesSummaryFresh();
       res.setHeader('Cache-Control', 'private, no-store');
       res.json(summary);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to fetch admin affiliates summary." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ error: err.message || "Failed to fetch admin affiliates summary." });
     }
   });
 
@@ -6926,10 +6947,14 @@ ${currentDraft || prompt}
       res.setHeader('Cache-Control', 'private, no-store');
       try {
         const options = parseAffiliateAnalyticsQuery(req.query as Record<string, unknown>);
-        res.json(await store.affiliates.getAdminAffiliateAnalytics(options));
+        res.json(await store.affiliates.getAdminAffiliateAnalyticsFresh(options));
       } catch (err) {
         if (err instanceof AffiliateAnalyticsValidationError) {
           res.status(400).json({ error: err.message });
+          return;
+        }
+        if (err instanceof AffiliateFinancialReadError) {
+          res.status(503).json({ error: err.message });
           return;
         }
         console.error('[AffiliateAnalytics] Failed to build writer report:', err);
@@ -7502,7 +7527,7 @@ ${currentDraft || prompt}
       }
 
       let updated = Object.keys(profilePatch).length > 0
-        ? store.affiliates.updateAffiliate(id, profilePatch, 'Admin (Jake)')
+        ? await store.affiliates.updateAffiliate(id, profilePatch, 'Admin (Jake)')
         : existing;
       if (Object.prototype.hasOwnProperty.call(req.body, 'status')) {
         if (req.body.status === 'active' && !hasValidAffiliateWriterApproval(updated)) {
@@ -7522,18 +7547,20 @@ ${currentDraft || prompt}
         message: `Affiliate ${updated.name} updated successfully.`
       });
     } catch (err: any) {
-      res.status(400).json({ error: err.message || "Failed to update affiliate." });
+      res.status(err?.statusCode === 503 ? 503 : 400).json({ error: err.message || "Failed to update affiliate." });
     }
   });
 
-  // Admin: Delete Affiliate
+  // Legacy removal endpoint: reversible suspension preserves identities and financial history.
   app.delete("/api/admin/affiliates/:id", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const success = await store.affiliates.deleteAffiliate(id, 'Admin (Jake)');
-      res.json({ success });
+      if (!success) return res.status(404).json({ success: false, error: 'Affiliate not found.' });
+      res.json({ success: true, archived: true,
+        message: 'Affiliate suspended and referral activity disabled. The account, referral identity, purchases, commissions and payout history were preserved. Reactivate and enable links from the writer controls when needed.' });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to delete affiliate." });
+      res.status(err?.statusCode === 400 ? 400 : 503).json({ error: err.message || "Failed to suspend affiliate safely." });
     }
   });
 
@@ -7606,14 +7633,15 @@ ${currentDraft || prompt}
   });
 
   // Admin: Commissions Ledger
-  app.get("/api/admin/affiliates/commissions", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/affiliates/commissions", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       const affiliateId = req.query.affiliateId as string;
       const status = req.query.status as string;
-      const commissions = store.affiliates.getCommissions({ affiliateId, status });
+      const commissions = await store.affiliates.getCommissionsFresh({ affiliateId, status });
       res.json(commissions);
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch commissions." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ success: false, error: err.message || "Failed to fetch commissions." });
     }
   });
 
@@ -7638,14 +7666,15 @@ ${currentDraft || prompt}
   });
 
   // Admin: Payouts List
-  app.get("/api/admin/affiliates/payouts", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/affiliates/payouts", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       const affiliateId = req.query.affiliateId as string;
       const status = req.query.status as string;
-      const payouts = store.affiliates.getPayouts({ affiliateId, status });
+      const payouts = await store.affiliates.getPayoutsFresh({ affiliateId, status });
       res.json(payouts);
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || "Failed to fetch payouts." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ success: false, error: err.message || "Failed to fetch payouts." });
     }
   });
 
@@ -7762,24 +7791,22 @@ ${currentDraft || prompt}
   // Admin: Get Affiliate by ID. Keep this catch-all single-segment route
   // after every named affiliate endpoint so values such as "campaigns" and
   // "audit-logs" can never be mistaken for affiliate IDs.
-  app.get("/api/admin/affiliates/:id", requireAdminAuth, (req: Request, res: Response) => {
+  app.get("/api/admin/affiliates/:id", requireAdminAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     try {
       const { id } = req.params;
-      const affiliate = store.affiliates.getAffiliateById(id);
-      if (!affiliate) {
+      const dashboard = await store.affiliates.getAffiliateDashboardFresh(id);
+      if (!dashboard) {
         return res.status(404).json({ error: "Affiliate not found." });
       }
 
-      const commissions = store.affiliates.getCommissions({ affiliateId: id });
-      const payouts = store.affiliates.getPayouts({ affiliateId: id });
-
       res.json({
-        affiliate: sanitizeAffiliateForResponse(affiliate),
-        commissions,
-        payouts
+        affiliate: dashboard.affiliate,
+        commissions: dashboard.sales,
+        payouts: dashboard.payouts
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to fetch affiliate details." });
+      res.status(err instanceof AffiliateFinancialReadError ? 503 : 500).json({ error: err.message || "Failed to fetch affiliate details." });
     }
   });
 

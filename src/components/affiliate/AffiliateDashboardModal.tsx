@@ -70,6 +70,7 @@ import {
 } from './LiteraryCircleOnboardingPanel.js';
 import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/affiliateTerms.js';
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
+import { selectLiteraryCircleOnboardingPieces } from '../../utils/literaryCircleOnboarding.js';
 
 const AffiliateNotificationPreferencesPanel = React.lazy(
   () => import('./AffiliateNotificationPreferencesPanel.js'),
@@ -166,6 +167,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
 
   // Real-time sale notification & 1-second coin drop sound
   const previousSalesCountRef = React.useRef<number | null>(null);
+  const dashboardRequestIdRef = useRef(0);
   const knownSaleIdsRef = React.useRef<Set<string>>(new Set());
   const [newSaleAlert, setNewSaleAlert] = useState<{
     show: boolean;
@@ -230,12 +232,14 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   };
 
   const loadDashboard = async (isManualRefresh = false) => {
+    const requestId = ++dashboardRequestIdRef.current;
     if (isManualRefresh) setRefreshing(true);
     else setLoading(true);
     setError('');
 
     try {
       const res = await api.getAffiliateDashboard();
+      if (requestId !== dashboardRequestIdRef.current) return;
       setData(res);
 
       // Detect new sales in real-time and trigger 1-second coin drop notification
@@ -283,14 +287,17 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
         setPayoutAmount(res.availableBalanceKes || 0);
       }
     } catch (err: any) {
+      if (requestId !== dashboardRequestIdRef.current) return;
       if (err.message && err.message.includes('expired')) {
         onLogout();
       } else {
         setError(err.message || 'Failed to load affiliate dashboard');
       }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === dashboardRequestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
@@ -347,12 +354,11 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
 
   useEffect(() => {
     if (isOpen) {
-      loadDashboard();
-      const refreshTimer = setInterval(() => {
-        loadDashboard(true);
-      }, 15000);
-      return () => clearInterval(refreshTimer);
+      // Fresh financial reads are explicit: open, successful actions, or Refresh.
+      // A hidden repeating ledger poll wastes the shared Spark read allowance.
+      void loadDashboard();
     }
+    return () => { dashboardRequestIdRef.current += 1; };
   }, [isOpen]);
 
   useEffect(() => {
@@ -1048,10 +1054,9 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                       />
                       <LiteraryCircleOnboardingPanel
                         onboarding={freshLiteraryCircle.onboarding}
+                        content={freshLiteraryCircle.onboardingContent}
                         affiliateCode={affiliateCode}
-                        recommendedPieces={articles
-                          .filter(article => !article.status || article.status === 'published')
-                          .slice(0, 3)
+                        recommendedPieces={selectLiteraryCircleOnboardingPieces(freshLiteraryCircle.onboardingContent, articles)
                           .map(article => ({ id: article.id, title: article.title }))}
                         community={freshLiteraryCircle.community}
                         onUpdate={handleLiteraryCircleOnboardingUpdate}

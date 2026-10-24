@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "affiliate_commissions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "affiliateId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "comments",
       "queryScope": "COLLECTION",
       "fields": [
@@ -19,6 +27,8 @@
     }
   ],
   "fieldOverrides": [
+    { "collectionGroup": "affiliate_tier_periods", "fieldPath": "members", "indexes": [] },
+    { "collectionGroup": "affiliate_tier_periods", "fieldPath": "awardedMilestones", "indexes": [] },
     {
       "collectionGroup": "comment_submission_locks",
       "fieldPath": "expiresAt",

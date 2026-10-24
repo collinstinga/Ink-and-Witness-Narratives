@@ -13,12 +13,14 @@ import {
 
 import type {
   AffiliatePublicProfile,
+  Article,
   LiteraryCircleAffiliatePerformanceReport,
   LiteraryCircleCommunityPost,
   LiteraryCircleComplimentaryAccessStatus,
   LiteraryCircleSettings,
   LiteraryCircleTierDefinition,
 } from '../../types.js';
+import { LiteraryCircleOnboardingEditor } from './LiteraryCircleOnboardingEditor.js';
 
 export interface LiteraryCircleMembershipAdminPatch {
   complimentaryAccessStatus?: LiteraryCircleComplimentaryAccessStatus;
@@ -30,6 +32,7 @@ export interface LiteraryCircleMembershipAdminPatch {
 interface LiteraryCircleAdminPanelProps {
   settings: LiteraryCircleSettings;
   affiliates: AffiliatePublicProfile[];
+  articles?: Article[];
   performanceReports?: LiteraryCircleAffiliatePerformanceReport[];
   savingSettings: boolean;
   savingAffiliateId?: string;
@@ -274,6 +277,7 @@ const MembershipRow: React.FC<{
 export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> = ({
   settings,
   affiliates,
+  articles,
   performanceReports = [],
   savingSettings,
   savingAffiliateId,
@@ -553,6 +557,13 @@ export const LiteraryCircleAdminPanel: React.FC<LiteraryCircleAdminPanelProps> =
           </label>
         </div>
       </section>
+
+      <LiteraryCircleOnboardingEditor
+        value={draft.onboardingContent}
+        articles={articles}
+        disabled={savingSettings}
+        onChange={onboardingContent => updateDraft({ ...draft, onboardingContent })}
+      />
 
       <section className={`rounded-2xl border p-4 sm:p-6 ${draft.commissionPolicy.status === 'active' ? 'border-emerald-300/30 bg-emerald-950/15' : 'border-amber-300/30 bg-amber-950/15'}`}>
         <div className="flex items-start gap-3">

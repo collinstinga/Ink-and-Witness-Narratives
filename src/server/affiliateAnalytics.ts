@@ -319,6 +319,15 @@ function selectCanonicalCommissions(commissions: AffiliateSaleCommission[]): {
   return { commissions: [...selected.values()], duplicates };
 }
 
+/** Shared lifetime performance projection. Excluded rows remain in the separate audit ledger. */
+export function verifiedCanonicalAffiliateCommissions(commissions: AffiliateSaleCommission[]): AffiliateSaleCommission[] {
+  return selectCanonicalCommissions(commissions.filter(commission => (
+    isVerifiedAffiliateCommission(commission)
+    && Number.isFinite(Date.parse(commission.createdAt))
+    && safeMoney(commission.saleAmountKes) > 0
+  ))).commissions;
+}
+
 function matchesFilters(commission: AffiliateSaleCommission, filters: AffiliateAnalyticsFilters): boolean {
   return (!filters.affiliateId || commission.affiliateId === filters.affiliateId)
     && (!filters.articleId || commission.articleId === filters.articleId)
@@ -404,12 +413,7 @@ export function buildAffiliateAnalyticsReport(options: {
 
   const canonicalWindow = selectCanonicalCommissions(eligibleInWindow);
   const selected = canonicalWindow.commissions.filter(commission => matchesFilters(commission, filters));
-  const lifetimeEligible = options.commissions.filter(commission => (
-    isVerifiedAffiliateCommission(commission)
-    && Number.isFinite(Date.parse(commission.createdAt))
-    && safeMoney(commission.saleAmountKes) > 0
-  ));
-  const lifetimeCanonical = selectCanonicalCommissions(lifetimeEligible).commissions;
+  const lifetimeCanonical = verifiedCanonicalAffiliateCommissions(options.commissions);
   const affiliatesWithLifetimeSales = new Set(lifetimeCanonical.map(commission => commission.affiliateId));
   const affiliatesWithWindowSales = new Set(selected.map(commission => commission.affiliateId));
 

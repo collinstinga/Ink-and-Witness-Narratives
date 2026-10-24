@@ -1,0 +1,12 @@
+.git/
+node_modules/
+data/
+uploads/
+coverage/
+build/
+dist/
+.env*
+!.env.example
+*.log
+*.tmp
+*.tmp.*

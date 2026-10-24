@@ -30,7 +30,7 @@ The backup contains personal and financial data. It is written under the
 git-ignored `data/backups/` directory with a timestamped backup ID. Do not
 commit, email, or copy it to an unapproved location.
 
-Current backup schema is v7. It also captures all newsletter campaign and
+Current backup schema is v8. It also captures all newsletter campaign and
 article documents, preserving release-notification source evidence, unpublished
 content and publication state without projection. Treat these additional files
 as confidential. Capturing and comparing them requires collection reads; budget
@@ -51,8 +51,17 @@ Schema v7 additionally preserves all independent partner-notification delivery,
 lease, attempt, retry, dead-letter and suppression records, plus the reviewed
 `affiliate_notification_delivery` configuration. These records are confidential
 and must be quiesced with notification workers during a preservation comparison.
-They are not migration write targets. A fresh v7 snapshot is required; existing
-v6 files remain unchanged and must not be relabelled or padded with invented data.
+They are not migration write targets. Schema v7 originally required a newly
+captured snapshot; existing v6 files remain unchanged and must not be relabelled
+or padded with invented data. The current verifier requires v8 as described below.
+
+Schema v8 additionally captures every `affiliate_tier_periods` document, including
+the exact monthly qualifying commission membership and permanent awarded milestone
+keys. These are financial-pricing evidence, not expiring cache entries or migration
+write targets. Quiesce sales and commission reversals as well as other financial
+writes during exact comparison. A newly captured v8 snapshot is required; schema
+v7 was committed before this dataset existed and cannot verify its preservation.
+No existing backup is upgraded in place or padded with an invented empty dataset.
 
 Migration now requires `--expected-database` and explicit
 `FIREBASE_SERVICE_ACCOUNT_JSON` belonging to the exact allowlisted staging
@@ -102,7 +111,7 @@ Before either command:
    deployment and retain both its deployment reference and its `aclk2_...`
    Firestore event ID;
 3. quiesce staging affiliate traffic;
-4. take a new verified schema-v7 backup after the proof event exists; and
+4. take a new verified schema-v8 backup after the proof event exists; and
 5. keep `FIREBASE_SERVICE_ACCOUNT_JSON` available only in the protected local
    process environment. Application-default credentials are refused.
 

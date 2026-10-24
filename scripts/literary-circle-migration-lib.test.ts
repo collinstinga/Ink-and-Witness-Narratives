@@ -304,7 +304,7 @@ describe('Literary Circle migration safety helpers', () => {
       ['site_configs/affiliate_notification_delivery', { mode: 'staging_test', settingsRevision: 5, allowedRecipients: ['test@example.test'] }],
     ]);
     const payloads = await captureAffiliateDatasets(fakeFirestore(records));
-    expect(AFFILIATE_BACKUP_SCHEMA_VERSION).toBe(7);
+    expect(AFFILIATE_BACKUP_SCHEMA_VERSION).toBe(8);
     expect(payloads.get('affiliate_notification_deliveries')?.documents).toEqual([
       { id: 'nld_example', data: records.get('affiliate_notification_deliveries/nld_example') },
       { id: 'suppression_example', data: records.get('affiliate_notification_deliveries/suppression_example') },
@@ -340,6 +340,28 @@ describe('Literary Circle migration safety helpers', () => {
     fs.writeFileSync(written.manifestPath, JSON.stringify({ ...written.manifest, schemaVersion: 3 }));
     expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT }))
       .toThrow(/Unsupported affiliate backup schema version/);
+  });
+
+  it('captures and exactly verifies monthly tier qualification evidence and rejects schema 7', async () => {
+    const record = { schemaVersion: 1, affiliateId: 'affiliate-1', periodKey: '2026-10', revision: 2,
+      evidenceComplete: true, members: [{ id: 'canonical-commission', checkoutRequestId: 'checkout-1', createdAt: '2026-10-23T10:00:00.000Z' }],
+      awardedMilestones: ['4:literary-ambassador'], customPreservedField: 'exact-snapshot' };
+    const captured = await captureAffiliateDatasets(fakeFirestore(new Map([
+      ['affiliate_tier_periods/period-1', record],
+    ])));
+    expect(captured.get('affiliate_tier_periods')?.documents).toEqual([{ id: 'period-1', data: record }]);
+    const payloads = completePayloadSet();
+    payloads.set('affiliate_tier_periods', captured.get('affiliate_tier_periods')!);
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const written = writeAffiliateBackup({ payloads, target });
+    cleanupDirectories.push(written.directory);
+    const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT });
+    expect(verified.payloads.get('affiliate_tier_periods')?.documents).toEqual([{ id: 'period-1', data: record }]);
+    const drift = new Map(payloads);
+    drift.set('affiliate_tier_periods', buildDatasetPayload(AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'affiliate_tier_periods')!, []));
+    expect(() => assertLiveStateMatchesBackup(verified, drift)).toThrow(/affiliate_tier_periods/);
+    fs.writeFileSync(written.manifestPath, JSON.stringify({ ...written.manifest, schemaVersion: 7 }));
+    expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT })).toThrow(/Unsupported affiliate backup schema version/);
   });
 
   it.each([

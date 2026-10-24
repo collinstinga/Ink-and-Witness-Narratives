@@ -382,6 +382,24 @@ describe('affiliate store Literary Circle integration', () => {
       .toMatchObject([{ id: 'preserved-note' }]);
   });
 
+  it('preserves writer-curated onboarding when a compatible older editor omits the added field', async () => {
+    const initial = await affiliateStore.getLiteraryCircleSettingsFresh();
+    const customized = await affiliateStore.saveLiteraryCircleSettings({
+      ...initial,
+      onboardingContent: {
+        ...initial.onboardingContent!,
+        welcomeTitle: 'Your thoughtful reading partnership',
+        recommendedPieceIds: ['published-choice']
+      }
+    }, 'Current Writer Client');
+    const { onboardingContent: _newField, ...legacy } = customized;
+    const saved = await affiliateStore.saveLiteraryCircleSettings({ ...legacy, introductoryPeriodDays: 45 }, 'Legacy Writer Client');
+    expect(saved.introductoryPeriodDays).toBe(45);
+    expect(saved.onboardingContent).toEqual(customized.onboardingContent);
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle').onboardingContent)
+      .toEqual(customized.onboardingContent);
+  });
+
   it('appends immutable effective-dated snapshots for each confirmed active policy lifecycle change', async () => {
     const current = affiliateStore.getLiteraryCircleSettings();
     const firstEffectiveAt = new Date(Date.now() + 60 * 60_000).toISOString();

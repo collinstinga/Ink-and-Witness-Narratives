@@ -56,6 +56,7 @@ import {
   type LiteraryCircleMembershipAdminPatch,
 } from './LiteraryCircleAdminPanel.js';
 import { LiteraryCircleResourcesAdmin } from './LiteraryCircleResourcesAdmin.js';
+import { resolveAffiliateSettingsDraft } from './affiliateSettingsDraft.js';
 
 const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
 const LiteraryCircleAnalyticsAdmin = React.lazy(() => import('./LiteraryCircleAnalyticsAdmin.js'));
@@ -78,7 +79,6 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<AdminSubTab>('overview');
-  const activeSubTabRef = useRef<AdminSubTab>('overview');
   const [summary, setSummary] = useState<AdminAffiliatesSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -166,33 +166,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     setError('');
 
     try {
-      const [res, freshSettings, freshLiteraryCircle, freshCampaigns] = await Promise.all([
-        api.getAdminAffiliatesSummary(),
-        isRefresh ? Promise.resolve(null) : api.getAdminAffiliateSettings(),
-        isRefresh ? Promise.resolve(null) : api.getAdminLiteraryCircleSettings(),
-        (!isRefresh || activeSubTabRef.current === 'campaigns') ? api.getAdminAffiliateCampaigns().then(result => ({ ...result, error: '' })).catch(failure => ({
-          campaigns: [] as AffiliateCampaign[],
-          error: failure instanceof Error ? failure.message : 'Current campaigns could not be loaded.',
-        })) : Promise.resolve(null)
-      ]);
+      // The server returns one current, consistent bounded financial/settings
+      // snapshot. Extra GETs waste reads and can mix states from different times.
+      const res = await api.getAdminAffiliatesSummary();
       if (requestId !== summaryRequestIdRef.current) return;
-      if (freshCampaigns) setCampaignDirectoryError(freshCampaigns.error);
-      const currentSettings = freshSettings || res.settings;
-      setSummary(current => ({ ...res,
-        settings: isRefresh && current?.settings ? current.settings : currentSettings,
-        campaigns: freshCampaigns?.campaigns ?? current?.campaigns ?? res.campaigns,
-      }));
-      // A background refresh must not overwrite the settings returned by a
-      // successful durable save with an older cached summary from another
-      // warm serverless instance.
-      if (currentSettings && !settingsDirtyRef.current && !isRefresh) {
-        setSettingsForm(currentSettings);
-      }
-      if (!isRefresh) {
-        setLiteraryCircleSettings(
-          freshLiteraryCircle?.settings || res.literaryCircleSettings || null
-        );
-      }
+      setCampaignDirectoryError('');
+      setSummary(res);
+      // Read dirty state when the updater runs, so edits made while this
+      // request was pending survive. A clean editor always adopts current data.
+      setSettingsForm(current => resolveAffiliateSettingsDraft(current, res.settings, settingsDirtyRef.current));
+      setLiteraryCircleSettings(res.literaryCircleSettings || null);
     } catch (err: any) {
       if (requestId === summaryRequestIdRef.current) {
         setError(err.message || 'Failed to load affiliate administration summary');
@@ -206,17 +189,15 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   };
 
   useEffect(() => {
-    activeSubTabRef.current = activeSubTab;
-    // Read the campaign directory on entry, not on every unrelated 15s poll.
+    // Read the campaign directory on entry, without a recurring full-ledger poll.
     if (activeSubTab === 'campaigns') void loadSummary(true);
   }, [activeSubTab]);
 
   useEffect(() => {
-    loadSummary();
-    const timer = setInterval(() => {
-      loadSummary(true);
-    }, 15000);
-    return () => clearInterval(timer);
+    void loadSummary();
+    // Each summary now reads authoritative ledgers. Entry, successful writes,
+    // and the existing Refresh button update it without exhausting Spark reads.
+    return () => { summaryRequestIdRef.current += 1; };
   }, []);
 
   const loadResourceLibrary = async () => {
@@ -538,14 +519,15 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   };
 
   const handleDeleteAffiliate = async (aff: AffiliateAccount) => {
-    if (!window.confirm(`Are you sure you want to permanently delete affiliate ${aff.name} (${aff.affiliateCode})?`)) {
+    if (!window.confirm(`Suspend ${aff.name} (${aff.affiliateCode}) and disable referral activity? The account, referral identity, commissions, wallet and payout history will be preserved. You can reactivate the account and enable links later.`)) {
       return;
     }
     try {
       await api.deleteAdminAffiliate(aff.id);
+      setSuccessMsg('Partner suspended safely. The account, referral identity and all historical financial records were preserved.');
       loadSummary(true);
     } catch (err: any) {
-      alert(`Failed to delete affiliate: ${err.message}`);
+      alert(`Failed to suspend affiliate: ${err.message}`);
     }
   };
 
@@ -1204,7 +1186,8 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                               <button
                                 onClick={() => handleDeleteAffiliate(aff)}
                                 className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900 border border-rose-800/60 text-rose-300 hover:text-white cursor-pointer"
-                                title="Delete Affiliate"
+                                title="Suspend Partner — preserve history"
+                                aria-label={`Suspend ${aff.name} and preserve their history`}
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -1225,6 +1208,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
               <LiteraryCircleAdminPanel
                 settings={literaryCircleSettings}
                 affiliates={summary?.affiliates || []}
+                articles={articles}
                 performanceReports={summary?.literaryCirclePerformance || []}
                 savingSettings={savingLiteraryCircleSettings}
                 savingAffiliateId={savingLiteraryCircleAffiliateId}
