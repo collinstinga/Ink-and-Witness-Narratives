@@ -93,8 +93,9 @@ describe('LiteraryCircleAnalyticsAdmin report view', () => {
 
     expect(markup).toContain('Partial retained click history');
     expect(markup).toContain('conversion is withheld');
-    expect(markup).toContain('Buyer identity projection is deliberately disabled');
-    expect(markup).toContain('No customer identifiers were loaded');
+    expect(markup).toContain('historical purchases lack verifiable privacy-safe buyer evidence');
+    expect(markup).toContain('No customer identifiers are exposed');
+    expect(markup).not.toContain('disabled in this checkpoint');
     expect(markup).not.toContain('reader@example.test');
     expect(markup).not.toContain('254700000000');
     expect(markup).not.toContain('abk1_');
@@ -126,6 +127,19 @@ describe('LiteraryCircleAnalyticsAdmin report view', () => {
     expect(markup).toContain('10.0%');
     expect(markup).not.toContain('1000.0%');
     expect(markup).toContain('Complete pseudonymous coverage');
+  });
+
+  it('explains the actual buyer coverage reason without calling every unavailable report disabled', () => {
+    const source = reportFixture();
+    const disabled = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{
+      ...source, buyerMetrics: { ...source.buyerMetrics, reason: 'not_enabled' },
+    }} />);
+    expect(disabled).toContain('not enabled in this environment');
+    const outage = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{
+      ...source, buyerMetrics: { ...source.buyerMetrics, reason: 'query_failed' },
+    }} />);
+    expect(outage).toContain('missing evidence must not be treated as zero readers');
+    expect(outage).not.toContain('not enabled in this environment');
   });
 
   it('does not imply conversion is valid from complete traffic coverage alone', () => {

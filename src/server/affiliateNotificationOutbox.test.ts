@@ -105,6 +105,28 @@ describe('create-only held partner notification outbox', () => {
     expect(h.reads).toHaveLength(4); // source, settings, affiliate, missing intent
   });
 
+  it('does not queue a general tier-filtered notice based on an automatic stale stored tier', async () => {
+    const h = harness();
+    const settings = h.documents.get('site_configs/affiliate_notifications') as typeof DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS;
+    settings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = ['literary-partner'];
+    expect(await storeHeldAffiliateNotifications(h.input)).toEqual({ status: 'ineligible', intentCount: 0 });
+    expect(h.writes).toEqual([]);
+  });
+
+  it('proves a manual notification tier from current settings inside the outbox transaction', async () => {
+    const h = harness();
+    const settings = h.documents.get('site_configs/affiliate_notifications') as typeof DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS;
+    settings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = ['literary-partner'];
+    const account = h.documents.get('affiliates/partner-one') as any;
+    account.literaryCircle.schemaVersion = 1;
+    account.literaryCircle.tier.source = 'manual'; account.literaryCircle.tier.assignedAt = NOW;
+    h.documents.set('site_configs/affiliate_literary_circle', { schemaVersion: 1, revision: 1, enabled: true,
+      tiers: [{ id: 'literary-partner', enabled: true }] });
+    expect(await storeHeldAffiliateNotifications(h.input)).toEqual({ status: 'created', intentCount: 1 });
+    expect(h.reads.filter(path => path === 'site_configs/affiliate_literary_circle')).toHaveLength(1);
+    expect(h.writes.every(path => path.startsWith('affiliate_notification_outbox/'))).toBe(true);
+  });
+
   it('deduplicates concurrent requests and later retries without rewriting records', async () => {
     const h = harness();
     const results = await Promise.all([storeHeldAffiliateNotifications(h.input), storeHeldAffiliateNotifications(h.input)]);

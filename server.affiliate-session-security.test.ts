@@ -128,7 +128,10 @@ const affiliateMocks = vi.hoisted(() => ({
   getAffiliateByIdFresh: vi.fn(),
   getCommissions: vi.fn(),
   getPayouts: vi.fn(),
+  processPayout: vi.fn(),
+  updateCommissionStatus: vi.fn(),
   getCampaigns: vi.fn(),
+  getCampaignsFresh: vi.fn(),
   getAuditLogs: vi.fn(),
   getAuditLogsFresh: vi.fn(),
   getAdminAffiliateAnalytics: vi.fn(),
@@ -329,6 +332,7 @@ describe('affiliate session route boundaries', () => {
     affiliateMocks.getCommissions.mockReturnValue([]);
     affiliateMocks.getPayouts.mockReturnValue([]);
     affiliateMocks.getCampaigns.mockReturnValue([]);
+    affiliateMocks.getCampaignsFresh.mockResolvedValue([]);
     affiliateMocks.getAuditLogs.mockReturnValue([]);
     affiliateMocks.getAuditLogsFresh.mockResolvedValue([]);
     affiliateMocks.getAdminAffiliateAnalytics.mockReturnValue({ report: 'aggregate-only' });
@@ -917,6 +921,66 @@ describe('affiliate session route boundaries', () => {
     );
   });
 
+  it.each(['commission', 'payout'] as const)('awaits the %s financial commit before returning success', async kind => {
+    let entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    let commit!: (value: any) => void;
+    const pending = new Promise(resolve => { commit = resolve; });
+    const operation = kind === 'commission' ? affiliateMocks.updateCommissionStatus : affiliateMocks.processPayout;
+    operation.mockImplementationOnce(() => { entered(); return pending; });
+    let acknowledged = false;
+    const responsePromise = fetch(`${baseUrl}/api/admin/affiliates/${kind === 'commission' ? 'commissions/commission_one/status' : 'payouts/payout_one/process'}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl, 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify(kind === 'commission' ? { status: 'reversed', reason: 'Confirmed refund' }
+        : { action: 'pay', paymentReference: 'RECEIPT-VERIFIED' })
+    }).then(value => { acknowledged = true; return value; });
+    await reached;
+    expect(acknowledged).toBe(false);
+    commit(kind === 'commission' ? { id: 'commission_one', receiptNumber: 'SALE1', status: 'REVERSED' }
+      : { id: 'payout_one', status: 'PAID' });
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true });
+    if (kind === 'commission') expect(operation).toHaveBeenCalledWith('commission_one', 'REVERSED', 'Admin (Jake)', 'Confirmed refund');
+    else expect(operation).toHaveBeenCalledWith('payout_one', 'mark_paid', 'RECEIPT-VERIFIED', undefined, 'Admin (Jake)');
+  });
+
+  it('protects notification operations and cron jobs before any runtime work', async () => {
+    const anonymous = await fetch(`${baseUrl}/api/admin/affiliates/notifications/runtime`);
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get('cache-control')).toContain('no-store');
+    const affiliate = await fetch(`${baseUrl}/api/admin/affiliates/notifications/runtime`, {
+      headers: { cookie: validCookie }
+    });
+    expect([401, 403]).toContain(affiliate.status);
+    const cron = await fetch(`${baseUrl}/api/internal/affiliate-notifications/dispatch`);
+    expect(cron.status).toBe(401);
+    expect(cron.headers.get('cache-control')).toContain('no-store');
+  });
+
+  it('rejects runtime recipient and clock injection even from an administrator', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/notifications/runtime`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl, 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify({ mode: 'dispatch', recipient: 'other@example.test', now: '2099-01-01' })
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+  });
+
+  it('blocks a cross-site notification dispatch before authentication work', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/notifications/runtime`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: 'https://untrusted.example', 'sec-fetch-site': 'cross-site' },
+      body: JSON.stringify({ mode: 'dispatch' })
+    });
+    expect(response.status).toBe(403);
+  });
+
   it('returns a reloadable conflict instead of overwriting newer Literary Circle settings', async () => {
     const getResponse = await fetch(`${baseUrl}/api/admin/affiliates/literary-circle/settings`, {
       headers: { cookie: `iw_session=${adminSessionToken}` }
@@ -991,7 +1055,7 @@ describe('affiliate session route boundaries', () => {
     expect(affiliateMocks.getSettingsFresh).toHaveBeenCalled();
     expect(affiliateMocks.getCommissions).toHaveBeenCalled();
     expect(affiliateMocks.getPayouts).toHaveBeenCalled();
-    expect(affiliateMocks.getCampaigns).toHaveBeenCalled();
+    expect(affiliateMocks.getCampaignsFresh).toHaveBeenCalled();
     expect(affiliateMocks.getAuditLogsFresh).toHaveBeenCalled();
 
     const detailResponse = await fetch(`${baseUrl}/api/admin/affiliates/${privateAffiliate.id}`, {

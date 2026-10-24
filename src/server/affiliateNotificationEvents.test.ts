@@ -15,7 +15,7 @@ import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS } from './affiliateNotification
 import { createLiteraryCircleMembership, DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
 import { buildLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
 import type { AffiliateAccount, AffiliateSaleCommission } from '../types.js';
-import { prepareCommittedAffiliateNotification, recoverCommittedAffiliateNotifications } from './affiliateNotificationEvents.js';
+import { prepareCommittedAffiliateNotification, recoverCommittedAffiliateNotifications, resolveAffiliateNotificationSource } from './affiliateNotificationEvents.js';
 
 const NOW = '2026-10-23T10:00:00.000Z';
 const ENV: NodeJS.ProcessEnv = {
@@ -81,6 +81,33 @@ function harness() {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('committed affiliate notification sources', () => {
+  it('reconstructs payment-joined delivery evidence and does not treat a stored intent as send permission', async () => {
+    const h = harness();
+    await prepareCommittedAffiliateNotification({ db: h.client, kind: 'new_commission', sourceId: 'commission-one', now: NOW }, ENV);
+    const held = [...h.documents.values()].find(value => value.kind === 'source')!;
+    const resolved = await resolveAffiliateNotificationSource({ db: h.client, source: held.source as any, now: NOW }, ENV);
+    expect(resolved).not.toBeNull();
+    expect(resolved!.context).toEqual({ commissionAmount: 'KES 75.00', pieceTitle: 'a literary purchase' });
+    expect(resolved!.evidenceSha256).toMatch(/^[a-f0-9]{64}$/);
+    const transaction = { getAll: h.db.getAll } as any;
+    expect(await resolved!.verifySource(transaction)).toBe(true);
+    h.documents.get('transactions/checkout-one')!.status = 'REVERSED';
+    expect(await resolved!.verifySource(transaction)).toBe(false);
+    expect(await resolveAffiliateNotificationSource({ db: h.client, source: held.source as any, now: NOW }, ENV)).toBeNull();
+    expect([...h.documents.values()].filter(value => value.kind === 'intent')).toHaveLength(1);
+    expect(h.writes).toHaveLength(2);
+  });
+
+  it('rejects persisted source tampering and staging-disabled delivery resolution before reads', async () => {
+    const h = harness();
+    const source = { eventType: 'new_commission' as const, sourceId: 'commission-one', sourceVersion: 1,
+      occurredAt: '2026-10-23T09:00:00.000Z', targetAffiliateId: 'another-partner' };
+    expect(await resolveAffiliateNotificationSource({ db: h.client, source, now: NOW }, {})).toBeNull();
+    expect(h.db.getAll).not.toHaveBeenCalled();
+    expect(await resolveAffiliateNotificationSource({ db: h.client, source, now: NOW }, ENV)).toBeNull();
+    expect(h.writes).toEqual([]);
+  });
+
   function tierUpgrade(h: ReturnType<typeof harness>) {
     const idFor = (checkout: string) => `com_tx_${crypto.createHash('sha256').update(checkout).digest('hex').slice(0, 40)}`;
     const settings = structuredClone(DEFAULT_LITERARY_CIRCLE_SETTINGS);
@@ -182,6 +209,28 @@ describe('committed affiliate notification sources', () => {
     expect(h.writes).toHaveLength(2);
     const source = [...h.documents.values()].find(record => record.kind === 'source');
     expect(source?.source).toMatchObject({ occurredAt: '2026-10-23T09:00:00.000Z', sourceVersion: 1 });
+  });
+
+  it('expires release notifications after seven days instead of creating a historical automation backlog', async () => {
+    const h = harness(); const input = release(h);
+    const expiredAt = '2026-10-30T09:00:00.000Z';
+    expect((await prepareCommittedAffiliateNotification({ ...input, now: expiredAt }, ENV)).status).toBe('ineligible');
+    expect(h.writes).toEqual([]);
+    expect((await prepareCommittedAffiliateNotification(input, ENV)).status).toBe('created');
+    h.documents.get('articles/piece-one')!.title = 'Verified New Piece';
+    const held = [...h.documents.values()].find(record => record.kind === 'source')!;
+    expect(await resolveAffiliateNotificationSource({ db: h.client, source: held.source as any, now: expiredAt }, ENV)).toBeNull();
+    expect(h.writes).toHaveLength(2);
+  });
+
+  it('does not misclassify a transient delivery-source read outage as permanent ineligibility', async () => {
+    const h = harness();
+    h.db.getAll.mockRejectedValueOnce(new Error('provider-private@example.test SECRET'));
+    const source = { eventType: 'new_commission' as const, sourceId: 'commission-one', sourceVersion: 1,
+      occurredAt: '2026-10-23T09:00:00.000Z', targetAffiliateId: 'partner-one' };
+    await expect(resolveAffiliateNotificationSource({ db: h.client, source, now: NOW }, ENV))
+      .rejects.toThrow('Partner notification source could not be verified.');
+    expect(h.writes).toEqual([]);
   });
 
   it.each(['draft', 'cancelled', 'failed'])('rejects release campaign status %s', async status => {

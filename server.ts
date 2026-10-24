@@ -27,7 +27,7 @@ import {
   User,
   UserRecord
 } from "./src/types.js";
-import { getAllFirestoreDocs } from "./src/server/db.js";
+import { getAllFirestoreDocs, getDb } from "./src/server/db.js";
 import {
   HOMEPAGE_SECTION_IDS,
   isHomepageSectionId,
@@ -92,6 +92,10 @@ import {
   optOutAffiliateMarketingByToken,
   saveAffiliateNotificationPreferences
 } from "./src/server/affiliateNotificationPreferences.js";
+import { getAffiliateNotificationRuntimeStatus, runAffiliateNotificationJob } from "./src/server/affiliateNotificationRuntime.js";
+import { reconcileAffiliateNotificationWebhook } from "./src/server/affiliateNotificationDelivery.js";
+import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntimeRequest } from "./src/server/affiliateNotificationRuntimeRequest.js";
+import { verifiedManualAffiliateNotificationTierIds } from "./src/server/affiliateNotificationTierFilter.js";
 import {
   AffiliateApprovalNotFoundError,
   AffiliateApprovalValidationError,
@@ -1432,6 +1436,16 @@ export async function createApp() {
     }
   });
 
+  const affiliateNotificationRuntimeLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 6,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false },
+    keyGenerator: (req: Request) => String((req as any).user?.id || 'authenticated-cron'),
+    message: { success: false, error: 'Partner notification operations limit reached. Please wait a minute.' }
+  });
+
   const commentReportLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
     max: 10,
@@ -1903,6 +1917,15 @@ export async function createApp() {
     if (!outcome) return res.status(200).json({ accepted: true });
 
     try {
+      // Reuse the existing raw-body/signature endpoint. Partner outcomes have
+      // a separate ledger and must be handled before newsletter's no-record exit.
+      if ((process.env.AFFILIATE_NOTIFICATION_DELIVERY_MODE || 'off').trim().toLowerCase() === 'staging_test') {
+        const partnerOutcome = await reconcileAffiliateNotificationWebhook({
+          db: getDb(), payload, headers, webhookSecret
+        });
+        if (partnerOutcome.status === 'failed') return res.status(503).json({ accepted: false });
+        if (partnerOutcome.status === 'invalid') return res.status(400).json({ accepted: false });
+      }
       let delivery = await newsletterStore.findDeliveryByProviderMessageId(
         outcome.providerMessageId
       );
@@ -6850,14 +6873,14 @@ ${currentDraft || prompt}
   app.get("/api/affiliate/payouts/balance", requireAffiliateAuth, handleGetPayouts);
 
   // Affiliate: Request Payout (Supports /request-payout and /payouts/request)
-  const handleRequestPayout = (req: Request, res: Response) => {
+  const handleRequestPayout = async (req: Request, res: Response) => {
     try {
       const affiliate = (req as any).affiliate;
       const { amount, amountKes, notes } = req.body;
       const requestedAmt = amountKes !== undefined ? amountKes : amount;
       const hasRequestedAmount = amountKes !== undefined || amount !== undefined;
 
-      const payout = store.affiliates.requestPayout(
+      const payout = await store.affiliates.requestPayout(
         affiliate.id,
         hasRequestedAmount ? Number(requestedAmt) : undefined,
         notes
@@ -6990,6 +7013,55 @@ ${currentDraft || prompt}
     }
   });
 
+  const noStoreNotificationRuntime = (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    next();
+  };
+
+  app.get('/api/admin/affiliates/notifications/runtime', noStoreNotificationRuntime, requireAdminAuth,
+    affiliateNotificationRuntimeLimiter, async (_req: Request, res: Response) => {
+      try {
+        const runtime = await getAffiliateNotificationRuntimeStatus({ db: getDb() });
+        return res.status(runtime.status === 'failed' ? 503 : 200).json({ success: runtime.status !== 'failed', runtime });
+      } catch {
+        return res.status(503).json({ success: false, error: 'Partner notification status is temporarily unavailable.' });
+      }
+    });
+
+  app.post('/api/admin/affiliates/notifications/runtime', noStoreNotificationRuntime, requireAdminAuth,
+    affiliateNotificationRuntimeLimiter, async (req: Request, res: Response) => {
+      const mode = parseAffiliateNotificationRuntimeRequest(req.body);
+      if (!mode || Object.keys(req.query).length) return res.status(400).json({ success: false, error: 'Choose prepare or dispatch only.' });
+      try {
+        const result = await runAffiliateNotificationJob({ db: getDb(), mode });
+        // Bounded business outcomes are returned intact for the operations UI;
+        // success remains false unless completed. Infrastructure errors retry.
+        const status = result.status === 'failed' ? 503 : 200;
+        return res.status(status).json({ success: result.status === 'completed', result });
+      } catch {
+        return res.status(503).json({ success: false, error: 'Partner notification operation could not complete safely.' });
+      }
+    });
+
+  // Deliberately unscheduled. A later reviewed staging configuration may invoke
+  // these bounded jobs; production delivery remains refused in the runtime.
+  app.get(['/api/internal/affiliate-notifications/prepare', '/api/internal/affiliate-notifications/dispatch'],
+    noStoreNotificationRuntime, (req: Request, res: Response, next: NextFunction) => {
+      if (!isAffiliateNotificationCronAuthorized(req.get('authorization'))) return res.status(401).json({ success: false });
+      next();
+    }, affiliateNotificationRuntimeLimiter, async (req: Request, res: Response) => {
+      if (Object.keys(req.query).length) return res.status(400).json({ success: false });
+      const mode = req.path.endsWith('/prepare') ? 'prepare' : 'dispatch';
+      try {
+        const result = await runAffiliateNotificationJob({ db: getDb(), mode });
+        return res.status(result.status === 'failed' ? 503 : 200).json({ success: result.status === 'completed', result });
+      } catch {
+        return res.status(503).json({ success: false });
+      }
+    });
+
   app.put("/api/admin/affiliates/notifications", requireAdminAuth, async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'private, no-store, max-age=0');
     res.setHeader('CDN-Cache-Control', 'no-store');
@@ -7048,7 +7120,11 @@ ${currentDraft || prompt}
         return res.status(400).json({ success: false, error: 'The selected partner notification template is unavailable.' });
       }
       const affiliates = await getAllFirestoreDocs<AffiliatePublicProfile>('affiliates');
-      const summary = summarizeAffiliateNotificationEligibility(affiliates, template);
+      const tierEvidence = template.eligibility.tierIds.length
+        ? { verifiedManualTierIds: verifiedManualAffiliateNotificationTierIds(affiliates,
+          (await getDb().collection('site_configs').doc('affiliate_literary_circle').get()).data(), new Date().toISOString()) }
+        : {};
+      const summary = summarizeAffiliateNotificationEligibility(affiliates, template, tierEvidence);
       return res.json({ success: true, summary });
     } catch (err: any) {
       if (err instanceof AffiliateNotificationValidationError) {
@@ -7542,11 +7618,15 @@ ${currentDraft || prompt}
   });
 
   // Admin: Update Commission Status (Approve / Reverse / Reject)
-  app.post("/api/admin/affiliates/commissions/:id/status", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/affiliates/commissions/:id/status", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { status, reason } = req.body;
-      const commission = store.affiliates.updateCommissionStatus(id, status, 'Admin (Jake)', reason);
+      // Older Writer Portal clients use lowercase UI labels. Canonicalize only
+      // that established contract; the store still validates every transition.
+      const uppercaseStatus = typeof status === 'string' ? status.trim().toUpperCase() : status;
+      const canonicalStatus = uppercaseStatus === 'VERIFIED' ? 'APPROVED' : uppercaseStatus;
+      const commission = await store.affiliates.updateCommissionStatus(id, canonicalStatus, 'Admin (Jake)', reason);
       res.json({
         success: true,
         commission,
@@ -7570,7 +7650,7 @@ ${currentDraft || prompt}
   });
 
   // Admin: Process Payout (Approve / Mark Paid / Reject)
-  app.post("/api/admin/affiliates/payouts/:id/process", requireAdminAuth, (req: Request, res: Response) => {
+  app.post("/api/admin/affiliates/payouts/:id/process", requireAdminAuth, async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
       const { action, paymentReference, notes } = req.body;
@@ -7582,7 +7662,7 @@ ${currentDraft || prompt}
         return res.status(400).json({ success: false, error: "Invalid action. Supported: approve, mark_paid, pay, reject, fail" });
       }
 
-      const payout = store.affiliates.processPayout(id, normalizedAction, paymentReference, notes, 'Admin (Jake)');
+      const payout = await store.affiliates.processPayout(id, normalizedAction, paymentReference, notes, 'Admin (Jake)');
       res.json({
         success: true,
         payout,

@@ -45,6 +45,9 @@ import {
   LiteraryCircleDashboardSummary,
   AffiliateNotificationEligibilitySummary,
   AffiliateNotificationPreferences,
+  AffiliateNotificationRuntimeMode,
+  AffiliateNotificationRuntimeResult,
+  AffiliateNotificationRuntimeStatus,
   LiteraryCircleNotificationEventType,
   LiteraryCircleNotificationSettings,
   LiteraryCircleOnboardingStatus,
@@ -2847,6 +2850,34 @@ export const api = {
         body: JSON.stringify({ eventType, ...(settings ? { settings } : {}) })
       },
       'Failed to check partner notification eligibility.'
+    );
+  },
+
+  async getAdminAffiliateNotificationRuntime(options: { signal?: AbortSignal } = {}): Promise<{
+    success: true;
+    runtime: AffiliateNotificationRuntimeStatus;
+  }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/notifications/runtime',
+      { cache: 'no-store', signal: options.signal, headers: { 'x-admin-token': activeToken || '' } },
+      'Failed to load partner notification operations.'
+    );
+  },
+
+  async runAdminAffiliateNotificationRuntime(
+    mode: AffiliateNotificationRuntimeMode,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<{ success: boolean; result: AffiliateNotificationRuntimeResult }> {
+    const activeToken = getWriterToken();
+    return safeFetchJson(
+      '/api/admin/affiliates/notifications/runtime',
+      {
+        method: 'POST', cache: 'no-store', signal: options.signal,
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': activeToken || '' },
+        body: JSON.stringify({ mode })
+      },
+      'Failed to run partner notification operations.'
     );
   },
 

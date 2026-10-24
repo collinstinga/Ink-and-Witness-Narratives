@@ -297,6 +297,34 @@ describe('Literary Circle migration safety helpers', () => {
     ]);
   });
 
+  it('preserves independent notification delivery, retry and suppression state with its reviewed configuration', async () => {
+    const records = new Map<string, Record<string, unknown>>([
+      ['affiliate_notification_deliveries/nld_example', { attempts: 2, state: 'retry', lease: { expiresAt: '2026-10-23T10:10:00.000Z' }, privateEvidence: ['preserve-exactly'] }],
+      ['affiliate_notification_deliveries/suppression_example', { state: 'suppressed', emailSha256: 'one-way-identity' }],
+      ['site_configs/affiliate_notification_delivery', { mode: 'staging_test', settingsRevision: 5, allowedRecipients: ['test@example.test'] }],
+    ]);
+    const payloads = await captureAffiliateDatasets(fakeFirestore(records));
+    expect(AFFILIATE_BACKUP_SCHEMA_VERSION).toBe(7);
+    expect(payloads.get('affiliate_notification_deliveries')?.documents).toEqual([
+      { id: 'nld_example', data: records.get('affiliate_notification_deliveries/nld_example') },
+      { id: 'suppression_example', data: records.get('affiliate_notification_deliveries/suppression_example') },
+    ]);
+    expect(payloads.get('affiliate_site_configs')?.documents).toContainEqual({
+      id: 'affiliate_notification_delivery', data: records.get('site_configs/affiliate_notification_delivery'),
+    });
+    const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+    const complete = completePayloadSet();
+    complete.set('affiliate_notification_deliveries', payloads.get('affiliate_notification_deliveries')!);
+    const written = writeAffiliateBackup({ payloads: complete, target });
+    cleanupDirectories.push(written.directory);
+    const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT });
+    const live = new Map(complete);
+    live.set('affiliate_notification_deliveries', buildDatasetPayload(AFFILIATE_BACKUP_DATASETS.find(item => item.key === 'affiliate_notification_deliveries')!, []));
+    expect(() => assertLiveStateMatchesBackup(verified, live)).toThrow(/affiliate_notification_deliveries/);
+    fs.writeFileSync(written.manifestPath, JSON.stringify({ ...written.manifest, schemaVersion: 6 }));
+    expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT })).toThrow(/Unsupported affiliate backup schema version/);
+  });
+
   it('round-trips notification outbox evidence and refuses live drift or an older incomplete backup', () => {
     const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
     const payloads = completePayloadSet();

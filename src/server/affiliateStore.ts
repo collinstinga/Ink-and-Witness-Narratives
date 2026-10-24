@@ -49,7 +49,15 @@ import {
 import { isCurrentAffiliatePasswordHash } from './affiliateCredentials.js';
 import { prepareCommittedAffiliateNotification } from './affiliateNotificationEvents.js';
 import { buildLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
-import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
+import { campaignNotificationAuditId, literaryCircleNotificationAuditId } from './affiliateNotificationAudit.js';
+import {
+  buildCommittedAffiliateBuyerAnalyticsEvidence,
+  MAX_AFFILIATE_BUYER_HISTORY,
+  projectStoredAffiliateBuyerAnalytics,
+  resolveAffiliateBuyerAnalyticsRuntime,
+  withoutAffiliateBuyerAnalytics,
+} from './affiliateBuyerAnalytics.js';
+import { recordedAffiliateCommissionPaidKes, resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
 import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import {
   AFFILIATE_SESSION_MAX_AGE_MS,
@@ -108,6 +116,100 @@ const DEFAULT_AFFILIATE_SETTINGS: AffiliateSettings = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_ATTRIBUTION_DAYS = 90;
+export const MAX_WALLET_PAYOUT_COMMISSIONS = 400;
+const ACTIVE_WALLET_PAYOUT_STATUSES = ['PENDING', 'APPROVED', 'PROCESSING'] as const;
+
+export class AffiliateWalletValidationError extends Error {
+  constructor(message: string) { super(message); this.name = 'AffiliateWalletValidationError'; }
+}
+
+function walletReview(message = 'Historical wallet records need writer review before this action.'): never {
+  throw new AffiliateWalletValidationError(message);
+}
+
+function walletCommitFailure(error: unknown): never {
+  if (error instanceof AffiliateWalletValidationError) throw error;
+  throw new AffiliateWalletValidationError('Wallet changes could not be committed. No local fallback was used; please retry safely.');
+}
+
+function walletIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+}
+
+function walletMoney(value: unknown, optional = false): number {
+  if (optional && value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > 1_000_000_000_000) walletReview();
+  return value;
+}
+
+function walletNextRevision(value: unknown): number {
+  const revision = value === undefined ? 0 : value;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0 || revision >= 1_000_000_000) walletReview();
+  return revision + 1;
+}
+
+function readWalletAccount(data: AffiliateAccount | undefined, id: string): AffiliateAccount {
+  if (!data) throw new AffiliateWalletValidationError('Affiliate not found.');
+  if ((data.id !== undefined && data.id !== id) || !walletIdentifier(id)
+    || (data.walletLedgerVersion !== undefined && data.walletLedgerVersion !== 1)
+    || (data.activePayoutId != null && !walletIdentifier(data.activePayoutId))) walletReview();
+  walletMoney(data.balanceAvailableKes); walletMoney(data.balancePendingKes);
+  walletMoney(data.totalCommissionPaidKes); walletMoney(data.totalCommissionEarnedKes);
+  const reserved = walletMoney(data.balanceReservedKes, true);
+  walletMoney(data.totalCommissionReversedKes, true);
+  if ((reserved > 0) !== Boolean(data.activePayoutId) || (reserved > 0 && data.walletLedgerVersion !== 1)) walletReview('Wallet reservation evidence needs writer reconciliation.');
+  walletNextRevision(data.walletRevision);
+  return { ...data, id };
+}
+
+function readWalletCommission(data: AffiliateSaleCommission | undefined, id: string, affiliateId: string): AffiliateSaleCommission {
+  if (!data || (data.id !== undefined && data.id !== id) || data.affiliateId !== affiliateId
+    || !walletIdentifier(id) || !walletIdentifier(affiliateId)
+    || typeof data.createdAt !== 'string' || !Number.isFinite(Date.parse(data.createdAt))
+    || (data.walletLedgerVersion !== undefined && data.walletLedgerVersion !== 1)) walletReview();
+  const amount = walletMoney(data.commissionAmountKes);
+  const paid = walletMoney(data.payoutPaidKes, true);
+  const reserved = walletMoney(data.payoutReservedKes, true);
+  walletNextRevision(data.walletRevision);
+  if (paid + reserved > amount || (reserved > 0) !== Boolean(data.reservedPayoutId)
+    || (data.reservedPayoutId != null && !walletIdentifier(data.reservedPayoutId))
+    || (data.status !== 'PAID' && data.payoutId)
+    || (data.walletLedgerVersion !== 1 && (paid > 0 || reserved > 0))
+    || (amount > 0 && paid === amount && data.status !== 'PAID')) walletReview();
+  return { ...data, id };
+}
+
+function walletAudit(actor: string, action: string, targetType: 'commission' | 'payout', targetId: string,
+  previous: unknown, next: unknown): AffiliateAuditLogEntry {
+  if (typeof actor !== 'string' || !actor.trim() || actor.length > 200 || /[\u0000-\u001f\u007f]/.test(actor)) {
+    throw new AffiliateWalletValidationError('A valid wallet administrator or account actor is required.');
+  }
+  return { id: `aud_wallet_${crypto.randomBytes(16).toString('hex')}`, timestamp: new Date().toISOString(),
+    actor, action, targetType, targetId, summary: `Committed ${action.replace(/_/g, ' ')}.`,
+    ...(previous ? { previousValue: sanitizeAuditValue(previous) } : {}), newValue: sanitizeAuditValue(next) };
+}
+
+function publishWalletCommit(input: { affiliate?: AffiliateAccount; commissions?: AffiliateSaleCommission[]; payout?: AffiliatePayoutRequest }) {
+  if (input.affiliate) {
+    const current = cachedAffiliates.find(row => row.id === input.affiliate!.id);
+    if (!current || (current.walletRevision || 0) <= (input.affiliate.walletRevision || 0)) {
+      cacheFreshAffiliateRecord(input.affiliate.id, input.affiliate);
+    }
+  }
+  for (const commission of input.commissions || []) {
+    const index = cachedCommissions.findIndex(row => row.id === commission.id);
+    if (index < 0) cachedCommissions.unshift(commission);
+    else if ((cachedCommissions[index].walletRevision || 0) <= (commission.walletRevision || 0)) cachedCommissions[index] = commission;
+  }
+  if (input.commissions?.length) writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
+  if (input.payout) {
+    const payout = input.payout;
+    const index = cachedPayouts.findIndex(row => row.id === payout.id);
+    if (index < 0) cachedPayouts.unshift(payout);
+    else if ((cachedPayouts[index].walletRevision || 0) <= (payout.walletRevision || 0)) cachedPayouts[index] = payout;
+    writeJsonFileSync(PAYOUTS_FILE, cachedPayouts);
+  }
+}
 
 export interface LiteraryCircleMembershipPatch {
   complimentaryAccessStatus?: LiteraryCircleComplimentaryAccessStatus;
@@ -448,7 +550,7 @@ function sanitizeAuditValue(value: any): any {
 
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !/(password|secret|token|sessionVersion)/i.test(key))
+      .filter(([key]) => !/(password|secret|token|sessionVersion|affiliateBuyerAnalytics)/i.test(key))
       .map(([key, nestedValue]) => [key, sanitizeAuditValue(nestedValue)])
   );
 }
@@ -497,6 +599,9 @@ function cacheFreshAffiliateRecord(id: string, fresh: AffiliateAccount | null): 
   }
 
   const refreshed: AffiliateAccount = { ...fresh, id };
+  if (index >= 0 && (cachedAffiliates[index].walletRevision || 0) > (refreshed.walletRevision || 0)) {
+    return cachedAffiliates[index];
+  }
   if (index >= 0) {
     cachedAffiliates[index] = refreshed;
   } else {
@@ -557,10 +662,8 @@ export const affiliateStore = {
       } else if (fs.existsSync(SETTINGS_FILE)) {
         const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
         cachedSettings = normalizeAffiliateSettings({ ...cachedSettings, ...JSON.parse(raw) });
-        setFirestoreDoc('site_configs', 'affiliate_settings', cachedSettings).catch(() => {});
       } else {
         writeJsonFileSync(SETTINGS_FILE, cachedSettings);
-        setFirestoreDoc('site_configs', 'affiliate_settings', cachedSettings).catch(() => {});
       }
     } catch {
       writeJsonFileSync(SETTINGS_FILE, cachedSettings);
@@ -576,18 +679,8 @@ export const affiliateStore = {
       } else if (fs.existsSync(LITERARY_CIRCLE_SETTINGS_FILE)) {
         const raw = fs.readFileSync(LITERARY_CIRCLE_SETTINGS_FILE, 'utf-8');
         cachedLiteraryCircleSettings = normalizeLiteraryCircleSettings(JSON.parse(raw));
-        setFirestoreDoc(
-          'site_configs',
-          LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
-          cachedLiteraryCircleSettings
-        ).catch(() => {});
       } else {
         writeJsonFileSync(LITERARY_CIRCLE_SETTINGS_FILE, cachedLiteraryCircleSettings);
-        setFirestoreDoc(
-          'site_configs',
-          LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
-          cachedLiteraryCircleSettings
-        ).catch(() => {});
       }
     } catch (error) {
       console.warn('[AffiliateStore] Error loading Literary Circle settings:', error);
@@ -611,9 +704,8 @@ export const affiliateStore = {
             ...a,
             acceptedTerms: a.acceptedTerms !== undefined ? a.acceptedTerms : true
           }));
-          for (const aff of cachedAffiliates) {
-            setFirestoreDoc('affiliates', aff.id, aff).catch(() => {});
-          }
+          // Display-only local fallback. Cloud recovery requires an explicitly
+          // reviewed backup restore, never startup upload of a stale snapshot.
         }
       } else {
         cachedAffiliates = [];
@@ -634,9 +726,7 @@ export const affiliateStore = {
         const raw = fs.readFileSync(COMMISSIONS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         cachedCommissions = Array.isArray(parsed) ? parsed : [];
-        for (const comm of cachedCommissions) {
-          setFirestoreDoc('affiliate_commissions', comm.id, comm).catch(() => {});
-        }
+        // Never resurrect financial records from a local display snapshot.
       } else {
         cachedCommissions = [];
         writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
@@ -655,9 +745,7 @@ export const affiliateStore = {
         const raw = fs.readFileSync(PAYOUTS_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         cachedPayouts = Array.isArray(parsed) ? parsed : [];
-        for (const p of cachedPayouts) {
-          setFirestoreDoc('affiliate_payouts', p.id, p).catch(() => {});
-        }
+        // Never resurrect payout records from a local display snapshot.
       } else {
         cachedPayouts = [];
         writeJsonFileSync(PAYOUTS_FILE, cachedPayouts);
@@ -697,9 +785,8 @@ export const affiliateStore = {
         const raw = fs.readFileSync(AUDIT_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         cachedAuditLogs = Array.isArray(parsed) ? parsed : [];
-        for (const a of cachedAuditLogs) {
-          setFirestoreDoc('affiliate_audit', a.id, a).catch(() => {});
-        }
+        // Audit/receipt claims must originate from committed transactions.
+        // A local snapshot is not authority to create immutable cloud evidence.
       } else {
         cachedAuditLogs = [];
         writeJsonFileSync(AUDIT_FILE, cachedAuditLogs);
@@ -822,10 +909,11 @@ export const affiliateStore = {
     const requestedRevision = Number.isSafeInteger(expectedRevision) && Number(expectedRevision) >= 0
       ? Number(expectedRevision)
       : 0;
-    const settingsReference = getDb()
+    const settingsDb = getDb();
+    const settingsReference = settingsDb
       .collection('site_configs')
       .doc(LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID);
-    const persisted = await getDb().runTransaction(async firestoreTransaction => {
+    const persisted = await settingsDb.runTransaction(async firestoreTransaction => {
       const snapshot = await firestoreTransaction.get(settingsReference);
       const previous = normalizeLiteraryCircleSettings(
         snapshot.exists
@@ -921,22 +1009,25 @@ export const affiliateStore = {
         ...nextPolicySettings,
         commissionPolicyHistory: policyHistory
       });
+      const audit: AffiliateAuditLogEntry = {
+        id: literaryCircleNotificationAuditId(next.revision || 0), timestamp: now,
+        actor, action: 'literary_circle_settings_updated', targetType: 'settings',
+        targetId: LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
+        summary: 'Updated Literary Circle configuration',
+        previousValue: sanitizeAuditValue(previous), newValue: sanitizeAuditValue(next),
+      };
       firestoreTransaction.set(settingsReference, next, { merge: false });
-      return { previous, next };
+      firestoreTransaction.create(settingsDb.collection('affiliate_audit').doc(audit.id), audit);
+      return { previous, next, audit };
+    }).catch(error => {
+      if (error instanceof LiteraryCircleSettingsConflictError || error instanceof LiteraryCircleValidationError) throw error;
+      throw new Error('Literary Circle settings could not be committed. Please retry.');
     });
 
     // Publish the process-local copy only after the atomic source-of-truth
     // write succeeds. A stale editor therefore cannot revive old content.
     const published = publishLiteraryCircleSettingsSnapshot(persisted.next);
-    this.recordAudit(
-      actor,
-      'literary_circle_settings_updated',
-      'settings',
-      'Updated Literary Circle configuration',
-      LITERARY_CIRCLE_SETTINGS_DOCUMENT_ID,
-      persisted.previous,
-      persisted.next
-    );
+    this.rememberCommittedAudit(persisted.audit);
     return published;
   },
 
@@ -1379,6 +1470,10 @@ export const affiliateStore = {
     writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
     this.recordAudit(actor, 'affiliate_created', 'affiliate', `Created affiliate ${newAffiliate.name} (${newAffiliate.affiliateCode})`, id, null, newAffiliate);
 
+    if (newAffiliate.status === 'active' && newAffiliate.approvedAt && newAffiliate.approvedBy) {
+      await prepareCommittedAffiliateNotification({ db, kind: 'activation', sourceId: newAffiliate.id });
+    }
+
     return newAffiliate;
   },
 
@@ -1410,6 +1505,10 @@ export const affiliateStore = {
   },
 
   updateAffiliate(id: string, patch: Partial<AffiliateAccount>, actor = 'Admin'): AffiliateAccount {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Affiliate profile changes must be an object.');
+    if (Object.keys(patch).some(key => /^(balance|total|wallet|activePayout|payoutPaid|payoutReserved|reservedPayout)/i.test(key))) {
+      throw new AffiliateWalletValidationError('Wallet balances and financial records cannot be changed through profile edits. Use the audited wallet workflow.');
+    }
     const index = cachedAffiliates.findIndex(a => a.id === id);
     if (index < 0) {
       throw new Error("Affiliate not found.");
@@ -1424,8 +1523,11 @@ export const affiliateStore = {
       // can move those reservations atomically.
       email: _ignoredEmail,
       affiliateCode: _ignoredAffiliateCode,
-      ...safePatch
+      ...candidatePatch
     } = patch;
+    const editable = new Set(['name', 'phone', 'customCommissionRate', 'payoutMethod', 'payoutDetails',
+      'allowedPieceIds', 'attributionDays', 'notes', 'acceptedTerms', 'termsVersion', 'termsAcceptedAt', 'lastLoginAt']);
+    const safePatch = Object.fromEntries(Object.entries(candidatePatch).filter(([key]) => editable.has(key))) as Partial<AffiliateAccount>;
     const updated: AffiliateAccount = {
       ...prev,
       ...safePatch,
@@ -1923,6 +2025,7 @@ export const affiliateStore = {
       .slice(0, 40)}`;
     const db = getDb();
     const commissionRef = db.collection('affiliate_commissions').doc(commissionId);
+    const buyerAnalyticsRuntime = resolveAffiliateBuyerAnalyticsRuntime();
 
     const persisted = await db.runTransaction(async firestoreTransaction => {
       const existingSnapshot = await firestoreTransaction.get(commissionRef);
@@ -2231,10 +2334,15 @@ export const affiliateStore = {
         monthlyVerifiedSalesAfter: monthlyVerifiedSales, paymentType: tx.type,
       });
       if (tierTransition) commission.literaryCircleTierTransition = tierTransition;
+      const buyerEvidence = buildCommittedAffiliateBuyerAnalyticsEvidence({
+        commission, transaction: tx, runtime: buyerAnalyticsRuntime,
+      });
+      if (buyerEvidence) commission.affiliateBuyerAnalytics = buyerEvidence;
       firestoreTransaction.create(commissionRef, commission);
       const affiliateIncrement: Record<string, unknown> = {
         totalSalesCount: FieldValue.increment(1),
         totalRevenueKes: FieldValue.increment(saleAmountKes),
+        walletRevision: FieldValue.increment(1),
         lastActivityAt: now
       };
       if (!isSelfReferral) {
@@ -2260,6 +2368,7 @@ export const affiliateStore = {
         affiliateId: freshAffiliate.id,
         freshAffiliate: {
           ...freshAffiliate,
+          walletRevision: (Number(freshAffiliate.walletRevision) || 0) + 1,
           totalSalesCount: (Number(freshAffiliate.totalSalesCount) || 0) + 1,
           totalRevenueKes: (Number(freshAffiliate.totalRevenueKes) || 0) + saleAmountKes,
           totalCommissionEarnedKes: (Number(freshAffiliate.totalCommissionEarnedKes) || 0) + (isSelfReferral ? 0 : commissionAmountKes),
@@ -2337,58 +2446,69 @@ export const affiliateStore = {
     if (filter?.transactionId) {
       list = list.filter(c => c.transactionId === filter.transactionId);
     }
-    return list;
+    return list.map(withoutAffiliateBuyerAnalytics);
   },
 
-  updateCommissionStatus(commissionId: string, status: CommissionStatus, actor = 'Admin', reason?: string): AffiliateSaleCommission {
-    const commission = cachedCommissions.find(c => c.id === commissionId);
-    if (!commission) {
-      throw new Error("Commission record not found.");
+  async updateCommissionStatus(commissionId: string, status: CommissionStatus, actor = 'Admin', reason?: string): Promise<AffiliateSaleCommission> {
+    if (!walletIdentifier(commissionId) || !['PENDING', 'APPROVED', 'PAID', 'REJECTED', 'REVERSED'].includes(status)) {
+      throw new AffiliateWalletValidationError('Choose a valid commission and status.');
     }
-
-    const prevStatus = commission.status;
-    if (prevStatus === status) return commission;
-
-    const affiliate = this.getAffiliateById(commission.affiliateId);
-    const amount = commission.commissionAmountKes;
-
-    // Adjust balances based on state transition
-    if (affiliate) {
-      if (prevStatus === 'PENDING' && status === 'APPROVED') {
-        affiliate.balancePendingKes = Math.max(0, (affiliate.balancePendingKes || 0) - amount);
-        affiliate.balanceAvailableKes = (affiliate.balanceAvailableKes || 0) + amount;
-      } else if (prevStatus === 'APPROVED' && (status === 'REVERSED' || status === 'REJECTED')) {
-        affiliate.balanceAvailableKes = Math.max(0, (affiliate.balanceAvailableKes || 0) - amount);
-      } else if (prevStatus === 'PENDING' && (status === 'REVERSED' || status === 'REJECTED')) {
-        affiliate.balancePendingKes = Math.max(0, (affiliate.balancePendingKes || 0) - amount);
+    if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1_000 || /[\u0000-\u001f\u007f]/.test(reason))) {
+      throw new AffiliateWalletValidationError('Commission notes must contain at most 1000 plain-text characters.');
+    }
+    const db = getDb();
+    const committed = await db.runTransaction(async transaction => {
+      const commissionRef = db.collection('affiliate_commissions').doc(commissionId);
+      const snapshot = await transaction.get(commissionRef);
+      if (!snapshot.exists) throw new AffiliateWalletValidationError('Commission record not found.');
+      const stored = snapshot.data() as AffiliateSaleCommission;
+      const commission = readWalletCommission(stored, commissionId, stored.affiliateId);
+      if (commission.status === status) return { commissions: [commission], audit: undefined };
+      const permitted = commission.status === 'PENDING' && ['APPROVED', 'REJECTED', 'REVERSED'].includes(status)
+        || commission.status === 'APPROVED' && ['REJECTED', 'REVERSED'].includes(status);
+      if (!permitted) throw new AffiliateWalletValidationError('This commission transition is not allowed. Paid commissions require a reviewed refund/chargeback adjustment.');
+      if (status === 'APPROVED' && commission.fraudFlag?.flagged) walletReview('A flagged commission needs an explicit fraud review before approval.');
+      if (walletMoney(commission.payoutReservedKes, true) > 0 || commission.reservedPayoutId) {
+        throw new AffiliateWalletValidationError('Cancel the active payout before reversing or rejecting a reserved commission.');
       }
-      writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-    }
-
-    commission.status = status;
-    if (status === 'APPROVED' && !commission.approvedAt) {
-      commission.approvedAt = new Date().toISOString();
-    }
-    if (status === 'REVERSED') {
-      commission.reversedAt = new Date().toISOString();
-      commission.reversalReason = reason || 'Reversed by admin';
-    }
-    writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
-    setFirestoreDoc('affiliate_commissions', commission.id, commission).catch(() => {});
-
-    this.recordAudit(actor, 'commission_status_change', 'commission', `Changed commission #${commission.receiptNumber} status from ${prevStatus} to ${status}${reason ? ` (${reason})` : ''}`, commission.id, { status: prevStatus }, { status });
-
-    return commission;
+      if (walletMoney(commission.payoutPaidKes, true) > 0 || commission.payoutId) walletReview('Part-paid commissions need writer review before refund or reversal; historical payouts were not changed.');
+      const affiliateRef = db.collection('affiliates').doc(commission.affiliateId);
+      const accountSnapshot = await transaction.get(affiliateRef);
+      const affiliate = readWalletAccount(accountSnapshot.data() as AffiliateAccount | undefined, commission.affiliateId);
+      const amount = walletMoney(commission.commissionAmountKes);
+      const from = commission.status === 'PENDING' ? 'balancePendingKes' : 'balanceAvailableKes';
+      if (affiliate[from] < amount) walletReview('Durable wallet balance does not cover this commission. No amount was clamped or removed; writer review is required.');
+      const accountPatch: Partial<AffiliateAccount> = {
+        walletLedgerVersion: 1, walletRevision: walletNextRevision(affiliate.walletRevision),
+        [from]: affiliate[from] - amount,
+        ...(status === 'APPROVED' ? { balanceAvailableKes: walletMoney(affiliate.balanceAvailableKes + amount) }
+          : { totalCommissionReversedKes: walletMoney(walletMoney(affiliate.totalCommissionReversedKes, true) + amount) }),
+      };
+      const now = new Date().toISOString();
+      const next: AffiliateSaleCommission = { ...commission, status, walletLedgerVersion: 1,
+        walletRevision: walletNextRevision(commission.walletRevision),
+        ...(status === 'APPROVED' ? { approvedAt: commission.approvedAt || now }
+          : { reversedAt: now, reversalReason: reason?.trim() || 'Reversed or rejected by writer' }),
+      };
+      const audit = walletAudit(actor, 'commission_status_change', 'commission', commissionId,
+        { status: commission.status }, { status, amountKes: amount, reason: reason || null });
+      transaction.set(commissionRef, next, { merge: false });
+      transaction.set(affiliateRef, accountPatch, { merge: true });
+      transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
+      return { affiliate: { ...affiliate, ...accountPatch }, commissions: [next], audit };
+    }).catch(walletCommitFailure);
+    publishWalletCommit(committed);
+    if (committed.audit) this.rememberCommittedAudit(committed.audit);
+    return withoutAffiliateBuyerAnalytics(committed.commissions[0]);
   },
 
-  reverseCommissionForTransaction(transactionId: string, reason = "Payment refund or chargeback", actor = 'System'): boolean {
-    const commissions = cachedCommissions.filter(c => c.transactionId === transactionId && c.status !== 'REVERSED');
-    if (commissions.length === 0) return false;
-
-    commissions.forEach(c => {
-      this.updateCommissionStatus(c.id, 'REVERSED', actor, reason);
-    });
-
+  async reverseCommissionForTransaction(transactionId: string, reason = 'Payment refund or chargeback', actor = 'System'): Promise<boolean> {
+    if (!walletIdentifier(transactionId)) throw new AffiliateWalletValidationError('A valid transaction identifier is required.');
+    const snapshot = await getDb().collection('affiliate_commissions').where('transactionId', '==', transactionId).limit(2).get();
+    if (snapshot.docs.length > 1) walletReview('Duplicate transaction commissions need writer review before reversal.');
+    const document = snapshot.docs[0];
+    if (!document) return false;
+    await this.updateCommissionStatus(document.id, 'REVERSED', actor, reason);
     return true;
   },
 
@@ -2404,124 +2524,190 @@ export const affiliateStore = {
     return list;
   },
 
-  requestPayout(affiliateId: string, requestedAmountKes?: number, notes?: string): AffiliatePayoutRequest {
-    const affiliate = this.getAffiliateById(affiliateId);
-    if (!affiliate) {
-      throw new Error("Affiliate not found.");
+  async requestPayout(affiliateId: string, requestedAmountKes?: number, notes?: string): Promise<AffiliatePayoutRequest> {
+    if (!walletIdentifier(affiliateId)) throw new AffiliateWalletValidationError('Affiliate not found.');
+    if (notes !== undefined && (typeof notes !== 'string' || notes.length > 1_000 || /[\u0000-\u001f\u007f]/.test(notes))) {
+      throw new AffiliateWalletValidationError('Payout notes must contain at most 1000 plain-text characters.');
     }
-
-    const available = affiliate.balanceAvailableKes || 0;
-    const minThreshold = cachedSettings.minPayoutThresholdKes || 1000;
-
-    if (available < minThreshold) {
-      throw new Error(`Available balance (KES ${available.toLocaleString()}) has not reached the minimum payout threshold of KES ${minThreshold.toLocaleString()}.`);
-    }
-
-    const amount = requestedAmountKes === undefined ? available : requestedAmountKes;
-    if (!Number.isSafeInteger(amount) || amount <= 0) {
-      throw new Error("Payout amount must be a whole Kenyan-shilling amount greater than zero.");
-    }
-    if (amount < minThreshold) {
-      throw new Error(`Payout amount must be at least the configured minimum of KES ${minThreshold.toLocaleString()}.`);
-    }
-    if (amount > available) {
-      throw new Error(`Payout amount cannot exceed the available balance of KES ${available.toLocaleString()}.`);
-    }
-
-    const activePayout = cachedPayouts.find(payout =>
-      payout.affiliateId === affiliate.id
-      && ['PENDING', 'APPROVED', 'PROCESSING'].includes(payout.status)
-    );
-    if (activePayout) {
-      throw new Error(`A payout request for KES ${activePayout.amountKes.toLocaleString()} is already awaiting processing.`);
-    }
-
-    // Find all approved un-paid commissions for this affiliate
-    const eligibleCommissions = cachedCommissions.filter(c => c.affiliateId === affiliate.id && c.status === 'APPROVED' && !c.payoutId);
-    const commissionIds = eligibleCommissions.map(c => c.id);
-
-    const now = new Date().toISOString();
-    const payout: AffiliatePayoutRequest = {
-      id: `payout_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-      affiliateId: affiliate.id,
-      affiliateCode: affiliate.affiliateCode,
-      affiliateName: affiliate.name,
-      amountKes: amount,
-      salesCount: eligibleCommissions.length,
-      commissionIds,
-      payoutMethod: affiliate.payoutMethod,
-      payoutDetails: { ...affiliate.payoutDetails },
-      status: 'PENDING',
-      requestedAt: now,
-      notes: notes || 'Requested from affiliate portal'
-    };
-
-    cachedPayouts.unshift(payout);
-    writeJsonFileSync(PAYOUTS_FILE, cachedPayouts);
-    setFirestoreDoc('affiliate_payouts', payout.id, payout).catch(() => {});
-
-    this.recordAudit(`Affiliate (${affiliate.name})`, 'payout_requested', 'payout', `Requested payout of KES ${amount.toLocaleString()} via ${affiliate.payoutMethod}`, payout.id, null, payout);
-
-    return payout;
+    const db = getDb();
+    const payoutId = `payout_${crypto.randomBytes(20).toString('hex')}`;
+    const committed = await db.runTransaction(async transaction => {
+      const affiliateRef = db.collection('affiliates').doc(affiliateId);
+      const [affiliateSnapshot, settingsSnapshot, ...activeSnapshots] = await Promise.all([
+        transaction.get(affiliateRef), transaction.get(db.collection('site_configs').doc('affiliate_settings')),
+        ...ACTIVE_WALLET_PAYOUT_STATUSES.map(status => transaction.get(db.collection('affiliate_payouts')
+          .where('affiliateId', '==', affiliateId).where('status', '==', status).limit(2))),
+      ]);
+      const affiliate = readWalletAccount(affiliateSnapshot.data() as AffiliateAccount | undefined, affiliateId);
+      const activeDocuments = activeSnapshots.flatMap(snapshot => (snapshot as any).docs || []);
+      if (activeDocuments.length) {
+        if (activeDocuments.length > 1 || activeDocuments.some(document => document.data().walletLedgerVersion !== 1)) {
+          walletReview('Existing legacy or duplicate payout requests need writer review before another request.');
+        }
+        throw new AffiliateWalletValidationError('A payout request is already awaiting processing.');
+      }
+      if (affiliate.activePayoutId || walletMoney(affiliate.balanceReservedKes, true) !== 0) walletReview('An unmatched payout reservation needs writer review.');
+      if (!settingsSnapshot.exists) walletReview('Durable payout settings are unavailable; no payout was reserved.');
+      const threshold = walletMoney(settingsSnapshot.data()?.minPayoutThresholdKes);
+      if (threshold < 1) walletReview('The durable payout threshold must be reviewed.');
+      const available = walletMoney(affiliate.balanceAvailableKes);
+      const amount = requestedAmountKes === undefined ? available : requestedAmountKes;
+      if (!Number.isSafeInteger(amount) || amount <= 0) throw new AffiliateWalletValidationError('Payout amount must be a whole Kenyan-shilling amount greater than zero.');
+      if (amount < threshold) throw new AffiliateWalletValidationError(`Payout amount must be at least the configured minimum of KES ${threshold.toLocaleString()}.`);
+      if (amount > available) throw new AffiliateWalletValidationError(`Payout amount cannot exceed the available balance of KES ${available.toLocaleString()}.`);
+      const destination = affiliate.payoutMethod === 'mpesa' ? affiliate.payoutDetails?.mpesaPhone
+        : affiliate.payoutMethod === 'bank' ? affiliate.payoutDetails?.bankAccountNumber : affiliate.payoutDetails?.paypalEmail;
+      if (!['mpesa', 'bank', 'paypal'].includes(affiliate.payoutMethod) || !affiliate.payoutDetails
+        || typeof affiliate.payoutDetails !== 'object' || Array.isArray(affiliate.payoutDetails)
+        || typeof destination !== 'string' || !destination.trim() || destination.length > 160
+        || /[\u0000-\u001f\u007f]/.test(destination)) walletReview('Review payout destination details before requesting a payout.');
+      const commissionSnapshot = await transaction.get(db.collection('affiliate_commissions')
+        .where('affiliateId', '==', affiliateId).where('status', '==', 'APPROVED').limit(MAX_WALLET_PAYOUT_COMMISSIONS + 1));
+      if (commissionSnapshot.docs.length > MAX_WALLET_PAYOUT_COMMISSIONS) walletReview('More than 400 unpaid commissions need a reviewed staged payout; no records were changed.');
+      const eligible = commissionSnapshot.docs.map(document => readWalletCommission(document.data() as AffiliateSaleCommission, document.id, affiliateId))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      if (eligible.some(commission => walletMoney(commission.payoutReservedKes, true) > 0 || commission.reservedPayoutId)) walletReview('Existing commission reservations need writer review.');
+      let remaining = amount;
+      const allocations: NonNullable<AffiliatePayoutRequest['allocations']> = [];
+      const commissions: AffiliateSaleCommission[] = [];
+      for (const commission of eligible) {
+        if (!remaining) break;
+        const unpaid = commission.commissionAmountKes - walletMoney(commission.payoutPaidKes, true);
+        if (commission.fraudFlag?.flagged || unpaid <= 0) continue;
+        const allocated = Math.min(remaining, unpaid);
+        allocations.push({ commissionId: commission.id, amountKes: allocated });
+        commissions.push({ ...commission, walletLedgerVersion: 1, walletRevision: walletNextRevision(commission.walletRevision),
+          payoutPaidKes: walletMoney(commission.payoutPaidKes, true), payoutReservedKes: allocated, reservedPayoutId: payoutId });
+        remaining -= allocated;
+      }
+      if (remaining) walletReview('Verified unpaid commission records do not cover this request; balances were not changed.');
+      const now = new Date().toISOString();
+      const payout: AffiliatePayoutRequest = { id: payoutId, affiliateId, affiliateCode: affiliate.affiliateCode,
+        affiliateName: affiliate.name, amountKes: amount, salesCount: allocations.length,
+        commissionIds: allocations.map(row => row.commissionId), allocations,
+        payoutMethod: affiliate.payoutMethod, payoutDetails: structuredClone(affiliate.payoutDetails),
+        status: 'PENDING', requestedAt: now, notes: notes?.trim() || 'Requested from affiliate portal',
+        walletLedgerVersion: 1, walletRevision: 1,
+      };
+      const patch: Partial<AffiliateAccount> = { walletLedgerVersion: 1, walletRevision: walletNextRevision(affiliate.walletRevision),
+        balanceAvailableKes: available - amount, balanceReservedKes: amount, activePayoutId: payoutId };
+      const audit = walletAudit(`Affiliate (${affiliate.name})`, 'payout_requested', 'payout', payoutId, null,
+        { affiliateId, amountKes: amount, commissionIds: payout.commissionIds, status: payout.status });
+      for (const commission of commissions) transaction.set(db.collection('affiliate_commissions').doc(commission.id), commission, { merge: false });
+      transaction.set(affiliateRef, patch, { merge: true });
+      transaction.create(db.collection('affiliate_payouts').doc(payoutId), payout);
+      transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
+      return { affiliate: { ...affiliate, ...patch }, commissions, payout, audit };
+    }).catch(walletCommitFailure);
+    publishWalletCommit(committed);
+    this.rememberCommittedAudit(committed.audit);
+    return committed.payout;
   },
 
-  processPayout(payoutId: string, action: 'approve' | 'mark_paid' | 'reject' | 'fail', paymentReference?: string, notes?: string, actor = 'Admin'): AffiliatePayoutRequest {
-    const payout = cachedPayouts.find(p => p.id === payoutId);
-    if (!payout) {
-      throw new Error("Payout request not found.");
+  async processPayout(payoutId: string, action: 'approve' | 'mark_paid' | 'reject' | 'fail', paymentReference?: string, notes?: string, actor = 'Admin'): Promise<AffiliatePayoutRequest> {
+    if (!walletIdentifier(payoutId) || !['approve', 'mark_paid', 'reject', 'fail'].includes(action)) throw new AffiliateWalletValidationError('Choose a valid payout and action.');
+    if (notes !== undefined && (typeof notes !== 'string' || notes.length > 1_000 || /[\u0000-\u001f\u007f]/.test(notes))) throw new AffiliateWalletValidationError('Payout notes must contain at most 1000 plain-text characters.');
+    const reference = typeof paymentReference === 'string' ? paymentReference.trim().toUpperCase() : '';
+    if (action === 'mark_paid' && (reference.length < 4 || reference.length > 128 || /[\u0000-\u001f\u007f]/.test(reference))) {
+      throw new AffiliateWalletValidationError('Enter the verified payment receipt/reference before confirming a payout as paid. No payment reference will be generated.');
     }
-
-    const affiliate = this.getAffiliateById(payout.affiliateId);
-    const now = new Date().toISOString();
-
-    if (action === 'approve') {
-      payout.status = 'APPROVED';
-      payout.processedAt = now;
-      if (notes) payout.notes = notes;
-    } else if (action === 'mark_paid') {
-      payout.status = 'PAID';
-      payout.paidAt = now;
-      payout.paymentReference = paymentReference || `B2C_${Date.now().toString().slice(-8)}`;
-      if (notes) payout.notes = notes;
-
-      // Deduct from affiliate available balance and add to paid
-      if (affiliate) {
-        affiliate.balanceAvailableKes = Math.max(0, (affiliate.balanceAvailableKes || 0) - payout.amountKes);
-        affiliate.totalCommissionPaidKes = (affiliate.totalCommissionPaidKes || 0) + payout.amountKes;
-        writeJsonFileSync(AFFILIATES_FILE, cachedAffiliates);
-        setFirestoreDoc('affiliates', affiliate.id, {
-          balanceAvailableKes: affiliate.balanceAvailableKes,
-          totalCommissionPaidKes: affiliate.totalCommissionPaidKes
-        }).catch(() => {});
+    const db = getDb();
+    const committed = await db.runTransaction(async transaction => {
+      const payoutRef = db.collection('affiliate_payouts').doc(payoutId);
+      const snapshot = await transaction.get(payoutRef);
+      if (!snapshot.exists) throw new AffiliateWalletValidationError('Payout request not found.');
+      const payout = { ...(snapshot.data() as AffiliatePayoutRequest), id: payoutId };
+      if (snapshot.data()?.id !== undefined && snapshot.data()?.id !== payoutId) walletReview();
+      const targetStatus: PayoutStatus = action === 'approve' ? 'APPROVED' : action === 'mark_paid' ? 'PAID' : action === 'reject' ? 'REJECTED' : 'FAILED';
+      if (payout.status === targetStatus) {
+        if (action === 'mark_paid' && payout.paymentReference?.trim().toUpperCase() !== reference) throw new AffiliateWalletValidationError('This payout was already paid with a different reference; historical payment evidence was not changed.');
+        return { payout, audit: undefined };
       }
-
-      // Mark linked commissions as PAID
-      if (payout.commissionIds && payout.commissionIds.length > 0) {
-        cachedCommissions.forEach(c => {
-          if (payout.commissionIds.includes(c.id)) {
-            c.status = 'PAID';
-            c.payoutId = payout.id;
-            c.paidAt = now;
-            setFirestoreDoc('affiliate_commissions', c.id, c).catch(() => {});
-          }
+      if (!ACTIVE_WALLET_PAYOUT_STATUSES.includes(payout.status as typeof ACTIVE_WALLET_PAYOUT_STATUSES[number])) {
+        throw new AffiliateWalletValidationError('This payout is already final and cannot change state.');
+      }
+      if (action === 'approve' && payout.status !== 'PENDING') throw new AffiliateWalletValidationError('Only a pending payout can be approved.');
+      if (action === 'mark_paid' && payout.status !== 'APPROVED' && payout.status !== 'PROCESSING') {
+        throw new AffiliateWalletValidationError('Approve this payout before confirming its completed payment.');
+      }
+      if (payout.walletLedgerVersion !== 1 || !walletIdentifier(payout.affiliateId)
+        || !Array.isArray(payout.allocations) || !payout.allocations.length
+        || payout.allocations.length > MAX_WALLET_PAYOUT_COMMISSIONS || !Array.isArray(payout.commissionIds)
+        || payout.commissionIds.length !== payout.allocations.length) walletReview('This legacy payout needs writer reconciliation before processing. No balances or historical records were changed.');
+      const allocatedIds = new Set<string>();
+      let total = 0;
+      for (const [index, allocation] of payout.allocations.entries()) {
+        if (!allocation || !walletIdentifier(allocation.commissionId) || allocatedIds.has(allocation.commissionId)
+          || allocation.commissionId !== payout.commissionIds[index] || walletMoney(allocation.amountKes) <= 0) walletReview();
+        allocatedIds.add(allocation.commissionId); total += allocation.amountKes;
+      }
+      if (total !== walletMoney(payout.amountKes) || total <= 0 || payout.salesCount !== allocatedIds.size) walletReview();
+      walletNextRevision(payout.walletRevision);
+      const affiliateRef = db.collection('affiliates').doc(payout.affiliateId);
+      const [affiliateSnapshot, ...commissionSnapshots] = await Promise.all([
+        transaction.get(affiliateRef), ...payout.allocations.map(allocation => transaction.get(db.collection('affiliate_commissions').doc(allocation.commissionId))),
+      ]);
+      const affiliate = readWalletAccount(affiliateSnapshot.data() as AffiliateAccount | undefined, payout.affiliateId);
+      if (affiliate.walletLedgerVersion !== 1 || affiliate.activePayoutId !== payoutId
+        || walletMoney(affiliate.balanceReservedKes, true) !== total) walletReview('Wallet and payout reservations do not match; writer reconciliation is required.');
+      const commissions = commissionSnapshots.map((row, index) => {
+        const allocation = payout.allocations![index];
+        const commission = readWalletCommission(row.data() as AffiliateSaleCommission | undefined, allocation.commissionId, affiliate.id);
+        if (commission.walletLedgerVersion !== 1 || commission.status !== 'APPROVED'
+          || commission.reservedPayoutId !== payoutId || commission.payoutReservedKes !== allocation.amountKes
+          || ((action === 'approve' || action === 'mark_paid') && commission.fraudFlag?.flagged)) walletReview('A linked commission changed or its reservation does not match. No payout was marked paid.');
+        return commission;
+      });
+      if (action === 'mark_paid') {
+        // Legacy references were not canonicalized. Bounded transactional
+        // inspection catches case/space variants without rewriting history.
+        const otherPayments = await transaction.get(db.collection('affiliate_payouts').limit(1_001));
+        if (otherPayments.docs.length > 1_000) walletReview('Payout history exceeds the reviewed receipt-check bound; writer reconciliation is required.');
+        if (otherPayments.docs.some(document => document.id !== payoutId
+          && typeof document.data()?.paymentReference === 'string'
+          && document.data()!.paymentReference.trim().toUpperCase() === reference)) {
+          throw new AffiliateWalletValidationError('This payment reference is already attached to another payout; review the payment evidence.');
+        }
+        const receiptAuditId = `aud_payout_receipt_${crypto.createHash('sha256').update(reference).digest('hex')}`;
+        const receiptClaim = await transaction.get(db.collection('affiliate_audit').doc(receiptAuditId));
+        if (receiptClaim.exists) throw new AffiliateWalletValidationError('This payment reference is already attached to another payout; review the payment evidence.');
+      }
+      const now = new Date().toISOString();
+      const next: AffiliatePayoutRequest = { ...payout, status: targetStatus,
+        walletRevision: walletNextRevision(payout.walletRevision), processedAt: now,
+        ...(notes?.trim() ? { notes: notes.trim() } : {}),
+        ...(action === 'mark_paid' ? { paymentReference: reference, paidAt: now, confirmationMethod: 'writer_confirmed' as const } : {}),
+        ...(action === 'reject' ? { rejectedReason: notes?.trim() || 'Declined by writer' } : {}),
+      };
+      let accountPatch: Partial<AffiliateAccount> | undefined;
+      let nextCommissions: AffiliateSaleCommission[] = [];
+      if (action !== 'approve') {
+        accountPatch = { walletRevision: walletNextRevision(affiliate.walletRevision), balanceReservedKes: 0, activePayoutId: null,
+          ...(action === 'mark_paid' ? { totalCommissionPaidKes: walletMoney(affiliate.totalCommissionPaidKes + total) }
+            : { balanceAvailableKes: walletMoney(affiliate.balanceAvailableKes + total) }) };
+        nextCommissions = commissions.map((commission, index) => {
+          const paid = walletMoney(commission.payoutPaidKes, true) + (action === 'mark_paid' ? payout.allocations![index].amountKes : 0);
+          return { ...commission, payoutPaidKes: paid, payoutReservedKes: 0, reservedPayoutId: null,
+            walletRevision: walletNextRevision(commission.walletRevision),
+            ...(paid === commission.commissionAmountKes ? { status: 'PAID' as const, payoutId, paidAt: now } : {}),
+          };
         });
-        writeJsonFileSync(COMMISSIONS_FILE, cachedCommissions);
       }
-    } else if (action === 'reject') {
-      payout.status = 'REJECTED';
-      payout.rejectedReason = notes || 'Declined by administrator';
-      payout.processedAt = now;
-    } else if (action === 'fail') {
-      payout.status = 'FAILED';
-      payout.processedAt = now;
-      if (notes) payout.notes = notes;
-    }
-
-    writeJsonFileSync(PAYOUTS_FILE, cachedPayouts);
-    setFirestoreDoc('affiliate_payouts', payout.id, payout).catch(() => {});
-    this.recordAudit(actor, 'payout_processed', 'payout', `Processed payout #${payout.id} (Status: ${payout.status}, Amount: KES ${payout.amountKes.toLocaleString()}${paymentReference ? `, Ref: ${paymentReference}` : ''})`, payout.id, null, payout);
-
-    return payout;
+      const audit = walletAudit(actor, 'payout_processed', 'payout', payoutId,
+        { status: payout.status }, { status: next.status, amountKes: total, paymentReference: action === 'mark_paid' ? reference : null });
+      // This create is both the immutable audit and a shared global receipt
+      // claim. Concurrent payouts cannot commit the same canonical reference.
+      if (action === 'mark_paid') audit.id = `aud_payout_receipt_${crypto.createHash('sha256').update(reference).digest('hex')}`;
+      for (const commission of nextCommissions) transaction.set(db.collection('affiliate_commissions').doc(commission.id), commission, { merge: false });
+      if (accountPatch) transaction.set(affiliateRef, accountPatch, { merge: true });
+      transaction.set(payoutRef, next, { merge: false });
+      transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
+      return { affiliate: accountPatch ? { ...affiliate, ...accountPatch } : affiliate,
+        commissions: nextCommissions, payout: next, audit };
+    }).catch(walletCommitFailure);
+    publishWalletCommit(committed);
+    if (committed.audit) this.rememberCommittedAudit(committed.audit);
+    return committed.payout;
   },
 
   // CAMPAIGNS
@@ -2568,7 +2754,6 @@ export const affiliateStore = {
     // The same new code always contends on one document, even when both
     // transactions initially observe an empty code query. Existing IDs stay put.
     const id = request.id || `camp_${crypto.createHash('sha256').update(`affiliate-campaign-v1\0${createCode}`).digest('hex').slice(0, 40)}`;
-    const auditId = `aud_${crypto.randomBytes(16).toString('hex')}`;
     const safeActor = String(actor || 'Admin').trim().slice(0, 120) || 'Admin';
     try {
       const db = getDb();
@@ -2627,14 +2812,14 @@ export const affiliateStore = {
           revision: previousRevision + 1, updatedAt: now, updatedBy: safeActor,
         };
         const audit: AffiliateAuditLogEntry = {
-          id: auditId, timestamp: now, actor: safeActor, action: 'campaign_saved', targetType: 'campaign', targetId: id,
+          id: campaignNotificationAuditId(id, campaign.revision!), timestamp: now, actor: safeActor, action: 'campaign_saved', targetType: 'campaign', targetId: id,
           summary: `Saved campaign "${name}" (${code}) with ${commissionRate}% commission`,
           ...(previous ? { previousValue: sanitizeAuditValue(previous) } : {}),
           newValue: sanitizeAuditValue(campaign),
         };
         if (previous) transaction.set(campaignRef, campaign, { merge: false });
         else transaction.create(campaignRef, campaign);
-        transaction.create(db.collection('affiliate_audit').doc(auditId), audit);
+        transaction.create(db.collection('affiliate_audit').doc(audit.id), audit);
         return { campaign, audit };
       });
       publishCommittedAffiliateCampaignSnapshot(committed.campaign);
@@ -2762,8 +2947,8 @@ export const affiliateStore = {
 
     const commissionEarned = sales.reduce((acc, s) => acc + s.commissionAmountKes, 0);
     const commissionPending = sales.filter(s => s.status === 'PENDING').reduce((acc, s) => acc + s.commissionAmountKes, 0);
-    const commissionApproved = sales.filter(s => s.status === 'APPROVED').reduce((acc, s) => acc + s.commissionAmountKes, 0);
-    const commissionPaid = sales.filter(s => s.status === 'PAID').reduce((acc, s) => acc + s.commissionAmountKes, 0);
+    const commissionApproved = sales.filter(s => s.status === 'APPROVED').reduce((acc, s) => acc + s.commissionAmountKes - recordedAffiliateCommissionPaidKes(s), 0);
+    const commissionPaid = sales.reduce((acc, s) => acc + recordedAffiliateCommissionPaidKes(s), 0);
     const totalRevenue = sales.reduce((acc, s) => acc + s.saleAmountKes, 0);
     const dashboardAt = new Date().toISOString();
     const dashboardPolicy = resolveLiteraryCircleSettingsForTransaction(
@@ -2839,9 +3024,9 @@ export const affiliateStore = {
     const totalRevenueGeneratedKes = cachedCommissions.reduce((sum, c) => sum + c.saleAmountKes, 0);
     const totalCommissionsKes = cachedCommissions.reduce((sum, c) => sum + c.commissionAmountKes, 0);
     const pendingCommissionsKes = cachedCommissions.filter(c => c.status === 'PENDING').reduce((sum, c) => sum + c.commissionAmountKes, 0);
-    const approvedCommissionsKes = cachedCommissions.filter(c => c.status === 'APPROVED').reduce((sum, c) => sum + c.commissionAmountKes, 0);
-    const paidCommissionsKes = cachedCommissions.filter(c => c.status === 'PAID').reduce((sum, c) => sum + c.commissionAmountKes, 0);
-    const outstandingBalanceKes = affiliates.reduce((sum, a) => sum + (a.balanceAvailableKes || 0), 0);
+    const approvedCommissionsKes = cachedCommissions.filter(c => c.status === 'APPROVED').reduce((sum, c) => sum + c.commissionAmountKes - recordedAffiliateCommissionPaidKes(c), 0);
+    const paidCommissionsKes = cachedCommissions.reduce((sum, c) => sum + recordedAffiliateCommissionPaidKes(c), 0);
+    const outstandingBalanceKes = affiliates.reduce((sum, a) => sum + (a.balanceAvailableKes || 0) + (a.balanceReservedKes || 0), 0);
 
     const flaggedCount = cachedCommissions.filter(c => c.fraudFlag?.flagged && !c.fraudFlag.reviewed).length;
     const affiliateIdsWithVerifiedSales = new Set(
@@ -2904,7 +3089,7 @@ export const affiliateStore = {
       paidCommissionsKes,
       outstandingBalanceKes,
       affiliates,
-      recentSales: cachedCommissions.slice(0, 50),
+      recentSales: cachedCommissions.slice(0, 50).map(withoutAffiliateBuyerAnalytics),
       payouts: cachedPayouts,
       campaigns: cachedCampaigns,
       settings: cachedSettings,
@@ -2954,9 +3139,38 @@ export const affiliateStore = {
           keyFingerprint,
         });
     const useLegacyClickFallback = durableClicks.source === 'legacy';
+    const buyerRuntime = resolveAffiliateBuyerAnalyticsRuntime();
+    let analyticsCommissions = cachedCommissions;
+    let buyerProjection = projectStoredAffiliateBuyerAnalytics({
+      commissions: [], runtime: buyerRuntime, historyComplete: false,
+    });
+    let buyerReadReason: 'query_failed' | 'truncated' | undefined;
+    if (buyerRuntime.enabled) {
+      try {
+        // Read a fresh, bounded all-affiliate history: filtering first would steal acquisition credit.
+        const snapshot = await getDb().collection('affiliate_commissions').limit(MAX_AFFILIATE_BUYER_HISTORY + 1).get();
+        if (snapshot.docs.length > MAX_AFFILIATE_BUYER_HISTORY) {
+          buyerReadReason = 'truncated';
+        } else {
+          analyticsCommissions = snapshot.docs.map(document => ({
+            ...(document.data() as AffiliateSaleCommission), id: document.id,
+          }));
+          buyerProjection = projectStoredAffiliateBuyerAnalytics({
+            commissions: analyticsCommissions, runtime: buyerRuntime, historyComplete: true,
+          });
+        }
+      } catch {
+        // Analytics failure must never affect settlement. Do not invent identities from a stale cache.
+        buyerReadReason = 'query_failed';
+      }
+    }
     return buildAffiliateAnalyticsReport({
       affiliates: cachedAffiliates,
-      commissions: cachedCommissions,
+      commissions: analyticsCommissions,
+      ...(!buyerReadReason && buyerProjection.keysByCommissionId
+        ? { buyerKeysByCommissionId: buyerProjection.keysByCommissionId } : {}),
+      buyerHistoryComplete: !buyerReadReason && buyerProjection.historyComplete,
+      buyerHistoryReason: buyerReadReason || buyerProjection.reason,
       clickEvents: clickFilterUnsupported
         ? undefined
         : useLegacyClickFallback

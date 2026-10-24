@@ -214,6 +214,40 @@ describe('affiliate notification preferences', () => {
     expect(saved.preferences.marketingConsentAt).toBe('2026-10-01T00:00:00.000Z');
   });
 
+  it.each([
+    ['campaignUpdates', 'campaignUpdatesEnabledAt'],
+    ['inactivityReminders', 'inactivityRemindersEnabledAt'],
+    ['exclusiveOpportunities', 'exclusiveOpportunitiesEnabledAt'],
+  ] as const)('records independent server opt-in chronology for %s without backfilling or accepting spoofed dates', async (topic, evidence) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-23T10:00:00.000Z'));
+    const initial = {
+      ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+      marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+      marketingConsentAt: '2026-10-01T00:00:00.000Z', allMarketingOptOut: false,
+      [topic]: true,
+    };
+    expect(normalizeAffiliateNotificationPreferences(initial)[evidence]).toBeUndefined();
+    expect(normalizeAffiliateNotificationPreferences({ ...initial, [evidence]: '2026-10-01' })[evidence]).toBeUndefined();
+    firestore.documents.set('affiliates/aff-one', { id: 'aff-one', notificationPreferences: initial, balanceAvailableKes: 800 });
+    const update = { ...validUpdate(), [topic]: true };
+    const first = await saveAffiliateNotificationPreferences('aff-one', update, 'Affiliate');
+    expect(first.preferences[evidence]).toBe('2026-10-23T10:00:00.000Z');
+    vi.setSystemTime(new Date('2026-10-23T11:00:00.000Z'));
+    const again = await saveAffiliateNotificationPreferences('aff-one', { ...update, expectedRevision: 1 }, 'Affiliate');
+    expect(again.preferences[evidence]).toBe(first.preferences[evidence]);
+    await saveAffiliateNotificationPreferences('aff-one', { ...update, expectedRevision: 2, [topic]: false }, 'Affiliate');
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty(evidence);
+    const reenabled = await saveAffiliateNotificationPreferences('aff-one', { ...update, expectedRevision: 3 }, 'Affiliate');
+    expect(reenabled.preferences[evidence]).toBe('2026-10-23T11:00:00.000Z');
+    expect(reenabled.preferences.marketingConsentAt).toBe('2026-10-01T00:00:00.000Z');
+    expect(firestore.documents.get('affiliates/aff-one').balanceAvailableKes).toBe(800);
+    await expect(saveAffiliateNotificationPreferences('aff-one', { ...update, expectedRevision: 4, [evidence]: '2020-01-01T00:00:00.000Z' }, 'Affiliate')).rejects.toThrow(/unsupported/i);
+    const optedOut = await saveAffiliateNotificationPreferences('aff-one', { ...update, expectedRevision: 4, marketingConsent: false }, 'Affiliate');
+    expect(optedOut.preferences[evidence]).toBeUndefined();
+    expect(firestore.documents.get('affiliates/aff-one').notificationPreferences).not.toHaveProperty(evidence);
+  });
+
   it('turns a refusal into an explicit all-marketing opt-out and clears marketing categories', async () => {
     firestore.documents.set('affiliates/aff-one', {
       id: 'aff-one',

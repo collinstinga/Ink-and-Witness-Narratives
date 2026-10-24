@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { Firestore, DocumentReference } from 'firebase-admin/firestore';
+import type { Firestore, DocumentReference, Transaction } from 'firebase-admin/firestore';
 import type { AffiliateNotificationSource } from './affiliateNotificationPlan.js';
 import { getFirestoreClientTarget } from './db.js';
 import type { AffiliateAccount, AffiliateSaleCommission } from '../types.js';
@@ -9,13 +9,26 @@ import { MAX_TIER_TRANSITION_PRIOR_COMMISSIONS, validateStoredLiteraryCircleTier
 type SourceKind = 'activation' | 'new_commission' | 'new_release' | 'tier_upgrade';
 type PreparationStatus = 'disabled' | 'blocked' | 'ineligible' | 'created' | 'existing' | 'failed';
 interface PreparationResult { status: PreparationStatus; intentCount: number }
+export interface ResolvedAffiliateNotificationSource {
+  source: AffiliateNotificationSource;
+  /** Hash binds every validated document path and its complete snapshot. */
+  evidenceSha256: string;
+  /** Trusted business text. URL construction stays with the reviewed sender. */
+  context: Record<string, string>;
+  /** Re-read every source document in the caller's claim/send transaction. */
+  verifySource: (transaction: Transaction) => Promise<boolean>;
+  /** Delivery must atomically enforce this per-recipient elapsed-time bound. */
+  cooldown?: { key: string; minimumIntervalMs: number };
+}
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const SAFE_PROJECT = /^[a-z][a-z0-9-]{4,29}[a-z0-9]$/;
 const KNOWN_PRODUCTION = ['ink-and-witness-narratives', 'divine-experience-pq6d2'];
 export const MAX_AFFILIATE_NOTIFICATION_RECOVERY_IDS = 25;
 export const MAX_TIER_NOTIFICATION_RECOVERY_IDS = 5;
+/** Do not introduce an old release backlog when held automation is enabled. */
+export const AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS = 7 * 86_400_000;
 
-function gate(db: Firestore, env: NodeJS.ProcessEnv): 'held' | 'disabled' | 'blocked' {
+export function affiliateNotificationSourceGate(db: Firestore, env: NodeJS.ProcessEnv): 'held' | 'disabled' | 'blocked' {
   const mode = (env.AFFILIATE_NOTIFICATION_EVENT_MODE || 'off').trim().toLowerCase();
   if (mode === 'off') return 'disabled';
   if (mode !== 'held') return 'blocked';
@@ -33,7 +46,7 @@ function gate(db: Firestore, env: NodeJS.ProcessEnv): 'held' | 'disabled' | 'blo
   return 'held';
 }
 
-function fingerprint(value: unknown): string {
+export function affiliateNotificationSourceFingerprint(value: unknown): string {
   // Firestore records contain JSON-compatible business fields; use sorted keys
   // so independent snapshot projections compare the same document contents.
   const canonical = (item: unknown): unknown => {
@@ -75,7 +88,7 @@ function matchesSettlementTime(commission: Record<string, unknown>, payment: Rec
 }
 
 /** Internal post-commit adapter. Defaults off and can prepare held records only in staging. */
-export async function prepareCommittedAffiliateNotification(input: {
+async function consumeCommittedAffiliateNotification(input: {
   db: Firestore;
   kind: SourceKind;
   sourceId: string;
@@ -85,14 +98,15 @@ export async function prepareCommittedAffiliateNotification(input: {
    */
   affiliateIds?: string[];
   now?: string;
-}, env: NodeJS.ProcessEnv = process.env): Promise<PreparationResult> {
+  includeContext?: boolean;
+}, env: NodeJS.ProcessEnv, consume: (resolved: ResolvedAffiliateNotificationSource, audience: string[], now: string) => Promise<PreparationResult>): Promise<PreparationResult> {
   const result = (status: PreparationStatus): PreparationResult => ({ status, intentCount: 0 });
   try {
     const db = input.db;
     const kind = input.kind;
     const sourceId = input.sourceId;
     const suppliedNow = input.now;
-    const mode = gate(db, env);
+    const mode = affiliateNotificationSourceGate(db, env);
     if (mode !== 'held') return result(mode);
     if (!['activation', 'new_commission', 'new_release', 'tier_upgrade'].includes(kind)
       || typeof sourceId !== 'string' || !SAFE_ID.test(sourceId)) return result('ineligible');
@@ -110,13 +124,24 @@ export async function prepareCommittedAffiliateNotification(input: {
     if (!primarySnapshot?.exists) return result('ineligible');
     const primary = primarySnapshot.data()!;
     const refs: DocumentReference[] = [primaryRef];
-    const expected = [fingerprint(primary)];
+    const expected = [affiliateNotificationSourceFingerprint(primary)];
+    const context: Record<string, string> = {};
     let source: AffiliateNotificationSource;
     if (kind === 'activation') {
       const approvedAt = canonicalTime(primary.approvedAt, nowMs);
       if (primary.status !== 'active' || !approvedAt || typeof primary.approvedBy !== 'string'
         || !primary.approvedBy.trim()) return result('ineligible');
       source = { eventType: 'activation', sourceId: primaryRef.id, sourceVersion: Date.parse(approvedAt), occurredAt: approvedAt, targetAffiliateId: primaryRef.id };
+      if (input.includeContext) {
+        const settingsRef = db.collection('site_configs').doc('affiliate_literary_circle');
+        const [snapshot] = await db.getAll(settingsRef);
+        if (!snapshot?.exists) return result('ineligible');
+        const settings = normalizeLiteraryCircleSettings(snapshot.data());
+        const tier = settings.tiers.find(item => item.id === primary.literaryCircle?.tier?.id);
+        if (!tier || /[\u0000-\u001f]/.test(tier.name)) return result('ineligible');
+        context.tierName = tier.name;
+        refs.push(settingsRef); expected.push(affiliateNotificationSourceFingerprint(snapshot.data()));
+      }
     } else if (kind === 'new_release') {
       const occurredAt = canonicalTime(primary.queuedAt, nowMs);
       const createdAt = canonicalTime(primary.createdAt, nowMs);
@@ -124,6 +149,7 @@ export async function prepareCommittedAffiliateNotification(input: {
       if (primary.kind !== 'release' || !['queued', 'sending', 'sent', 'partially_sent'].includes(primary.status)
         || !occurredAt || !createdAt || primary.queuedAt !== occurredAt || primary.createdAt !== createdAt
         || createdAt > occurredAt
+        || nowMs >= Date.parse(occurredAt) + AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS
         || typeof pieceId !== 'string' || !SAFE_ID.test(pieceId)
         || typeof primary.createdBy !== 'string' || !primary.createdBy.trim()
         || primaryRef.id !== `nlc_${crypto.createHash('sha256').update(`release\0${pieceId}`).digest('hex').slice(0, 48)}`) {
@@ -133,7 +159,13 @@ export async function prepareCommittedAffiliateNotification(input: {
       const [articleSnapshot] = await db.getAll(articleRef);
       if (!articleSnapshot?.exists || articleSnapshot.data()?.status !== 'published') return result('ineligible');
       refs.push(articleRef);
-      expected.push(fingerprint(articleSnapshot.data()));
+      expected.push(affiliateNotificationSourceFingerprint(articleSnapshot.data()));
+      if (input.includeContext) {
+        const title = articleSnapshot.data()?.title;
+        if (typeof title !== 'string' || !title.trim() || title.length > 300 || /[\u0000-\u001f]/.test(title)) return result('ineligible');
+        context.pieceTitle = title;
+        context.piecePath = `/?monograph=${encodeURIComponent(pieceId)}`;
+      }
       source = { eventType: 'new_release', sourceId: primaryRef.id, sourceVersion: 1, occurredAt };
     } else {
       const occurredAt = canonicalTime(primary.createdAt, nowMs);
@@ -150,7 +182,18 @@ export async function prepareCommittedAffiliateNotification(input: {
       const payment = paymentSnapshot.data()!;
       if (!matchesConfirmedPurchase(primary, payment)) return result('ineligible');
       refs.push(paymentRef);
-      expected.push(fingerprint(payment));
+      expected.push(affiliateNotificationSourceFingerprint(payment));
+      if (input.includeContext && kind === 'new_commission') {
+        const articleRef = db.collection('articles').doc(primary.articleId);
+        const [snapshot] = await db.getAll(articleRef);
+        const title = snapshot?.data()?.title;
+        context.pieceTitle = typeof title === 'string' && title.trim() && title.length <= 300 && !/[\u0000-\u001f]/.test(title)
+          ? title : 'a literary purchase';
+        context.commissionAmount = `KES ${Number(primary.commissionAmountKes).toFixed(2)}`;
+        // Missing legacy pieces still support a truthful financial alert. Keep
+        // existence in the transaction fingerprint so a concurrent edit retries.
+        refs.push(articleRef); expected.push(affiliateNotificationSourceFingerprint(snapshot?.exists ? snapshot.data() : null));
+      }
       if (kind === 'tier_upgrade') {
         if (!matchesSettlementTime(primary, payment)) return result('ineligible');
         const priorIds: unknown = primary.literaryCircleTierTransition?.qualifyingCommissionIds;
@@ -167,6 +210,11 @@ export async function prepareCommittedAffiliateNotification(input: {
         if ([settingsRef, affiliateRef, ...priorRefs].some(ref => !byPath.get(ref.path)?.exists)
           || priorRefs.some(ref => byPath.get(ref.path)!.data()?.id !== ref.id)) return result('ineligible');
         const settings = resolveLiteraryCircleSettingsForTransaction(normalizeLiteraryCircleSettings(byPath.get(settingsRef.path)!.data()), occurredAt);
+        if (input.includeContext) {
+          const tier = settings.tiers.find(item => item.id === primary.literaryCircleTierTransition?.toTierId);
+          if (!tier || /[\u0000-\u001f]/.test(tier.name)) return result('ineligible');
+          context.tierName = tier.name;
+        }
         const affiliate = { ...byPath.get(affiliateRef.path)!.data(), id: affiliateRef.id } as AffiliateAccount;
         const history = priorRefs.map(ref => ({ ...byPath.get(ref.path)!.data(), id: ref.id } as AffiliateSaleCommission));
         if (!validateStoredLiteraryCircleTierTransition({
@@ -183,35 +231,70 @@ export async function prepareCommittedAffiliateNotification(input: {
               || !matchesSettlementTime(commission as unknown as Record<string, unknown>, snapshot.data()!);
           })) return result('ineligible');
           for (const ref of priorPaymentRefs) {
-            refs.push(ref); expected.push(fingerprint(paymentsByPath.get(ref.path)!.data()));
+            refs.push(ref); expected.push(affiliateNotificationSourceFingerprint(paymentsByPath.get(ref.path)!.data()));
           }
         }
         for (const ref of [settingsRef, affiliateRef, ...priorRefs]) {
-          refs.push(ref); expected.push(fingerprint(byPath.get(ref.path)!.data()));
+          refs.push(ref); expected.push(affiliateNotificationSourceFingerprint(byPath.get(ref.path)!.data()));
         }
       }
       source = { eventType: kind === 'tier_upgrade' ? 'tier_upgrade' : 'new_commission', sourceId: primaryRef.id, sourceVersion: 1, occurredAt, targetAffiliateId: primary.affiliateId,
         ...(kind === 'tier_upgrade' ? { targetTierId: primary.literaryCircleTierTransition.toTierId } : {}),
       };
     }
-    const { storeHeldAffiliateNotifications } = await import('./affiliateNotificationOutbox.js');
-    return await storeHeldAffiliateNotifications({
-      db, mode: 'held', source, affiliateIds: audience || [source.targetAffiliateId!], now,
+    return await consume({ source, context,
+      evidenceSha256: affiliateNotificationSourceFingerprint(refs.map((ref, index) => [ref.path, expected[index]])),
       verifySource: async transaction => {
         const snapshots = await transaction.getAll(...refs);
         const byPath = new Map(snapshots.map(snapshot => [snapshot.ref.path, snapshot]));
         return refs.every((ref, index) => {
           const snapshot = byPath.get(ref.path);
-          return snapshot?.exists && fingerprint(snapshot.data()) === expected[index];
+          return snapshot && affiliateNotificationSourceFingerprint(snapshot.exists ? snapshot.data() : null) === expected[index];
         });
       },
-    });
+    }, audience || [source.targetAffiliateId!], now);
   } catch {
     // Approval/payment commits must stay successful if notification preparation
     // fails. A bounded replay of the committed source can recover it later.
     console.warn('[Partner Notifications] Preparation failed; committed source remains available for recovery.');
     return result('failed');
   }
+}
+
+/** Internal post-commit entry point, never a route accepting client sources. */
+export async function prepareCommittedAffiliateNotification(input: {
+  db: Firestore; kind: SourceKind; sourceId: string; affiliateIds?: string[]; now?: string;
+}, env: NodeJS.ProcessEnv = process.env): Promise<PreparationResult> {
+  const db = input.db;
+  return consumeCommittedAffiliateNotification(input, env, async (resolved, affiliateIds, now) => {
+    const { storeHeldAffiliateNotifications } = await import('./affiliateNotificationOutbox.js');
+    return storeHeldAffiliateNotifications({ db, mode: 'held', source: resolved.source,
+      verifySource: resolved.verifySource, affiliateIds, now });
+  });
+}
+
+/** Fresh server source revalidation for held delivery. An existing outbox record
+ * is never authorization. Caller must also check current recipient/settings and
+ * run verifySource in its transaction immediately before provider dispatch. */
+export async function resolveAffiliateNotificationSource(input: {
+  db: Firestore; source: AffiliateNotificationSource; now: string;
+}, env: NodeJS.ProcessEnv = process.env): Promise<ResolvedAffiliateNotificationSource | null> {
+  const source = { ...input.source };
+  const db = input.db; const now = input.now;
+  if (['upcoming_campaign', 'inactivity_reminder', 'exclusive_opportunity'].includes(source.eventType)) {
+    const { resolveScheduledAffiliateNotificationSource } = await import('./affiliateNotificationSchedule.js');
+    return resolveScheduledAffiliateNotificationSource({ db, now, source }, env);
+  }
+  let resolved: ResolvedAffiliateNotificationSource | null = null;
+  const result = await consumeCommittedAffiliateNotification({ db, kind: source.eventType as SourceKind,
+    sourceId: source.sourceId, now, includeContext: true,
+    ...(source.eventType === 'new_release' ? { affiliateIds: ['source-validation'] } : {}),
+  }, env, async candidate => {
+    if (affiliateNotificationSourceFingerprint(candidate.source) === affiliateNotificationSourceFingerprint(source)) resolved = candidate;
+    return { status: 'ineligible', intentCount: 0 };
+  });
+  if (result.status === 'failed') throw new Error('Partner notification source could not be verified.');
+  return resolved;
 }
 
 /** Explicit bounded recovery: no collection scan, cursor, cron, or email dispatch. */
@@ -221,7 +304,7 @@ export async function recoverCommittedAffiliateNotifications(input: {
   const db = input.db;
   const kind = input.kind;
   const now = input.now;
-  const mode = gate(db, env);
+  const mode = affiliateNotificationSourceGate(db, env);
   if (mode !== 'held') return { attempted: 0, counts: { [mode]: 1 } };
   if (!Array.isArray(input.sourceIds) || input.sourceIds.length > MAX_AFFILIATE_NOTIFICATION_RECOVERY_IDS
     || (kind === 'tier_upgrade' && input.sourceIds.length > MAX_TIER_NOTIFICATION_RECOVERY_IDS)

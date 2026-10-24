@@ -135,6 +135,22 @@ describe('Firestore-authoritative campaign management', () => {
     expect(await affiliateStore.getCampaignsFresh()).toEqual([]);
   });
 
+  it('never uploads local affiliate, wallet, policy or audit snapshots on startup', async () => {
+    firestoreMock.documents.clear();
+    fsMock.existsSync.mockReturnValue(true);
+    fsMock.readFileSync.mockImplementation((filename: unknown) => {
+      const name = String(filename);
+      if (name.endsWith('affiliate_settings.json')) return JSON.stringify({ minPayoutThresholdKes: 400 });
+      if (name.endsWith('affiliate_literary_circle.json')) return JSON.stringify({ schemaVersion: 1, enabled: false });
+      if (name.endsWith('affiliate_sessions.json')) return '{}';
+      return JSON.stringify([{ id: 'local_only', status: 'PAID', balanceAvailableKes: 99_999 }]);
+    });
+    vi.mocked(setFirestoreDoc).mockClear();
+    await affiliateStore.init();
+    expect(vi.mocked(setFirestoreDoc)).not.toHaveBeenCalled();
+    expect(firestoreMock.documents.size).toBe(0);
+  });
+
   it('reads the latest record, preserving committed totals, creation time and unknown fields instead of stale cache or request values', async () => {
     const fresh = { ...campaign, revision: 4, clicksCount: 25, salesCount: 9, revenueKes: 5_000, commissionsKes: 1_000,
       futureMetadata: { attributionLedger: 'keep-this' } };

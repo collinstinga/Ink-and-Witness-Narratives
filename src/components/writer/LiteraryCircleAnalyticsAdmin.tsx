@@ -62,7 +62,18 @@ function formatKes(value: number): string {
 function coverageLabel(value: AffiliateAnalyticsReport['buyerMetrics']['coverage']): string {
   if (value === 'complete') return 'Complete pseudonymous coverage';
   if (value === 'partial') return 'Partial pseudonymous lower bound';
-  return 'Not enabled';
+  return 'Unavailable for this range';
+}
+
+function buyerCoverageText(metrics: AffiliateAnalyticsReport['buyerMetrics']): string {
+  if (metrics.reason === 'not_enabled') return 'Prospective paying-reader analytics are not enabled in this environment. Customer identities are not exposed in this report.';
+  if (metrics.reason === 'invalid_configuration') return 'Privacy-safe buyer analytics configuration could not be verified. Reader totals are withheld; customer identities are not exposed.';
+  if (metrics.reason === 'query_failed') return 'Buyer evidence could not be checked for this range. Refresh the report; missing evidence must not be treated as zero readers.';
+  if (metrics.reason === 'mixed_identity_sources') return 'Purchases contain incompatible identity evidence. Reader totals are withheld to prevent double-counting.';
+  if (metrics.reason === 'invalid_evidence') return 'Some purchase identity evidence could not be verified. Any displayed reader counts are lower bounds, not complete historical totals.';
+  if (metrics.reason === 'truncated') return 'The reviewed buyer-history limit was reached. Any displayed counts are partial and must not be treated as complete totals.';
+  if (metrics.coverage === 'complete') return 'Verified privacy-safe evidence supports these reader counts. No customer identifiers are exposed in this report.';
+  return 'Some historical purchases lack verifiable privacy-safe buyer evidence. Any available reader counts are lower bounds. No customer identifiers are exposed in this report.';
 }
 
 function trafficCoverageText(report: AffiliateAnalyticsReport): string {
@@ -135,9 +146,8 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
               <div><dt className="text-slate-500">Unique readers</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.uniquePayingReaders ?? '—'}</dd></div>
               <div><dt className="text-slate-500">Repeat purchases</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.repeatPurchases ?? '—'}</dd></div>
             </dl>
-          ) : (
-            <p className="mt-2 text-xs leading-relaxed text-slate-400">Buyer identity projection is deliberately disabled in this checkpoint. No customer identifiers were loaded into this report.</p>
-          )}
+          ) : null}
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">{buyerCoverageText(report.buyerMetrics)}</p>
         </div>
 
         <div className="rounded-2xl border border-sky-400/20 bg-sky-950/10 p-4">

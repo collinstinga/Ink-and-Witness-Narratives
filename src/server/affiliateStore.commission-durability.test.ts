@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type FakeRef = { collectionName: string; id: string; key: string };
 type FakeQuery = { kind: 'query'; collectionName: string; field: string; value: unknown; limitCount: number };
@@ -18,8 +18,14 @@ const firestoreMock = vi.hoisted(() => {
     id,
     key: `${collectionName}/${id}`
   });
+  const queryRead = vi.fn(async (collectionName: string, limitCount: number) => ({
+    docs: Array.from(documents.entries())
+      .filter(([key]) => key.startsWith(`${collectionName}/`)).slice(0, limitCount)
+      .map(([key, value]) => ({ id: key.slice(collectionName.length + 1), data: () => clone(value) })),
+  }));
   const collection = (collectionName: string) => ({
     doc: (id: string): FakeRef => makeRef(collectionName, id),
+    limit: (count: number) => ({ get: () => queryRead(collectionName, count) }),
     where: (field: string, _operator: string, value: unknown) => ({
       limit: (limitCount: number): FakeQuery => ({ kind: 'query', collectionName, field, value, limitCount })
     })
@@ -97,11 +103,13 @@ const firestoreMock = vi.hoisted(() => {
     documents,
     db: { collection, runTransaction },
     runTransaction,
+    queryRead,
     reset() {
       documents.clear();
       queue = Promise.resolve();
       failNextCommit = false;
       runTransaction.mockClear();
+      queryRead.mockClear();
     },
     failCommit() {
       failNextCommit = true;
@@ -279,7 +287,9 @@ function consumedV2Claim(overrides: Record<string, unknown> = {}) {
 }
 
 describe('affiliate commission durability', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
   beforeEach(async () => {
+    vi.stubEnv('AFFILIATE_BUYER_ANALYTICS_MODE', 'off');
     process.env.VERCEL = '1';
     firestoreMock.reset();
     firestoreMock.documents.set('site_configs/affiliate_settings', {
@@ -296,6 +306,66 @@ describe('affiliate commission durability', () => {
     firestoreMock.documents.set(`affiliates/${affiliate.id}`, structuredClone(affiliate));
     firestoreMock.documents.set(`affiliate_campaigns/${campaign.id}`, structuredClone(campaign));
     await affiliateStore.init();
+  });
+
+  function enableBuyerAnalytics() {
+    vi.stubEnv('AFFILIATE_BUYER_ANALYTICS_MODE', 'enabled');
+    vi.stubEnv('AFFILIATE_BUYER_ANALYTICS_ACTIVE_KEY_ID', 'test-key');
+    vi.stubEnv('AFFILIATE_BUYER_ANALYTICS_KEYS_JSON', JSON.stringify({ 'test-key': Buffer.alloc(32, 73).toString('base64') }));
+  }
+
+  it('adds private buyer evidence in the existing atomic sale and never backfills callback replays', async () => {
+    enableBuyerAnalytics();
+    const transaction = confirmedAffiliateTransaction();
+    const first = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code);
+    expect(first?.affiliateBuyerAnalytics?.keys[0].buyerKey).toMatch(/^abk1_/);
+    expect(affiliateStore.getCommissions()[0]).not.toHaveProperty('affiliateBuyerAnalytics');
+    expect(affiliateStore.getAdminAffiliatesSummary().recentSales[0]).not.toHaveProperty('affiliateBuyerAnalytics');
+    expect(await affiliateStore.updateCommissionStatus(first!.id, first!.status)).not.toHaveProperty('affiliateBuyerAnalytics');
+    expect(JSON.stringify(affiliateStore.getAuditLogs())).not.toContain('affiliateBuyerAnalytics');
+    expect([...firestoreMock.documents.keys()].filter(key => key.startsWith('affiliate_commissions/'))).toEqual([`affiliate_commissions/${first!.id}`]);
+    vi.stubEnv('AFFILIATE_BUYER_ANALYTICS_KEYS_JSON', JSON.stringify({ 'test-key': Buffer.alloc(32, 81).toString('base64') }));
+    expect(await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code)).toEqual(first);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`)?.totalCommissionEarnedKes).toBe(100);
+  });
+
+  it('leaves neither buyer evidence nor financial increments when the atomic sale commit fails', async () => {
+    enableBuyerAnalytics();
+    const before = structuredClone([...firestoreMock.documents]);
+    firestoreMock.failCommit();
+    await expect(affiliateStore.recordAffiliateSale(confirmedAffiliateTransaction(), affiliate.affiliateCode, campaign.code)).rejects.toThrow('injected commission commit failure');
+    expect([...firestoreMock.documents]).toEqual(before);
+    expect((await affiliateStore.recordAffiliateSale(confirmedAffiliateTransaction(), affiliate.affiliateCode, campaign.code))?.affiliateBuyerAnalytics).toBeDefined();
+  });
+
+  it('reads no buyer history when disabled and uses fresh bounded evidence rather than cached commission identity when enabled', async () => {
+    await affiliateStore.recordAffiliateSale(confirmedAffiliateTransaction(), affiliate.affiliateCode, campaign.code);
+    const disabled = await affiliateStore.getAdminAffiliateAnalytics({ startDate: '2026-09-01', endDate: '2026-09-30' });
+    expect(disabled.buyerMetrics).toMatchObject({ coverage: 'unavailable', reason: 'not_enabled' });
+    expect(firestoreMock.queryRead).not.toHaveBeenCalled();
+    enableBuyerAnalytics();
+    const freshTx = { ...confirmedAffiliateTransaction(), checkoutRequestId: 'fresh_checkout', id: 'fresh_tx', mpesaReceiptNumber: 'FRESH_RECEIPT' };
+    const fresh = await affiliateStore.recordAffiliateSale(freshTx, affiliate.affiliateCode, campaign.code);
+    const legacyId = `com_tx_${crypto.createHash('sha256').update(confirmedAffiliateTransaction().checkoutRequestId).digest('hex').slice(0, 40)}`;
+    // Simulate a change committed by another instance: this process's cached legacy record remains stale.
+    firestoreMock.documents.delete(`affiliate_commissions/${legacyId}`);
+    const report = await affiliateStore.getAdminAffiliateAnalytics({ startDate: '2026-09-01', endDate: '2026-09-30' });
+    expect(firestoreMock.queryRead).toHaveBeenCalledWith('affiliate_commissions', 10_001);
+    expect(report.totals.verifiedSales).toBe(1);
+    expect(report.buyerMetrics).toMatchObject({ coverage: 'complete', uniquePayingReaders: 1, newAffiliateAcquiredReaders: 1, reason: 'complete' });
+    expect(JSON.stringify(report)).not.toContain(fresh?.affiliateBuyerAnalytics?.keys[0].buyerKey);
+  });
+
+  it('withholds buyer metrics on a failed or truncated fresh history query without breaking financial reporting', async () => {
+    enableBuyerAnalytics();
+    await affiliateStore.recordAffiliateSale(confirmedAffiliateTransaction(), affiliate.affiliateCode, campaign.code);
+    firestoreMock.queryRead.mockRejectedValueOnce(new Error('private database failure'));
+    const failed = await affiliateStore.getAdminAffiliateAnalytics({ startDate: '2026-09-01', endDate: '2026-09-30' });
+    expect(failed.buyerMetrics).toMatchObject({ coverage: 'unavailable', uniquePayingReaders: null, reason: 'query_failed' });
+    expect(failed.totals.verifiedSales).toBe(1);
+    firestoreMock.queryRead.mockResolvedValueOnce({ docs: Array.from({ length: 10_001 }, () => ({ id: '', data: () => ({}) })) });
+    const truncated = await affiliateStore.getAdminAffiliateAnalytics({ startDate: '2026-09-01', endDate: '2026-09-30' });
+    expect(truncated.buyerMetrics).toMatchObject({ coverage: 'unavailable', uniquePayingReaders: null, reason: 'truncated' });
   });
 
   async function automaticTierPolicy() {

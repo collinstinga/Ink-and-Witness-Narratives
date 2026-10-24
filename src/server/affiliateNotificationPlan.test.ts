@@ -55,6 +55,27 @@ describe('held partner notification planning', () => {
     expect(() => planAffiliateNotifications(candidate)).toThrow('Invalid partner notification planning input.');
   });
 
+  it('explicitly declines automatic general tier filters instead of using a stale stored default', () => {
+    const candidate = input();
+    candidate.settings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = ['literary-partner'];
+    expect(planAffiliateNotifications(candidate)).toMatchObject({ intents: [], reasons: { automatic_tier_filter_requires_verified_evidence: 1 } });
+    candidate.affiliates[0].literaryCircle!.tier.source = 'monthly_performance';
+    expect(planAffiliateNotifications(candidate)).toMatchObject({ intents: [], reasons: { automatic_tier_filter_requires_verified_evidence: 1 } });
+    // Even a guessed map cannot convert an automatic profile into manual proof.
+    expect(planAffiliateNotifications({ ...candidate, verifiedManualTierIds: { 'partner-one': 'literary-partner' } }).intents).toEqual([]);
+    candidate.settings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = [];
+    expect(planAffiliateNotifications(candidate).intents).toHaveLength(1);
+  });
+
+  it('requires current settings evidence for manual tier filters without changing ordinary audiences', () => {
+    const candidate = input();
+    candidate.settings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = ['literary-partner'];
+    candidate.affiliates[0].literaryCircle!.tier.source = 'manual';
+    expect(planAffiliateNotifications(candidate)).toMatchObject({ intents: [], reasons: { manual_tier_filter_requires_current_settings: 1 } });
+    expect(planAffiliateNotifications({ ...candidate, verifiedManualTierIds: { 'partner-one': 'literary-partner' } }).intents).toHaveLength(1);
+    expect(planAffiliateNotifications({ ...candidate, verifiedManualTierIds: { 'partner-one': 'literary-ambassador' } }).intents).toEqual([]);
+  });
+
   it('creates stable IDs across retries, recipient order and template revisions', () => {
     const first = input();
     const expected = planAffiliateNotifications(first);
@@ -181,6 +202,33 @@ describe('held partner notification planning', () => {
     candidate.settings.enabled = true;
     candidate.settings.templates.find(template => template.eventType === 'new_commission')!.enabled = false;
     expect(planAffiliateNotifications(candidate).intents).toEqual([]);
+  });
+
+  it.each(['upcoming_campaign', 'exclusive_opportunity', 'inactivity_reminder'] as const)('requires exact scheduling bounds and event-time topic consent for %s', eventType => {
+    const candidate = input();
+    candidate.source = { eventType, sourceId: 'scheduled-one', sourceVersion: 1,
+      occurredAt: source.occurredAt, notBefore: source.occurredAt, expiresAt: '2026-10-24T00:00:00.000Z',
+      ...(eventType === 'inactivity_reminder' ? { targetAffiliateId: 'partner-one' } : { evidenceId: 'audit-one' }),
+    };
+    candidate.affiliates[0].notificationPreferences = {
+      ...DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES,
+      marketingConsent: 'granted', marketingConsentVersion: AFFILIATE_MARKETING_DISCLOSURE_VERSION,
+      marketingConsentAt: '2026-10-01T00:00:00.000Z', allMarketingOptOut: false,
+      campaignUpdates: true, campaignUpdatesEnabledAt: '2026-10-01T00:00:00.000Z',
+      inactivityReminders: true, inactivityRemindersEnabledAt: '2026-10-01T00:00:00.000Z',
+      exclusiveOpportunities: true, exclusiveOpportunitiesEnabledAt: '2026-10-01T00:00:00.000Z',
+    };
+    expect(planAffiliateNotifications(candidate).intents).toHaveLength(1);
+    const field = eventType === 'upcoming_campaign' ? 'campaignUpdatesEnabledAt'
+      : eventType === 'inactivity_reminder' ? 'inactivityRemindersEnabledAt' : 'exclusiveOpportunitiesEnabledAt';
+    candidate.affiliates[0].notificationPreferences[field] = NOW;
+    expect(planAffiliateNotifications(candidate)).toMatchObject({ intents: [], reasons: { topic_opt_in_after_event: 1 } });
+    candidate.affiliates[0].notificationPreferences[field] = '2026-10-01T00:00:00.000Z';
+    candidate.now = candidate.source.expiresAt!;
+    expect(planAffiliateNotifications(candidate)).toMatchObject({ intents: [], reasons: { scheduled_event_expired: 1 } });
+    candidate.now = NOW;
+    delete candidate.source.expiresAt;
+    expect(() => planAffiliateNotifications(candidate)).toThrow('Invalid partner notification planning input.');
   });
 
   it('rejects duplicate recipients and bounds the batch without silently truncating', () => {

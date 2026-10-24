@@ -29,6 +29,7 @@ import {
   validateAffiliateNotificationSettings,
 } from './affiliateNotifications.js';
 import { AFFILIATE_MARKETING_DISCLOSURE_VERSION } from './affiliateNotificationPreferences.js';
+import { verifiedManualAffiliateNotificationTierIds } from './affiliateNotificationTierFilter.js';
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
@@ -258,11 +259,31 @@ describe('affiliate notification preview configuration', () => {
         allMarketingOptOut: false,
       },
     });
+    optedIn.literaryCircle!.tier.source = 'manual';
     const before = clone(optedIn);
-    const summary = summarizeAffiliateNotificationEligibility([optedIn], inactivity);
+    const manualTiers = verifiedManualAffiliateNotificationTierIds([optedIn], {
+      schemaVersion: 1, revision: 1, enabled: true, tiers: [{ id: 'literary-partner', enabled: true }],
+    }, '2026-10-24T10:00:00.000Z');
+    const summary = summarizeAffiliateNotificationEligibility([optedIn], inactivity, { verifiedManualTierIds: manualTiers });
     expect(summary).toMatchObject({ eligible: 0, excluded: 1 });
     expect(summary.reasons.tier_not_selected).toBe(1);
     expect(optedIn).toEqual(before);
+  });
+
+  it('does not advertise automatic or unproved manual tier-filter eligibility in a generic preview', () => {
+    const commission = template('new_commission'); commission.eligibility.tierIds = ['literary-partner'];
+    const account = affiliate();
+    expect(summarizeAffiliateNotificationEligibility([account], commission)).toMatchObject({ eligible: 0,
+      reasons: { automatic_tier_filter_requires_verified_evidence: 1 } });
+    account.literaryCircle!.tier.source = 'manual';
+    expect(summarizeAffiliateNotificationEligibility([account], commission)).toMatchObject({ eligible: 0,
+      reasons: { manual_tier_filter_requires_current_settings: 1 } });
+    const verifiedManualTierIds = verifiedManualAffiliateNotificationTierIds([account], {
+      schemaVersion: 1, revision: 2, enabled: true, tiers: [{ id: 'literary-partner', enabled: true }],
+    }, '2026-10-24T10:00:00.000Z');
+    expect(summarizeAffiliateNotificationEligibility([account], commission, { verifiedManualTierIds }).eligible).toBe(1);
+    commission.eligibility.tierIds = [];
+    expect(summarizeAffiliateNotificationEligibility([affiliate()], commission).eligible).toBe(1);
   });
 
   it('renders only event-scoped placeholders and leaves missing sample values visible', () => {

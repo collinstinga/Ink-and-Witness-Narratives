@@ -33,6 +33,16 @@ export function isSettledTransactionStatus(status: unknown): boolean {
   return typeof status === 'string' && SETTLED_STATUSES.has(status.toUpperCase() as TransactionStatus);
 }
 
+/** Recorded partial payouts are real paid earnings even before a commission is fully PAID. */
+export function recordedAffiliateCommissionPaidKes(commission: AffiliateSaleCommission): number {
+  if (commission.walletLedgerVersion === 1 && Number.isSafeInteger(commission.payoutPaidKes)
+    && Number(commission.payoutPaidKes) >= 0 && Number(commission.payoutPaidKes) <= commission.commissionAmountKes) {
+    return Number(commission.payoutPaidKes);
+  }
+  return commission.status === 'PAID' && Number.isFinite(commission.commissionAmountKes) && commission.commissionAmountKes >= 0
+    ? commission.commissionAmountKes : 0;
+}
+
 export function isFailedTransactionStatus(status: unknown): boolean {
   return typeof status === 'string' && FAILED_STATUSES.has(status.toUpperCase() as TransactionStatus);
 }
@@ -237,6 +247,11 @@ export function toAffiliateSaleCommission(
     commissionRateSource: commission.commissionRateSource,
     literaryCircleTierId: commission.literaryCircleTierId,
     literaryCirclePolicyVersion: commission.literaryCirclePolicyVersion,
+    walletLedgerVersion: commission.walletLedgerVersion,
+    walletRevision: commission.walletRevision,
+    payoutPaidKes: commission.payoutPaidKes,
+    payoutReservedKes: commission.payoutReservedKes,
+    reservedPayoutId: commission.reservedPayoutId,
     createdAt: commission.createdAt,
     approvedAt: commission.approvedAt,
     paidAt: commission.paidAt,

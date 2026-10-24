@@ -11,6 +11,7 @@ import {
   type AffiliateNotificationSource,
   type HeldAffiliateNotificationIntent,
 } from './affiliateNotificationPlan.js';
+import { verifiedManualAffiliateNotificationTierIds } from './affiliateNotificationTierFilter.js';
 
 export const AFFILIATE_NOTIFICATION_OUTBOX_COLLECTION = 'affiliate_notification_outbox';
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -149,7 +150,13 @@ export async function storeHeldAffiliateNotifications(input: {
         if (!snapshot) conflict();
         if (snapshot.exists) affiliates.push({ ...snapshot.data(), id: ref.id } as AffiliatePublicProfile);
       }
-      const plan = planAffiliateNotifications({ source, settings, affiliates, now });
+      const template = settings.templates.find(item => item.eventType === source.eventType)!;
+      let verifiedManualTierIds: Record<string, string> | undefined;
+      if (template.eligibility.tierIds.length && !(source.eventType === 'tier_upgrade' && source.targetTierId)) {
+        const circleSnapshot = await transaction.get(db.collection('site_configs').doc('affiliate_literary_circle'));
+        verifiedManualTierIds = verifiedManualAffiliateNotificationTierIds(affiliates, circleSnapshot.exists ? circleSnapshot.data() : undefined, now);
+      }
+      const plan = planAffiliateNotifications({ source, settings, affiliates, now, verifiedManualTierIds });
       if (!plan.intents.length) return { status: 'ineligible' as const, intentCount: 0 };
       const records: IntentRecord[] = plan.intents.map(intent => ({ ...intent, kind: 'intent', createdAt: now }));
       const intentSnapshots = await transaction.getAll(...records.map(record => collection.doc(record.id)));

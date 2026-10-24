@@ -11,6 +11,7 @@ import type {
 import { getDb, getFirestoreDoc, sanitizeForFirestore } from './db.js';
 import { normalizeAffiliateNotificationPreferences } from './affiliateNotificationPreferences.js';
 import { hasValidAffiliateWriterApproval } from './affiliateApproval.js';
+import { AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED } from './affiliateNotificationTierFilter.js';
 
 export const AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID = 'affiliate_notifications';
 export const AFFILIATE_NOTIFICATION_SCHEMA_VERSION = 1 as const;
@@ -509,6 +510,12 @@ function preferenceAllows(affiliate: AffiliatePublicProfile, eventType: Literary
 export function summarizeAffiliateNotificationEligibility(
   affiliates: AffiliatePublicProfile[],
   template: LiteraryCircleNotificationTemplate,
+  evidence: {
+    /** Build from current server-read Literary Circle settings, not a request. */
+    verifiedManualTierIds?: Record<string, string>;
+    /** Internal committed-transition planner only; never a generic preview map. */
+    verifiedUpgradeTierIds?: Record<string, string>;
+  } = {},
 ): AffiliateNotificationEligibilitySummary {
   const reasons: Record<string, number> = {};
   let eligible = 0;
@@ -521,7 +528,21 @@ export function summarizeAffiliateNotificationEligibility(
     if (!affiliate.literaryCircle) { exclude('literary_circle_membership_missing'); continue; }
     if (template.eligibility.requireComplimentaryAccess && affiliate.literaryCircle.complimentaryAccess.status !== 'active') { exclude('complimentary_access_not_active'); continue; }
     if (template.eligibility.foundingMembersOnly && !affiliate.literaryCircle.foundingMember) { exclude('not_founding_member'); continue; }
-    if (template.eligibility.tierIds.length && !template.eligibility.tierIds.includes(affiliate.literaryCircle.tier.id)) { exclude('tier_not_selected'); continue; }
+    if (template.eligibility.tierIds.length) {
+      const tierId = affiliate.literaryCircle.tier.id;
+      const verifiedUpgrade = template.eventType === 'tier_upgrade' && evidence.verifiedUpgradeTierIds?.[affiliate.id] === tierId;
+      if (!verifiedUpgrade) {
+        if (affiliate.literaryCircle.tier.source !== 'manual') {
+          exclude(AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED);
+          continue;
+        }
+        if (evidence.verifiedManualTierIds?.[affiliate.id] !== tierId) {
+          exclude('manual_tier_filter_requires_current_settings');
+          continue;
+        }
+      }
+      if (!template.eligibility.tierIds.includes(tierId)) { exclude('tier_not_selected'); continue; }
+    }
     if (!preferenceAllows(affiliate, template.eventType)) { exclude(MARKETING_EVENTS.has(template.eventType) ? 'marketing_consent_or_preference_missing' : 'notification_preference_disabled'); continue; }
     eligible += 1;
   }

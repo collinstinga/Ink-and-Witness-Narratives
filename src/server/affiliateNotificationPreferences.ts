@@ -123,8 +123,14 @@ export function normalizeAffiliateNotificationPreferences(value: unknown): Affil
       ? { releaseUpdatesEnabledAt: canonicalIso(value.releaseUpdatesEnabledAt) }
       : {}),
     campaignUpdates: consentGranted && value.campaignUpdates === true,
+    ...(consentGranted && value.campaignUpdates === true && canonicalIso(value.campaignUpdatesEnabledAt)
+      ? { campaignUpdatesEnabledAt: canonicalIso(value.campaignUpdatesEnabledAt) } : {}),
     inactivityReminders: consentGranted && value.inactivityReminders === true,
+    ...(consentGranted && value.inactivityReminders === true && canonicalIso(value.inactivityRemindersEnabledAt)
+      ? { inactivityRemindersEnabledAt: canonicalIso(value.inactivityRemindersEnabledAt) } : {}),
     exclusiveOpportunities: consentGranted && value.exclusiveOpportunities === true,
+    ...(consentGranted && value.exclusiveOpportunities === true && canonicalIso(value.exclusiveOpportunitiesEnabledAt)
+      ? { exclusiveOpportunitiesEnabledAt: canonicalIso(value.exclusiveOpportunitiesEnabledAt) } : {}),
     commissionAlerts: value.commissionAlerts !== false,
     tierAlerts: value.tierAlerts !== false,
     allMarketingOptOut: !consentGranted || value.allMarketingOptOut === true,
@@ -216,8 +222,20 @@ export async function saveAffiliateNotificationPreferences(
           : now,
       } : {}),
       campaignUpdates: consentGranted && update.campaignUpdates,
+      ...(consentGranted && update.campaignUpdates ? {
+        campaignUpdatesEnabledAt: previous.campaignUpdates && previous.campaignUpdatesEnabledAt
+          ? previous.campaignUpdatesEnabledAt : now,
+      } : {}),
       inactivityReminders: consentGranted && update.inactivityReminders,
+      ...(consentGranted && update.inactivityReminders ? {
+        inactivityRemindersEnabledAt: previous.inactivityReminders && previous.inactivityRemindersEnabledAt
+          ? previous.inactivityRemindersEnabledAt : now,
+      } : {}),
       exclusiveOpportunities: consentGranted && update.exclusiveOpportunities,
+      ...(consentGranted && update.exclusiveOpportunities ? {
+        exclusiveOpportunitiesEnabledAt: previous.exclusiveOpportunities && previous.exclusiveOpportunitiesEnabledAt
+          ? previous.exclusiveOpportunitiesEnabledAt : now,
+      } : {}),
       commissionAlerts: update.commissionAlerts,
       tierAlerts: update.tierAlerts,
       allMarketingOptOut: !consentGranted,

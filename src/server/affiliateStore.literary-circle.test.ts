@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const firestore = vi.hoisted(() => ({
+  failCommit: false,
   documents: new Map<string, any>(),
   getDb: vi.fn(),
   replaceDoc: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('./db.js', () => ({
 
 import { affiliateStore, LiteraryCircleSettingsConflictError } from './affiliateStore.js';
 import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
+import { literaryCircleNotificationAuditId } from './affiliateNotificationAudit.js';
 import type { AffiliateAccount, AffiliateSaleCommission, LiteraryCircleSettings } from '../types.js';
 
 const TEST_HASH = '$argon2id$v=19$m=65536,p=1,t=3$c2FsdA$aGFzaA';
@@ -63,6 +65,7 @@ describe('affiliate store Literary Circle integration', () => {
   beforeEach(async () => {
     process.env.VERCEL = '1';
     firestore.documents.clear();
+    firestore.failCommit = false;
     firestore.documents.set('site_configs/affiliate_settings', {
       defaultCommissionRate: 15,
       minPayoutThresholdKes: 1000,
@@ -153,9 +156,14 @@ describe('affiliate store Literary Circle integration', () => {
         },
         update: (reference: { collection: string; id: string }, value: any) => {
           writes.push({ reference, value: clone(value), merge: true });
+        },
+        create: (reference: { collection: string; id: string }, value: any) => {
+          if (firestore.documents.has(`${reference.collection}/${reference.id}`)) throw new Error('Document already exists');
+          writes.push({ reference, value: clone(value), merge: false });
         }
       };
       const result = await operation(transaction);
+      if (firestore.failCommit) throw new Error('PRIVATE provider commit failure');
       for (const write of writes) {
         const key = `${write.reference.collection}/${write.reference.id}`;
         firestore.documents.set(
@@ -177,6 +185,33 @@ describe('affiliate store Literary Circle integration', () => {
     }
   });
 
+  it('commits settings and durable notification approval evidence together or neither', async () => {
+    const previous = affiliateStore.getLiteraryCircleSettings();
+    const cloudBefore = clone(firestore.documents.get('site_configs/affiliate_literary_circle'));
+    const next = { ...previous, introductoryPeriodDays: 45 };
+    firestore.failCommit = true;
+    await expect(affiliateStore.saveLiteraryCircleSettings(next, 'Writer')).rejects.toThrow(/^Literary Circle settings could not be committed/);
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle')).toEqual(cloudBefore);
+    expect(affiliateStore.getLiteraryCircleSettings()).toEqual(previous);
+    expect([...firestore.documents.keys()].filter(key => key.startsWith('affiliate_audit/'))).toEqual([]);
+    firestore.failCommit = false;
+    const saved = await affiliateStore.saveLiteraryCircleSettings(next, 'Writer');
+    const audit = firestore.documents.get(`affiliate_audit/${literaryCircleNotificationAuditId(saved.revision!)}`);
+    expect(audit).toMatchObject({ action: 'literary_circle_settings_updated', targetId: 'affiliate_literary_circle', actor: 'Writer', newValue: saved });
+    expect(firestore.setDoc.mock.calls.some(([collection]) => collection === 'affiliate_audit')).toBe(false);
+  });
+
+  it('preserves existing audit evidence rather than replacing a conflicting approval record', async () => {
+    const previous = affiliateStore.getLiteraryCircleSettings();
+    const id = literaryCircleNotificationAuditId((previous.revision || 0) + 1);
+    const originalAudit = { action: 'pre-existing-evidence', immutable: true };
+    firestore.documents.set(`affiliate_audit/${id}`, originalAudit);
+    await expect(affiliateStore.saveLiteraryCircleSettings({ ...previous, introductoryPeriodDays: 45 }, 'Writer')).rejects.toThrow(/^Literary Circle settings could not be committed/);
+    expect(firestore.documents.get(`affiliate_audit/${id}`)).toEqual(originalAudit);
+    expect(affiliateStore.getLiteraryCircleSettings()).toEqual(previous);
+    expect(firestore.documents.get('site_configs/affiliate_literary_circle').revision || 0).toBe(previous.revision || 0);
+  });
+
   it('loads, refreshes and persist-first saves a separately validated policy document', async () => {
     expect(affiliateStore.getLiteraryCircleSettings().defaultTierId).toBe('literary-partner');
 
@@ -190,7 +225,7 @@ describe('affiliate store Literary Circle integration', () => {
     await expect(affiliateStore.saveLiteraryCircleSettings({
       ...beforeFailure,
       introductoryPeriodDays: 60
-    }, 'Circle Settings Test')).rejects.toThrow('simulated Literary Circle write failure');
+    }, 'Circle Settings Test')).rejects.toThrow('Literary Circle settings could not be committed');
     expect(affiliateStore.getLiteraryCircleSettings()).toEqual(beforeFailure);
 
     const versioned = await affiliateStore.saveLiteraryCircleSettings({

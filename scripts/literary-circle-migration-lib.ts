@@ -4,7 +4,7 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 6 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 7 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = [
@@ -181,6 +181,13 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
     sumFields: EMPTY_SUM_FIELDS
   },
   {
+    key: 'affiliate_notification_deliveries',
+    collection: 'affiliate_notification_deliveries',
+    fileName: 'affiliate_notification_deliveries.json',
+    scope: 'all_documents',
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
     key: 'release_source_articles',
     collection: 'articles',
     fileName: 'release_source_articles.json',
@@ -223,7 +230,8 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
       'affiliate_settings',
       'affiliate_literary_circle',
       LITERARY_CIRCLE_RESOURCES_DOCUMENT_ID,
-      AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID
+      AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID,
+      'affiliate_notification_delivery'
     ],
     sumFields: EMPTY_SUM_FIELDS
   },

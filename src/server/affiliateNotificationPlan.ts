@@ -5,29 +5,34 @@ import {
   validateAffiliateNotificationSettings,
 } from './affiliateNotifications.js';
 
-// Scheduled campaigns, inactivity reminders, and opportunities need their own
-// source validation and cooldown evidence before they can enter this planner.
-const DIRECT_EVENTS = ['activation', 'new_release', 'new_commission', 'tier_upgrade'] as const;
-type DirectEvent = typeof DIRECT_EVENTS[number];
+const SUPPORTED_EVENTS = ['activation', 'new_release', 'new_commission', 'tier_upgrade',
+  'upcoming_campaign', 'inactivity_reminder', 'exclusive_opportunity'] as const;
+type PlannedEvent = typeof SUPPORTED_EVENTS[number];
+const SCHEDULED_EVENTS = new Set<PlannedEvent>(['upcoming_campaign', 'inactivity_reminder', 'exclusive_opportunity']);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const SAFE_TIER_ID = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 export const MAX_AFFILIATE_NOTIFICATION_PLAN_RECIPIENTS = 200;
 
 export interface AffiliateNotificationSource {
-  eventType: DirectEvent;
+  eventType: PlannedEvent;
   sourceId: string;
   sourceVersion: number;
   occurredAt: string;
   targetAffiliateId?: string;
   /** Verified destination from a committed tier transition, not a profile edit. */
   targetTierId?: string;
+  /** Explicit committed writer audit supporting a campaign or private post. */
+  evidenceId?: string;
+  /** Server-derived scheduling bounds, never caller-selected delivery dates. */
+  notBefore?: string;
+  expiresAt?: string;
 }
 
 export interface HeldAffiliateNotificationIntent {
   schemaVersion: 1;
   id: string;
   eventId: string;
-  eventType: DirectEvent;
+  eventType: PlannedEvent;
   affiliateId: string;
   settingsRevision: number;
   state: 'held';
@@ -67,12 +72,14 @@ export function planAffiliateNotifications(input: {
   source: AffiliateNotificationSource;
   settings: LiteraryCircleNotificationSettings;
   affiliates: AffiliatePublicProfile[];
+  /** Exact manual assignments proved from fresh server settings; never client input. */
+  verifiedManualTierIds?: Record<string, string>;
   now: string;
 }): AffiliateNotificationPlan {
   const source = input.source;
   if (!source || typeof source !== 'object' || Array.isArray(source)
-    || Object.keys(source).some(key => !['eventType', 'sourceId', 'sourceVersion', 'occurredAt', 'targetAffiliateId', 'targetTierId'].includes(key))
-    || !DIRECT_EVENTS.includes(source.eventType)
+    || Object.keys(source).some(key => !['eventType', 'sourceId', 'sourceVersion', 'occurredAt', 'targetAffiliateId', 'targetTierId', 'evidenceId', 'notBefore', 'expiresAt'].includes(key))
+    || !SUPPORTED_EVENTS.includes(source.eventType)
     || typeof source.sourceId !== 'string' || !SAFE_ID.test(source.sourceId)
     || !Number.isSafeInteger(source.sourceVersion) || source.sourceVersion < 1) invalid();
   if (source.targetTierId !== undefined && (source.eventType !== 'tier_upgrade'
@@ -80,7 +87,15 @@ export function planAffiliateNotifications(input: {
   const occurredMs = isoMilliseconds(source.occurredAt);
   const nowMs = isoMilliseconds(input.now);
   if (occurredMs > nowMs) invalid();
-  const targeted = source.eventType !== 'new_release';
+  const scheduled = SCHEDULED_EVENTS.has(source.eventType);
+  const notBeforeMs = scheduled ? isoMilliseconds(source.notBefore) : occurredMs;
+  const expiresMs = scheduled ? isoMilliseconds(source.expiresAt) : Infinity;
+  if (scheduled ? notBeforeMs < occurredMs || expiresMs <= notBeforeMs
+    : source.notBefore !== undefined || source.expiresAt !== undefined || source.evidenceId !== undefined) invalid();
+  if (scheduled && source.eventType !== 'inactivity_reminder'
+    ? typeof source.evidenceId !== 'string' || !SAFE_ID.test(source.evidenceId)
+    : source.evidenceId !== undefined) invalid();
+  const targeted = !['new_release', 'upcoming_campaign', 'exclusive_opportunity'].includes(source.eventType);
   if (targeted ? typeof source.targetAffiliateId !== 'string' || !SAFE_ID.test(source.targetAffiliateId)
     : source.targetAffiliateId !== undefined) invalid();
   if (!Array.isArray(input.affiliates)
@@ -100,17 +115,22 @@ export function planAffiliateNotifications(input: {
     result.excluded++;
     result.reasons[reason] = (result.reasons[reason] || 0) + 1;
   };
-  const dueMs = occurredMs + template.timing.delayMinutes * 60_000;
+  const dueMs = notBeforeMs + template.timing.delayMinutes * 60_000;
   if (!Number.isSafeInteger(dueMs) || Math.abs(dueMs) > 8.64e15) invalid();
   const dueAt = new Date(dueMs).toISOString();
   for (const affiliate of input.affiliates) {
     if (targeted && affiliate.id !== source.targetAffiliateId) { exclude('not_event_recipient'); continue; }
     if (!settings.enabled || !template.enabled) { exclude('notifications_disabled'); continue; }
+    if (scheduled && (nowMs >= expiresMs || dueMs >= expiresMs)) { exclude('scheduled_event_expired'); continue; }
     const eligibilityAffiliate = source.eventType === 'tier_upgrade' && source.targetTierId && affiliate.literaryCircle
       ? { ...affiliate, literaryCircle: { ...affiliate.literaryCircle,
         tier: { ...affiliate.literaryCircle.tier, id: source.targetTierId } } }
       : affiliate;
-    const eligibility = summarizeAffiliateNotificationEligibility([eligibilityAffiliate], template);
+    const eligibility = summarizeAffiliateNotificationEligibility([eligibilityAffiliate], template, {
+      verifiedManualTierIds: input.verifiedManualTierIds,
+      ...(source.eventType === 'tier_upgrade' && source.targetTierId
+        ? { verifiedUpgradeTierIds: { [affiliate.id]: source.targetTierId } } : {}),
+    });
     if (!eligibility.eligible) {
       exclude(Object.keys(eligibility.reasons)[0] || 'ineligible');
       continue;
@@ -120,21 +140,25 @@ export function planAffiliateNotifications(input: {
       exclude('writer_approval_not_effective');
       continue;
     }
+    if (scheduled && approvedMs > occurredMs) { exclude('writer_approval_after_event'); continue; }
     // A later opt-in must not turn historical releases into a marketing backlog.
     // Delivery must independently recheck current consent before sending.
-    if (source.eventType === 'new_release') {
+    if (['new_release', 'upcoming_campaign', 'inactivity_reminder', 'exclusive_opportunity'].includes(source.eventType)) {
       const consentAt = affiliate.notificationPreferences?.marketingConsentAt;
       const consentMs = typeof consentAt === 'string' ? Date.parse(consentAt) : NaN;
-      const releaseEnabledAt = affiliate.notificationPreferences?.releaseUpdatesEnabledAt;
-      const releaseEnabledMs = typeof releaseEnabledAt === 'string' ? Date.parse(releaseEnabledAt) : NaN;
+      const topicField = source.eventType === 'new_release' ? 'releaseUpdatesEnabledAt'
+        : source.eventType === 'upcoming_campaign' ? 'campaignUpdatesEnabledAt'
+          : source.eventType === 'inactivity_reminder' ? 'inactivityRemindersEnabledAt' : 'exclusiveOpportunitiesEnabledAt';
+      const topicEnabledAt = affiliate.notificationPreferences?.[topicField];
+      const topicEnabledMs = typeof topicEnabledAt === 'string' ? Date.parse(topicEnabledAt) : NaN;
       if (!Number.isFinite(consentMs) || consentMs <= 0 || consentMs > occurredMs
         || new Date(consentMs).toISOString() !== consentAt) {
         exclude('marketing_consent_after_event');
         continue;
       }
-      if (!Number.isFinite(releaseEnabledMs) || releaseEnabledMs <= 0 || releaseEnabledMs > occurredMs
-        || new Date(releaseEnabledMs).toISOString() !== releaseEnabledAt) {
-        exclude('release_opt_in_after_event');
+      if (!Number.isFinite(topicEnabledMs) || topicEnabledMs <= 0 || topicEnabledMs > occurredMs
+        || new Date(topicEnabledMs).toISOString() !== topicEnabledAt) {
+        exclude(source.eventType === 'new_release' ? 'release_opt_in_after_event' : 'topic_opt_in_after_event');
         continue;
       }
     }

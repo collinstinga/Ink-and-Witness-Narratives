@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { BellRing, CheckCircle2, ChevronDown, Eye, LockKeyhole, RefreshCw, Save, ShieldCheck } from 'lucide-react';
+import AffiliateNotificationOperations from './AffiliateNotificationOperations.js';
 import type {
   AffiliateNotificationEligibilitySummary,
   LiteraryCircleNotificationEventType,
@@ -210,6 +211,8 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
         </span>
       </label>
 
+      <AffiliateNotificationOperations disabled={saving || checking || dirty} />
+
       {(notice || error) && (
         <div className={`rounded-xl border px-4 py-3 text-sm ${error ? 'border-rose-500/40 bg-rose-950/40 text-rose-100' : 'border-emerald-500/30 bg-emerald-950/30 text-emerald-100'}`}>
           {error || notice}
@@ -320,6 +323,11 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
                             className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-violet-500"
                             placeholder="literary-ambassador, literary-patron"
                           />
+                          <span className="mt-2 block leading-relaxed text-slate-400">
+                            General tier-targeted messages currently require a verified manual tier assignment.
+                            Automatic performance tiers are not inferred from stored profile labels.
+                            Confirmed tier-upgrade notices use their separately verified milestone.
+                          </span>
                         </label>
                       </div>
 

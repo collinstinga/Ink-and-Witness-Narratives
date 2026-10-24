@@ -10,6 +10,8 @@ const firestore = vi.hoisted(() => ({
   deleteDoc: vi.fn(),
   runTransaction: vi.fn()
 }));
+const notifications = vi.hoisted(() => ({ prepare: vi.fn() }));
+vi.mock('./affiliateNotificationEvents.js', () => ({ prepareCommittedAffiliateNotification: notifications.prepare }));
 
 vi.mock('./db.js', () => ({
   getDb: firestore.getDb,
@@ -70,31 +72,42 @@ describe('affiliate store credential boundaries', () => {
       firestore.documents.delete(`${collection}/${id}`);
     });
 
+    const query = (collection: string, filters: Array<[string, unknown]> = [], limitCount = Infinity): any => ({
+      collection, filters, limitCount,
+      doc: (id: string) => ({ collection, id }),
+      where: (field: string, _operator: string, value: unknown) => query(collection, [...filters, [field, value]], limitCount),
+      limit: (count: number) => query(collection, filters, count),
+    });
     const db = {
-      collection: (collection: string) => ({
-        doc: (id: string) => ({ collection, id })
-      }),
+      collection: (collection: string) => query(collection),
       runTransaction: firestore.runTransaction
     };
     firestore.runTransaction.mockImplementation(async (operation: (transaction: any) => Promise<any>) => {
-      const writes: Array<{ reference: { collection: string; id: string }; value: any }> = [];
+      const writes: Array<{ reference: { collection: string; id: string }; value: any; merge?: boolean }> = [];
       const transaction = {
-        get: async (reference: { collection: string; id: string }) => {
+        get: async (reference: { collection: string; id?: string; filters?: Array<[string, unknown]>; limitCount?: number }) => {
+          if (reference.filters) return { docs: [...firestore.documents.entries()]
+            .filter(([key, value]) => key.startsWith(`${reference.collection}/`) && reference.filters!.every(([field, expected]) => value[field] === expected))
+            .slice(0, reference.limitCount).map(([key, value]) => ({ id: key.slice(reference.collection.length + 1), data: () => clone(value) })) };
           const value = firestore.documents.get(`${reference.collection}/${reference.id}`);
           return {
             exists: value !== undefined,
             data: () => clone(value)
           };
         },
-        set: (reference: { collection: string; id: string }, value: any) => {
-          writes.push({ reference, value: clone(value) });
-        }
+        set: (reference: { collection: string; id: string }, value: any, options?: { merge?: boolean }) => {
+          writes.push({ reference, value: clone(value), merge: options?.merge });
+        },
+        create: (reference: { collection: string; id: string }, value: any) => {
+          if (firestore.documents.has(`${reference.collection}/${reference.id}`)) throw new Error('already exists');
+          writes.push({ reference, value: clone(value), merge: false });
+        },
       };
       const result = await operation(transaction);
       for (const write of writes) {
         firestore.documents.set(
           `${write.reference.collection}/${write.reference.id}`,
-          { ...(firestore.documents.get(`${write.reference.collection}/${write.reference.id}`) || {}), ...write.value }
+          { ...(write.merge ? firestore.documents.get(`${write.reference.collection}/${write.reference.id}`) || {} : {}), ...write.value }
         );
       }
       return result;
@@ -104,12 +117,36 @@ describe('affiliate store credential boundaries', () => {
   });
 
   beforeEach(() => {
+    notifications.prepare.mockReset();
+    notifications.prepare.mockResolvedValue({ status: 'disabled', intentCount: 0 });
     firestore.setDoc.mockClear();
     firestore.updateDoc.mockClear();
     firestore.getDoc.mockClear();
     firestore.getAllDocs.mockClear();
     firestore.deleteDoc.mockClear();
     firestore.runTransaction.mockClear();
+  });
+
+  it('prepares activation only after an explicitly approved active account is durably created', async () => {
+    notifications.prepare.mockImplementation(async (input: { db: unknown; kind: string; sourceId: string }) => {
+      expect(input.kind).toBe('activation');
+      expect(input.db).toBe(firestore.getDb());
+      expect(firestore.documents.get(`affiliates/${input.sourceId}`)).toMatchObject({
+        status: 'active', approvedBy: 'Writer', approvedAt: '2026-10-24T09:00:00.000Z',
+      });
+      return { status: 'disabled', intentCount: 0 };
+    });
+    const created = await affiliateStore.createAffiliate({ name: 'Approved Activation Fixture',
+      email: 'approved-activation@example.test', phone: '254700000059', passwordHash: TEST_HASH,
+      status: 'active', approvedAt: '2026-10-24T09:00:00.000Z', approvedBy: 'Writer',
+    });
+    expect(notifications.prepare).toHaveBeenCalledTimes(1);
+    expect(notifications.prepare.mock.calls[0][0].sourceId).toBe(created.id);
+    notifications.prepare.mockClear();
+    await affiliateStore.createAffiliate({ name: 'Pending Activation Fixture', email: 'pending-activation@example.test',
+      phone: '254700000058', passwordHash: TEST_HASH, status: 'pending',
+    });
+    expect(notifications.prepare).not.toHaveBeenCalled();
   });
 
   afterAll(() => {
@@ -202,18 +239,27 @@ describe('affiliate store credential boundaries', () => {
       phone: '254700000010',
       passwordHash: TEST_HASH
     });
-    affiliateStore.updateAffiliate(affiliate.id, { balanceAvailableKes: 2_000 }, 'Payout Enforcement Test');
+    firestore.documents.set(`affiliates/${affiliate.id}`, {
+      ...firestore.documents.get(`affiliates/${affiliate.id}`), balanceAvailableKes: 2_000, totalCommissionEarnedKes: 2_000,
+    });
+    for (const index of [1, 2]) firestore.documents.set(`affiliate_commissions/security_payout_${index}`, {
+      id: `security_payout_${index}`, affiliateId: affiliate.id, affiliateCode: affiliate.affiliateCode,
+      transactionId: `security_tx_${index}`, receiptNumber: `SECURITY${index}`, articleId: 'security_piece',
+      articleTitle: 'Security fixture', affiliateName: affiliate.name, status: 'APPROVED',
+      commissionAmountKes: 1_000, saleAmountKes: 5_000, commissionRate: 20, grossCreatorRevenueKes: 4_000,
+      paymentMethod: 'mpesa', createdAt: `2026-10-0${index}T08:00:00.000Z`,
+    });
 
-    expect(() => affiliateStore.requestPayout(affiliate.id, threshold - 1)).toThrow(/at least the configured minimum/i);
-    expect(() => affiliateStore.requestPayout(affiliate.id, 2_001)).toThrow(/cannot exceed the available balance/i);
-    expect(() => affiliateStore.requestPayout(affiliate.id, 0)).toThrow(/greater than zero/i);
-    expect(() => affiliateStore.requestPayout(affiliate.id, 1_000.5)).toThrow(/whole Kenyan-shilling amount/i);
+    await expect(affiliateStore.requestPayout(affiliate.id, threshold - 1)).rejects.toThrow(/at least the configured minimum/i);
+    await expect(affiliateStore.requestPayout(affiliate.id, 2_001)).rejects.toThrow(/cannot exceed the available balance/i);
+    await expect(affiliateStore.requestPayout(affiliate.id, 0)).rejects.toThrow(/greater than zero/i);
+    await expect(affiliateStore.requestPayout(affiliate.id, 1_000.5)).rejects.toThrow(/whole Kenyan-shilling amount/i);
 
-    const payout = affiliateStore.requestPayout(affiliate.id, 1_250);
+    const payout = await affiliateStore.requestPayout(affiliate.id, 1_250);
     expect(payout.amountKes).toBe(1_250);
-    expect(() => affiliateStore.requestPayout(affiliate.id, 750)).toThrow(/already awaiting processing/i);
+    await expect(affiliateStore.requestPayout(affiliate.id, 750)).rejects.toThrow(/already awaiting processing/i);
 
-    affiliateStore.processPayout(payout.id, 'reject', undefined, 'Test cleanup', 'Payout Enforcement Test');
+    await affiliateStore.processPayout(payout.id, 'reject', undefined, 'Test cleanup', 'Payout Enforcement Test');
     await affiliateStore.saveSettings({ minPayoutThresholdKes: previousThreshold }, 'Payout Enforcement Test Cleanup');
   });
 

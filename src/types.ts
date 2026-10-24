@@ -1324,6 +1324,45 @@ export interface AffiliateNotificationEligibilitySummary {
   reasons: Record<string, number>;
 }
 
+/** Client-safe operational summaries: never include addresses, source payloads,
+ * account identifiers, review secrets, or message bodies. */
+export type AffiliateNotificationRuntimeMode = 'prepare' | 'dispatch';
+
+export interface AffiliateNotificationRuntimeLimits {
+  activeAffiliates: number;
+  campaigns: number;
+  releaseCampaigns: number;
+  communityPosts: number;
+  preparedSourcesPerRun: number;
+  inactivityBatch: number;
+  deliveryPage: number;
+  dispatchedIntentsPerRun: number;
+  statusDeliveries: number;
+  statusIntents: number;
+}
+
+export interface AffiliateNotificationRuntimeResult {
+  mode: AffiliateNotificationRuntimeMode;
+  status: 'completed' | 'disabled' | 'blocked' | 'busy' | 'overflow' | 'invalid' | 'conflict' | 'failed';
+  attempted: number;
+  scanned: number;
+  intentCount: number;
+  counts: Record<string, number>;
+  overflow?: string[];
+  hasMore?: boolean;
+}
+
+export interface AffiliateNotificationRuntimeStatus {
+  status: 'ready' | 'disabled' | 'blocked' | 'failed';
+  deliveryGate: 'allowed' | 'disabled' | 'blocked';
+  sampledDeliveries: number;
+  counts: Record<string, number>;
+  preparedIntents: number;
+  truncated: { deliveries: boolean; intents: boolean };
+  limits: AffiliateNotificationRuntimeLimits;
+  cursor?: { busy: boolean; updatedAt?: string; lastCompletedAt?: string };
+}
+
 export interface AffiliateNotificationPreferences {
   schemaVersion: 1;
   revision: number;
@@ -1337,8 +1376,14 @@ export interface AffiliateNotificationPreferences {
   /** Evidence of the latest explicit release-topic opt-in, never backfilled. */
   releaseUpdatesEnabledAt?: string;
   campaignUpdates: boolean;
+  /** Server evidence of the latest explicit campaign-topic opt-in. */
+  campaignUpdatesEnabledAt?: string;
   inactivityReminders: boolean;
+  /** Server evidence; legacy booleans alone do not schedule reminders. */
+  inactivityRemindersEnabledAt?: string;
   exclusiveOpportunities: boolean;
+  /** Server evidence of the latest explicit opportunity-topic opt-in. */
+  exclusiveOpportunitiesEnabledAt?: string;
   commissionAlerts: boolean;
   tierAlerts: boolean;
   allMarketingOptOut: boolean;
@@ -1469,6 +1514,12 @@ export interface AffiliateAccount {
   totalCommissionPaidKes: number;
   balanceAvailableKes: number;
   balancePendingKes: number;
+  /** Atomic wallet ledger bookkeeping; absent on untouched legacy accounts. */
+  walletLedgerVersion?: 1;
+  walletRevision?: number;
+  balanceReservedKes?: number;
+  activePayoutId?: string | null;
+  totalCommissionReversedKes?: number;
   linksDisabled?: boolean;
   notes?: string;
   acceptedTerms?: boolean;
@@ -1514,6 +1565,16 @@ export interface LiteraryCircleTierTransition {
   qualifyingCommissionIds: string[];
 }
 
+/** Server-only, authenticated pseudonymous purchase evidence. Never return to affiliates. */
+export interface AffiliateBuyerAnalyticsEvidence {
+  schemaVersion: 1;
+  identitySource: 'reader_account' | 'verified_payment_phone';
+  capturedAt: string;
+  keys: Array<{ keyId: string; keyFingerprint: string; buyerKey: string }>;
+  proofKeyId: string;
+  proof: string;
+}
+
 export interface AffiliateSaleCommission {
   id: string;
   orderId?: string;
@@ -1549,6 +1610,12 @@ export interface AffiliateSaleCommission {
   literaryCircleTierId?: string;
   literaryCirclePolicyVersion?: number;
   literaryCircleTierTransition?: LiteraryCircleTierTransition;
+  affiliateBuyerAnalytics?: AffiliateBuyerAnalyticsEvidence;
+  walletLedgerVersion?: 1;
+  walletRevision?: number;
+  payoutPaidKes?: number;
+  payoutReservedKes?: number;
+  reservedPayoutId?: string | null;
   createdAt: string;
   approvedAt?: string;
   paidAt?: string;
@@ -1592,6 +1659,10 @@ export interface AffiliatePayoutRequest {
   paidAt?: string;
   notes?: string;
   rejectedReason?: string;
+  walletLedgerVersion?: 1;
+  walletRevision?: number;
+  allocations?: Array<{ commissionId: string; amountKes: number }>;
+  confirmationMethod?: 'writer_confirmed';
 }
 
 export interface AffiliateCampaign {
@@ -1760,6 +1831,9 @@ export interface AffiliateAnalyticsReport {
   };
   buyerMetrics: {
     coverage: 'complete' | 'partial' | 'unavailable';
+    /** Runtime evidence is prospective; incomplete historical identity must not imply a new buyer. */
+    historyCoverage?: 'complete' | 'partial' | 'unavailable';
+    reason?: 'complete' | 'not_enabled' | 'invalid_configuration' | 'incomplete_history' | 'invalid_evidence' | 'mixed_identity_sources' | 'truncated' | 'query_failed';
     identifiedSales: number;
     unidentifiedSales: number;
     uniquePayingReaders: number | null;

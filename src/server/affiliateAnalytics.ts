@@ -10,7 +10,7 @@ import type {
   PaymentTransaction,
 } from '../types.js';
 import { isVerifiedAffiliateCommission, literaryCirclePeriodKey } from './literaryCircle.js';
-import { isSettledTransactionStatus } from './salesLedger.js';
+import { isSettledTransactionStatus, recordedAffiliateCommissionPaidKes } from './salesLedger.js';
 import type { DurableAffiliateClickCoverageAssessment } from './affiliateClickLedger.js';
 
 const DAY_MS = 86_400_000;
@@ -358,6 +358,9 @@ export function buildAffiliateAnalyticsReport(options: {
   affiliates: AffiliateAccount[];
   commissions: AffiliateSaleCommission[];
   buyerKeysByCommissionId?: Readonly<Record<string, string>>;
+  /** Explicit runtime proof, never inferred from selected-window coverage. */
+  buyerHistoryComplete?: boolean;
+  buyerHistoryReason?: AffiliateAnalyticsReport['buyerMetrics']['reason'];
   clickEvents?: AffiliateClickEvent[];
   clickHistoryCompleteForWindow?: boolean;
   clickCoverageAssessment?: DurableAffiliateClickCoverageAssessment;
@@ -421,7 +424,7 @@ export function buildAffiliateAnalyticsReport(options: {
     result.subscriptionSales += kind === 'subscription' ? 1 : 0;
     result.grossSalesKes += gross;
     result.commissionsRecordedKes += recordedCommission;
-    result.commissionsPaidKes += commission.status === 'PAID' ? recordedCommission : 0;
+    result.commissionsPaidKes += recordedAffiliateCommissionPaidKes(commission);
     result.retainedRevenueKes += retained;
     return result;
   }, {
@@ -476,6 +479,8 @@ export function buildAffiliateAnalyticsReport(options: {
       : selectedIdentities.length > 0
         ? 'partial' as const
         : 'unavailable' as const;
+  const buyerHistoryComplete = options.buyerHistoryComplete !== false
+    && lifetimeCanonical.every(commission => BUYER_KEY_PATTERN.test(buyerKeys[commission.id] || ''));
 
   let referralTraffic: AffiliateAnalyticsReport['referralTraffic'];
   const clickFilterUnsupported = Boolean(filters.purchaseKind || filters.subscriptionPlanId || filters.literaryCircleTierId);
@@ -629,12 +634,16 @@ export function buildAffiliateAnalyticsReport(options: {
     totals,
     buyerMetrics: {
       coverage: buyerCoverage,
+      ...(options.buyerHistoryComplete !== undefined ? {
+        historyCoverage: buyerHistoryComplete ? 'complete' as const : buyerCoverage === 'unavailable' ? 'unavailable' as const : 'partial' as const,
+        reason: options.buyerHistoryReason || (buyerHistoryComplete ? 'complete' as const : 'incomplete_history' as const),
+      } : {}),
       identifiedSales: selectedIdentities.length,
       unidentifiedSales: selected.length - selectedIdentities.length,
       uniquePayingReaders: buyerCoverage === 'unavailable' ? null : uniqueIdentities.size,
-      newAffiliateAcquiredReaders: buyerCoverage === 'unavailable' ? null : newIdentities.size,
-      repeatPurchases: buyerCoverage === 'unavailable' ? null : repeatSales.length,
-      repeatPayingReaders: buyerCoverage === 'unavailable' ? null : new Set(repeatSales.map(item => item.key)).size,
+      newAffiliateAcquiredReaders: buyerCoverage === 'unavailable' || !buyerHistoryComplete ? null : newIdentities.size,
+      repeatPurchases: buyerCoverage === 'unavailable' || !buyerHistoryComplete ? null : repeatSales.length,
+      repeatPayingReaders: buyerCoverage === 'unavailable' || !buyerHistoryComplete ? null : new Set(repeatSales.map(item => item.key)).size,
     },
     referralTraffic,
     monthly,

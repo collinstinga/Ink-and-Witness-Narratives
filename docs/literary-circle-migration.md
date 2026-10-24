@@ -30,7 +30,7 @@ The backup contains personal and financial data. It is written under the
 git-ignored `data/backups/` directory with a timestamped backup ID. Do not
 commit, email, or copy it to an unapproved location.
 
-Current backup schema is v6. It also captures all newsletter campaign and
+Current backup schema is v7. It also captures all newsletter campaign and
 article documents, preserving release-notification source evidence, unpublished
 content and publication state without projection. Treat these additional files
 as confidential. Capturing and comparing them requires collection reads; budget
@@ -46,6 +46,13 @@ independently verified newly created marker. Migration retries accept only an
 unchanged marker or the completed first-apply marker tied to the same backup
 hash, backup ID and nine affiliate identities; post-verification compares the
 exact transaction result. No marker repair/delete fallback is provided.
+
+Schema v7 additionally preserves all independent partner-notification delivery,
+lease, attempt, retry, dead-letter and suppression records, plus the reviewed
+`affiliate_notification_delivery` configuration. These records are confidential
+and must be quiesced with notification workers during a preservation comparison.
+They are not migration write targets. A fresh v7 snapshot is required; existing
+v6 files remain unchanged and must not be relabelled or padded with invented data.
 
 Migration now requires `--expected-database` and explicit
 `FIREBASE_SERVICE_ACCOUNT_JSON` belonging to the exact allowlisted staging
@@ -95,7 +102,7 @@ Before either command:
    deployment and retain both its deployment reference and its `aclk2_...`
    Firestore event ID;
 3. quiesce staging affiliate traffic;
-4. take a new verified schema-v6 backup after the proof event exists; and
+4. take a new verified schema-v7 backup after the proof event exists; and
 5. keep `FIREBASE_SERVICE_ACCOUNT_JSON` available only in the protected local
    process environment. Application-default credentials are refused.
 
@@ -139,9 +146,9 @@ The snapshot contains every document from `affiliates`,
 `affiliate_commissions`, `affiliate_clicks`, `affiliate_payouts`,
 `affiliate_campaigns`, `affiliate_audit`, `affiliate_codes`,
 `affiliate_emails`, `affiliate_commission_outbox`, `affiliate_attribution_claims`,
-and `affiliate_notification_outbox`; only affiliate-attributed documents from
+`affiliate_notification_outbox`, and `affiliate_notification_deliveries`; only affiliate-attributed documents from
 `transactions`; and the `affiliate_settings`, `affiliate_literary_circle`,
-`affiliate_notifications`, and `literary_circle_resources` documents from
+`affiliate_notifications`, `affiliate_notification_delivery`, and `literary_circle_resources` documents from
 `site_configs` when present. Backup schema version 4 includes the preview-only
 affiliate-notification configuration without treating it as subscriber consent
 or a delivery ledger. It also includes exactly every
@@ -151,7 +158,7 @@ aborts if any referenced asset document is missing.
 
 Version 4 adds verbatim notification source and held-intent records. Earlier
 backup files remain untouched, but current migration and click-activation tools
-reject them because they lack the new scope. Take a fresh version-4 backup;
+reject them because they lack the new scope. Take a fresh current-version backup;
 never relabel an older manifest or synthesize an empty outbox to bypass checks.
 
 `affiliate_sessions` is deliberately excluded because it contains revocable

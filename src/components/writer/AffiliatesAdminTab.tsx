@@ -116,7 +116,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [savingEditAff, setSavingEditAff] = useState(false);
 
   // Payout Process Form
-  const [payoutAction, setPayoutAction] = useState<'pay' | 'reject'>('pay');
+  const [payoutAction, setPayoutAction] = useState<'approve' | 'pay' | 'reject'>('approve');
   const [payoutRef, setPayoutRef] = useState('');
   const [payoutNotes, setPayoutNotes] = useState('');
   const [processingPayout, setProcessingPayout] = useState(false);
@@ -561,7 +561,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
         payoutRef.trim() || undefined,
         payoutNotes.trim() || undefined
       );
-      setSuccessMsg(`Payout request for KES ${showPayoutProcessModal.amountKes.toLocaleString()} marked as ${payoutAction === 'pay' ? 'Paid' : 'Rejected'}.`);
+      setSuccessMsg(`Payout request for KES ${showPayoutProcessModal.amountKes.toLocaleString()} marked as ${payoutAction === 'pay' ? 'Paid' : payoutAction === 'approve' ? 'Approved (not yet paid)' : 'Rejected'}.`);
       setShowPayoutProcessModal(null);
       setPayoutRef('');
       setPayoutNotes('');
@@ -691,7 +691,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       sale.affiliateName.toLowerCase().includes(commSearch.toLowerCase()) ||
       sale.affiliateCode.toLowerCase().includes(commSearch.toLowerCase()) ||
       sale.receiptNumber.toLowerCase().includes(commSearch.toLowerCase());
-    const matchesStatus = commStatusFilter === 'ALL' || sale.status === commStatusFilter;
+    const matchesStatus = commStatusFilter === 'ALL' || sale.status === (commStatusFilter === 'verified' ? 'APPROVED' : commStatusFilter.toUpperCase());
     return matchesSearch && matchesStatus;
   });
 
@@ -1418,16 +1418,16 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                           </td>
                           <td className="p-3 text-center">
                             <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${
-                              comm.status === 'verified' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                              comm.status === 'paid' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
-                              comm.status === 'reversed' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                              comm.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                              comm.status === 'PAID' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
+                              comm.status === 'REVERSED' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
                               'bg-amber-950 text-amber-400 border border-amber-800'
                             }`}>
                               {comm.status}
                             </span>
                           </td>
                           <td className="p-3 text-right">
-                            {comm.status === 'verified' && (
+                            {comm.status === 'APPROVED' && (
                               <button
                                 onClick={async () => {
                                   const reason = prompt("Enter reversal reason (e.g. refund/fraud):");
@@ -1538,20 +1538,20 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                           </td>
                           <td className="p-3 text-center">
                             <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${
-                              payout.status === 'paid' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                              payout.status === 'approved' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
-                              payout.status === 'rejected' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
+                              payout.status === 'PAID' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                              payout.status === 'APPROVED' ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' :
+                              payout.status === 'REJECTED' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
                               'bg-amber-950 text-amber-400 border border-amber-800'
                             }`}>
                               {payout.status}
                             </span>
                           </td>
                           <td className="p-3 text-right">
-                            {payout.status === 'pending' && (
+                            {['PENDING', 'APPROVED', 'PROCESSING'].includes(payout.status) && (
                               <button
                                 onClick={() => {
                                   setShowPayoutProcessModal(payout);
-                                  setPayoutAction('pay');
+                                  setPayoutAction(payout.status === 'PENDING' ? 'approve' : 'pay');
                                 }}
                                 className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-mono font-bold text-xs cursor-pointer"
                               >
@@ -2211,11 +2211,19 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
             <form onSubmit={handleProcessPayout} className="space-y-3">
               <div>
                 <label className="block text-xs font-mono text-slate-300 mb-1">Action</label>
-                <div className="grid grid-cols-2 gap-2">
+                <p className="mb-2 text-[11px] leading-relaxed text-slate-400">Approve the reserved amount first. Approval does not send money. Confirm paid only after independently verifying the actual transfer and receipt.</p>
+                <div className="grid grid-cols-3 gap-2">
                   <button
                     type="button"
+                    disabled={showPayoutProcessModal.status !== 'PENDING'}
+                    onClick={() => setPayoutAction('approve')}
+                    className={`py-2 rounded-xl border text-xs font-mono font-bold disabled:opacity-40 ${payoutAction === 'approve' ? 'bg-cyan-950 border-cyan-600 text-cyan-300' : 'bg-slate-900 border-slate-800 text-slate-400'}`}
+                  >Approve request</button>
+                  <button
+                    type="button"
+                    disabled={!['APPROVED', 'PROCESSING'].includes(showPayoutProcessModal.status)}
                     onClick={() => setPayoutAction('pay')}
-                    className={`py-2 rounded-xl border text-xs font-mono font-bold ${
+                    className={`py-2 rounded-xl border text-xs font-mono font-bold disabled:opacity-40 ${
                       payoutAction === 'pay' ? 'bg-emerald-950 border-emerald-600 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-400'
                     }`}
                   >
@@ -2241,6 +2249,8 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                   <input
                     type="text"
                     required
+                    minLength={4}
+                    maxLength={128}
                     value={payoutRef}
                     onChange={(e) => setPayoutRef(e.target.value)}
                     placeholder="e.g. QK82910482"
@@ -2275,7 +2285,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                     payoutAction === 'pay' ? 'bg-emerald-500 hover:bg-emerald-400' : 'bg-rose-500 hover:bg-rose-400 text-white'
                   }`}
                 >
-                  {processingPayout ? 'Processing...' : payoutAction === 'pay' ? 'Confirm Disbursement' : 'Reject Request'}
+                  {processingPayout ? 'Processing...' : payoutAction === 'pay' ? 'Confirm Disbursement' : payoutAction === 'approve' ? 'Approve Reserved Payout' : 'Reject Request'}
                 </button>
               </div>
             </form>
