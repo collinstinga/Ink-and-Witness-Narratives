@@ -1,10 +1,10 @@
-.git/
-node_modules/
-data/
-uploads/
-coverage/
-build/
-dist/
+/.git/
+/node_modules/
+/data/
+/uploads/
+/coverage/
+/build/
+/dist/
 .env*
 !.env.example
 *.log

@@ -10,6 +10,8 @@ describe('controlled Literary Circle preview release', () => {
 
   it('explicitly excludes preservation files and local secrets from uploaded deployment sources', () => {
     const ignored = fs.readFileSync(new URL('./.vercelignore', import.meta.url), 'utf8').split(/\r?\n/);
-    for (const entry of ['.git/', 'node_modules/', 'data/', 'uploads/', '.env*', '*.log']) expect(ignored).toContain(entry);
+    for (const entry of ['/.git/', '/node_modules/', '/data/', '/uploads/', '.env*', '*.log']) expect(ignored).toContain(entry);
+    expect(ignored).not.toContain('data/');
+    expect(fs.existsSync(new URL('./src/data/affiliateTerms.ts', import.meta.url))).toBe(true);
   });
 });
