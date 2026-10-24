@@ -2,6 +2,8 @@
 
 ## Implemented, pending the main build's verification
 
+Main-agent follow-up: focused and full runs now pass (127 suites / 1,589 tests); TypeScript and local/cloud production builds pass; the new staging index is independently READY. See `2026-10-24-protected-staging-verification.md` for actual preservation/deployment evidence and the remaining production/automatic-policy release gates. The notes below retain the original authoring checkpoint.
+
 - Replaced each automatic tier-priced sale's 10,000-row lifetime commission scan
   with server-only `affiliate_tier_periods` evidence keyed by affiliate and Nairobi
   calendar month. New sales and removal on rejection/reversal commit in the same
