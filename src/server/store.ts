@@ -7773,9 +7773,41 @@ export const store = {
       updatedAt: now
     };
 
+    // Hosted/cloud-configured authentication must not acknowledge a phantom
+    // account or overwrite an existing identity from an instance's stale cache.
+    // Keep the existing credential-free local JSON development fallback.
+    const cloudBacked = Boolean(process.env.VERCEL
+      || process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    if (cloudBacked) {
+      const duplicate = new Error('A user with this email address already exists.');
+      try {
+        const db = getDb();
+        const emailReservation = db.collection('user_email_reservations').doc(
+          `uer1_${crypto.createHash('sha256').update(email).digest('hex')}`
+        );
+        await db.runTransaction(async transaction => {
+          // A shared deterministic document, not query-range locking or a warm
+          // cache, serializes concurrent registrations for the same identity.
+          const reserved = await transaction.get(emailReservation);
+          if (reserved.exists) throw duplicate;
+          const existing = await transaction.get(
+            db.collection('users').where('email', '==', email).limit(2)
+          );
+          if (existing.docs.length) throw duplicate;
+          transaction.create(db.collection('users').doc(id), sanitizeForFirestore(user));
+          transaction.create(emailReservation, { userId: id, createdAt: now });
+        });
+      } catch (error) {
+        if (error === duplicate) throw duplicate;
+        // Do not reflect SDK errors, credentials or private identity records.
+        throw new Error('Your account could not be created right now. Please retry.');
+      }
+    } else {
+      setFirestoreDoc('users', id, user).catch(() => {});
+    }
     cachedUsers.set(id, user);
     writeJsonFileSync(USERS_FILE, Array.from(cachedUsers.values()));
-    setFirestoreDoc('users', id, user).catch(() => {});
     return user;
   },
 
