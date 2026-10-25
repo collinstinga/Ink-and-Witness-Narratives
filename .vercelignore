@@ -1,7 +1,10 @@
 /.git/
+/.vercel/
 /node_modules/
 /data/
 /uploads/
+/backups/
+/reports/
 /coverage/
 /build/
 /dist/
@@ -10,3 +13,4 @@
 *.log
 *.tmp
 *.tmp.*
+*.tsbuildinfo

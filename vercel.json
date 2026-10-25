@@ -2,10 +2,32 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "git": {
     "deploymentEnabled": {
-      "feature/literary-circle-upgrade": false
+      "feature/literary-circle-upgrade": false,
+      "hotfix/social-link-previews-20261025": false
     }
   },
   "regions": ["cpt1"],
+  "functions": {
+    "api/social-preview.ts": {
+      "includeFiles": "dist/index.html"
+    }
+  },
+  "routes": [
+    {
+      "src": "^/$",
+      "dest": "/api/social-preview",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https: wss:; media-src 'self' blob: https:; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests",
+        "Strict-Transport-Security": "max-age=31536000",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+        "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+        "X-DNS-Prefetch-Control": "off"
+      }
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",
@@ -55,6 +77,10 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/social-preview-image",
+      "destination": "/api/social-image"
+    },
     {
       "source": "/newsletter/confirm",
       "destination": "/api/index?path=newsletter/confirm"

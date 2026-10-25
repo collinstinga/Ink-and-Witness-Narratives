@@ -1,0 +1,38 @@
+name: Social preview verification
+
+# Verification only: no cloud credentials, customer data or deployment steps.
+on:
+  push:
+    branches: [hotfix/social-link-previews-20261025]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: social-preview-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact hotfix source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.1'
+      - name: Install pinned package manager
+        run: npm install --global pnpm@10.30.0
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check all source types
+        run: pnpm exec tsc --noEmit --pretty false
+      - name: Run complete serial regression suite
+        run: pnpm exec vitest run --pool=threads --maxWorkers=1 --testTimeout=30000 --reporter=dot --silent
+      - name: Build frontend and server
+        run: pnpm run build
