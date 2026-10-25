@@ -121,7 +121,9 @@ function assertAuthority(input: ProductionCoreActivationInput): void {
   // SDK, not getDb(). Its concrete public binding is still authoritative; an
   // environment label is never a substitute for either SDK binding.
   const recorded = getFirestoreClientTarget(input.db);
-  const actual = recorded ?? { projectId: input.db.projectId, firestoreDatabaseId: input.db.databaseId };
+  // Firestore 9 implements this runtime getter but omits it from its public
+  // declaration. Keep its value unknown and require the exact string below.
+  const actual = recorded ?? { projectId: Reflect.get(input.db, 'projectId'), firestoreDatabaseId: input.db.databaseId };
   if (target?.projectId !== PRODUCTION_CORE_PROJECT_ID || target?.databaseId !== '(default)'
     || actual?.projectId !== target.projectId || actual?.firestoreDatabaseId !== target.databaseId
     || process.env.FIRESTORE_EMULATOR_HOST || process.env.FIREBASE_AUTH_EMULATOR_HOST || process.env.FIREBASE_DATABASE_EMULATOR_HOST) refuse('TARGET');

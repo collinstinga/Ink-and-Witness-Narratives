@@ -39,7 +39,7 @@ export async function readStagingVerificationBinding(env: NodeJS.ProcessEnv = pr
     const db = getDb();
     const target = getFirestoreClientTarget(db);
     if (target?.projectId !== PROJECT || target.firestoreDatabaseId !== DATABASE
-      || db.projectId !== PROJECT || db.databaseId !== DATABASE) return { status: 'unavailable' };
+      || Reflect.get(db, 'projectId') !== PROJECT || db.databaseId !== DATABASE) return { status: 'unavailable' };
     const snapshot = await db.collection('migration_markers').doc(MARKER_ID).get();
     const marker = snapshot.exists ? snapshot.data() : undefined;
     if (!marker || marker.schemaVersion !== 1 || marker.migrationId !== MARKER_ID
