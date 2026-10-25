@@ -93,37 +93,85 @@ describe('persistent asset delivery', () => {
     const legacyResponse = await fetch(`${baseUrl}/uploads/legacy-cover.png`, {
       headers: { cookie: 'iw_session=session-that-must-not-be-read' }
     });
+    // api/index.ts normalizes Vercel's /uploads/:filename rewrite into this
+    // asset-ID route, not the ordinary Express /uploads/:filename route.
+    const rewrittenLegacyResponse = await fetch(`${baseUrl}/api/assets/piece_cover-1787737122190-288fead909c3.jpg`, {
+      headers: { cookie: 'iw_session=session-that-must-not-be-read' }
+    });
 
     expect(response.status).toBe(200);
     expect(legacyResponse.status).toBe(200);
+    expect(rewrittenLegacyResponse.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('image/png');
     expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     expect(Buffer.from(await response.arrayBuffer()).length).toBeGreaterThan(0);
     expect(Buffer.from(await legacyResponse.arrayBuffer()).length).toBeGreaterThan(0);
+    expect(Buffer.from(await rewrittenLegacyResponse.arrayBuffer()).length).toBeGreaterThan(0);
     expect(storeMocks.getUploadedAsset).toHaveBeenCalledWith('piece_cover-test_png');
     expect(storeMocks.getUploadedAsset).toHaveBeenCalledWith('legacy-cover_png');
+    expect(storeMocks.getUploadedAsset).toHaveBeenCalledWith('piece_cover-1787737122190-288fead909c3_jpg');
     expect(storeMocks.init).not.toHaveBeenCalled();
     expect(storeMocks.getAuthSession).not.toHaveBeenCalled();
   });
 
-  it('does not expose private Literary Circle draft artwork through public asset URLs', async () => {
+  it.each([
+    '/api/assets/private-resource-image',
+    '/api/assets/private-resource-image.jpg',
+    '/uploads/private-resource-image.jpg',
+  ])('does not expose private Literary Circle draft artwork through %s', async route => {
     storeMocks.getUploadedAsset.mockResolvedValueOnce({
       accessScope: 'literary_circle_private',
       dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlGQAAAAASUVORK5CYII='
     });
 
-    const response = await fetch(`${baseUrl}/api/assets/private-resource-image`);
+    const response = await fetch(`${baseUrl}${route}`);
 
     expect(response.status).toBe(404);
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
   });
 
-  it('rejects malformed asset identifiers instead of aliasing them to another record', async () => {
-    const response = await fetch(`${baseUrl}/api/assets/unsafe%2Epng`);
+  it.each(['jpg', 'jpeg', 'png', 'webp', 'JPG'])('recognizes only the existing single-extension %s filename shape after rewrite', async extension => {
+    const response = await fetch(`${baseUrl}/api/assets/legacy-cover.${extension}`);
+
+    expect(response.status).toBe(200);
+    expect(storeMocks.getUploadedAsset).toHaveBeenCalledExactlyOnceWith(`legacy-cover_${extension}`);
+    expect(storeMocks.init).not.toHaveBeenCalled();
+    expect(storeMocks.getAuthSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '/api/assets/unsafe%2Eextra.png',
+    '/api/assets/unsafe.png.exe',
+    '/api/assets/unsafe.html',
+    '/api/assets/..%2Fsecret_png',
+    '/api/assets/%2E%2E%2Fsecret_png',
+    '/api/assets/..%5Csecret_png',
+    '/api/assets/unsafe%252Epng',
+    '/api/assets/unsafe%00.png',
+    `/api/assets/${'a'.repeat(171)}.jpg`,
+    `/api/assets/${'a'.repeat(181)}`,
+    '/uploads/unsafe%2Eextra.png',
+    '/uploads/..%2Fsecret.png',
+    '/uploads/unsafe',
+  ])('rejects malformed or traversal identifiers without aliasing them to another record: %s', async route => {
+    // A single approved raster extension is now an intentional legacy alias.
+    // Extra dots/extensions, separators and nested encodings are not aliases.
+    const response = await fetch(`${baseUrl}${route}`);
 
     expect(response.status).toBe(404);
     expect(storeMocks.getUploadedAsset).not.toHaveBeenCalled();
+  });
+
+  it('still validates the stored raster after resolving a rewritten legacy filename', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      storeMocks.getUploadedAsset.mockResolvedValueOnce({ dataUrl: 'data:image/png;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==' });
+      const response = await fetch(`${baseUrl}/api/assets/legacy-cover.png`);
+      expect(response.status).toBe(415);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(storeMocks.getUploadedAsset).toHaveBeenCalledExactlyOnceWith('legacy-cover_png');
+    } finally { warning.mockRestore(); }
   });
 
   it('returns a non-cacheable 503 and allows initialization to be retried', async () => {

@@ -1541,9 +1541,12 @@ export async function createApp() {
   const servePersistentAsset = async (req: Request, res: Response) => {
     try {
       const rawId = req.params.assetId || req.params.filename;
-      const isLegacyFilename = Boolean(req.params.filename);
       const validAssetId = /^[a-zA-Z0-9_-]{1,180}$/;
       const validLegacyFilename = /^[a-zA-Z0-9_-]{1,170}\.(?:jpe?g|png|webp)$/i;
+      // Vercel's existing /uploads/:filename rewrite reaches this handler as
+      // /api/assets/:assetId. Recognize that exact safe filename grammar in
+      // either parameter; do not generally sanitize arbitrary identifiers.
+      const isLegacyFilename = Boolean(req.params.filename) || validLegacyFilename.test(rawId);
       if (
         (!isLegacyFilename && !validAssetId.test(rawId))
         || (isLegacyFilename && !validLegacyFilename.test(rawId))
