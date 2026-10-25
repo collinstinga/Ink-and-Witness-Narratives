@@ -3,7 +3,11 @@
 Date: 24–25 October 2026 (Africa/Nairobi). Working continuation of
 `2026-10-24-affiliate-auth-and-registration.md`.
 
-**Working checkpoint — do not infer completion or deployment.**
+Latest continuation: `2026-10-25-ci-and-protected-staging.md` records the successful
+136-suite/1,830-test clean CI, TypeScript/builds and new protected staging deploy.
+The pending statements below describe this earlier working checkpoint only.
+
+**Historical working checkpoint — not a production release.**
 The previous verified functional deployment remains `2ec54c9` / protected
 `dpl_5dvMhjtqz81yj5TvQNhBQNzKgFVz`. New source in this checkpoint is not yet
 deployed. Functional source was committed and pushed as
