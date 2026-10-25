@@ -1058,11 +1058,15 @@ describe('affiliate session route boundaries', () => {
   it('projects only the approved stage binding without requiring reader or writer sign-in', async () => {
     stagingBindingMocks.enabled.mockReturnValue(true);
     const binding = { projectId: 'ink-witness-staging-20261024', databaseId: '(default)', credentialIdentitySha256: 'a'.repeat(64),
+      providerSafety: { paymentNetworkDisabled: true, newsletterDisabled: true, affiliateNotificationEventsDisabled: true,
+        affiliateNotificationDeliveryDisabled: true, privateField: 'must-not-escape' },
       migrationMarker: { status: 'complete', backupManifestSha256: 'b'.repeat(64), privateField: 'must-not-escape' }, privateKey: 'must-not-escape' };
     stagingBindingMocks.read.mockResolvedValue({ status: 'verified', binding });
     const response = await fetch(`${baseUrl}/api/staging/runtime-binding`);
     expect(response.status).toBe(200); expect(await response.json()).toEqual({ success: true,
       projectId: binding.projectId, databaseId: binding.databaseId, credentialIdentitySha256: binding.credentialIdentitySha256,
+      providerSafety: { paymentNetworkDisabled: true, newsletterDisabled: true,
+        affiliateNotificationEventsDisabled: true, affiliateNotificationDeliveryDisabled: true },
       migrationMarker: { status: 'complete', backupManifestSha256: 'b'.repeat(64) } });
     expect(stagingBindingMocks.read).toHaveBeenCalledWith(); expect(response.headers.get('cache-control')).toContain('no-store');
     expect(storeMocks.getAuthSession).not.toHaveBeenCalled();
@@ -1072,6 +1076,8 @@ describe('affiliate session route boundaries', () => {
     stagingBindingMocks.enabled.mockReturnValue(true);
     simulatedPlatformQuery = { path: 'staging/runtime-binding' };
     const binding = { projectId: 'ink-witness-staging-20261024', databaseId: '(default)', credentialIdentitySha256: 'a'.repeat(64),
+      providerSafety: { paymentNetworkDisabled: true, newsletterDisabled: true,
+        affiliateNotificationEventsDisabled: true, affiliateNotificationDeliveryDisabled: true },
       migrationMarker: { status: 'complete', backupManifestSha256: 'b'.repeat(64) } };
     stagingBindingMocks.read.mockResolvedValue({ status: 'verified', binding });
     const response = await fetch(`${baseUrl}/api/staging/runtime-binding`);

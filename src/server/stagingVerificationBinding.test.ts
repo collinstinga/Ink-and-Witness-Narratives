@@ -32,6 +32,8 @@ import { isStagingVerificationBindingEnabled, readStagingVerificationBinding } f
 
 function environment(): NodeJS.ProcessEnv {
   return { VERCEL_ENV: 'preview', NODE_ENV: 'production', FIREBASE_PROJECT_ID: PROJECT, FIRESTORE_DATABASE_ID: '(default)',
+    MPESA_NETWORK_MODE: 'disabled', NEWSLETTER_ENABLED: 'false',
+    AFFILIATE_NOTIFICATION_EVENT_MODE: 'off', AFFILIATE_NOTIFICATION_DELIVERY_MODE: 'off',
     FIREBASE_SERVICE_ACCOUNT_JSON: JSON.stringify({ type: 'service_account', project_id: PROJECT, client_email: EMAIL,
       private_key: 'not-a-real-key-do-not-return' }) };
 }
@@ -53,11 +55,29 @@ describe('exact read-only isolated staging runtime binding', () => {
     expect(await readStagingVerificationBinding(env)).toEqual({ status: 'verified', binding: {
       projectId: PROJECT, databaseId: '(default)', credentialIdentitySha256: crypto.createHash('sha256').update(EMAIL).digest('hex'),
       migrationMarker: { status: 'complete', backupManifestSha256: SHA },
+      providerSafety: {
+        paymentNetworkDisabled: true, newsletterDisabled: true,
+        affiliateNotificationEventsDisabled: true, affiliateNotificationDeliveryDisabled: true,
+      },
     } });
     expect(backend.getDb).toHaveBeenCalledTimes(1); expect(backend.getTarget).toHaveBeenCalledWith(backend.db);
     expect(backend.collection).toHaveBeenCalledWith('migration_markers'); expect(backend.read).toHaveBeenCalledTimes(1);
     expect(backend.state.marker).toEqual(before);
     expect(JSON.stringify(await readStagingVerificationBinding(env))).not.toMatch(/never-public|private_key|not-a-real-key|iam\.gserviceaccount|privateField/);
+  });
+
+  it.each([
+    ['MPESA_NETWORK_MODE', 'live'], ['NEWSLETTER_ENABLED', 'true'],
+    ['AFFILIATE_NOTIFICATION_EVENT_MODE', 'on'], ['AFFILIATE_NOTIFICATION_DELIVERY_MODE', 'on'],
+  ])('holds unsafe or unconfirmed %s before database access without exposing values', async (key, unsafeValue) => {
+    for (const value of [undefined, unsafeValue, ' off ', 'FALSE']) {
+      const env = environment();
+      if (value === undefined) delete env[key]; else env[key] = value;
+      expect(isStagingVerificationBindingEnabled(env)).toBe(true);
+      expect(await readStagingVerificationBinding(env)).toEqual({ status: 'unavailable' });
+      expect(backend.getDb).not.toHaveBeenCalled();
+      expect(backend.read).not.toHaveBeenCalled();
+    }
   });
 
   it.each(['production', 'development', 'missing_environment', 'padded_environment', 'wrong_project', 'padded_project', 'missing_database',

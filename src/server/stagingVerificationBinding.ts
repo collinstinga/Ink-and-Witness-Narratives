@@ -15,6 +15,12 @@ export interface StagingVerificationBinding {
   databaseId: string;
   credentialIdentitySha256: string;
   migrationMarker: { status: 'complete'; backupManifestSha256: string };
+  providerSafety: {
+    paymentNetworkDisabled: true;
+    newsletterDisabled: true;
+    affiliateNotificationEventsDisabled: true;
+    affiliateNotificationDeliveryDisabled: true;
+  };
 }
 export type StagingVerificationBindingResult =
   | { status: 'not_found' | 'unavailable' }
@@ -38,6 +44,12 @@ export function isStagingVerificationBindingEnabled(env: NodeJS.ProcessEnv = pro
  * No request input, credentials, record spreads or mutation/provider operations. */
 export async function readStagingVerificationBinding(env: NodeJS.ProcessEnv = process.env): Promise<StagingVerificationBindingResult> {
   if (!isStagingVerificationBindingEnabled(env)) return { status: 'not_found' };
+  // Configuration names alone cannot prove a safe rehearsal. Attest the
+  // deployed runtime's actual switches, without returning their secret peers.
+  if (env.MPESA_NETWORK_MODE !== 'disabled' || env.NEWSLETTER_ENABLED !== 'false'
+    || env.AFFILIATE_NOTIFICATION_EVENT_MODE !== 'off' || env.AFFILIATE_NOTIFICATION_DELIVERY_MODE !== 'off') {
+    return { status: 'unavailable' };
+  }
   try {
     const db = getDb();
     const target = getFirestoreClientTarget(db);
@@ -52,6 +64,12 @@ export async function readStagingVerificationBinding(env: NodeJS.ProcessEnv = pr
       databaseId: DATABASE,
       credentialIdentitySha256: crypto.createHash('sha256').update(RUNTIME_IDENTITY).digest('hex'),
       migrationMarker: { status: 'complete', backupManifestSha256: BACKUP_SHA256 },
+      providerSafety: {
+        paymentNetworkDisabled: true,
+        newsletterDisabled: true,
+        affiliateNotificationEventsDisabled: true,
+        affiliateNotificationDeliveryDisabled: true,
+      },
     } };
   } catch {
     // Never print SDK errors, environment values, keys, emails or marker data.

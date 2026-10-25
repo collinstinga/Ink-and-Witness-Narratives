@@ -1707,6 +1707,12 @@ export async function createApp() {
         projectId: result.binding.projectId,
         databaseId: result.binding.databaseId,
         credentialIdentitySha256: result.binding.credentialIdentitySha256,
+        providerSafety: {
+          paymentNetworkDisabled: result.binding.providerSafety.paymentNetworkDisabled,
+          newsletterDisabled: result.binding.providerSafety.newsletterDisabled,
+          affiliateNotificationEventsDisabled: result.binding.providerSafety.affiliateNotificationEventsDisabled,
+          affiliateNotificationDeliveryDisabled: result.binding.providerSafety.affiliateNotificationDeliveryDisabled,
+        },
         migrationMarker: {
           status: result.binding.migrationMarker.status,
           backupManifestSha256: result.binding.migrationMarker.backupManifestSha256,
