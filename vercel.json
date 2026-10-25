@@ -1,6 +1,16 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "regions": ["cpt1"],
+  "git": {
+    "deploymentEnabled": {
+      "hotfix/social-link-previews-20261025": false
+    }
+  },
+  "functions": {
+    "api/social-preview.ts": {
+      "includeFiles": "dist/index.html"
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",
@@ -50,6 +60,14 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/",
+      "destination": "/api/social-preview"
+    },
+    {
+      "source": "/social-preview-image",
+      "destination": "/api/social-image"
+    },
     {
       "source": "/newsletter/confirm",
       "destination": "/api/index?path=newsletter/confirm"

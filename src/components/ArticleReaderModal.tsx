@@ -1057,10 +1057,9 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const getMonographUrl = () => {
     if (typeof window !== 'undefined') {
       const origin = window.location.origin;
-      const pathname = window.location.pathname;
-      return `${origin}${pathname}?monograph=${encodeURIComponent(article.slug || article.id)}`;
+      return `${origin}/?monograph=${encodeURIComponent(article.id)}`;
     }
-    return `https://inkandwitness.com/?monograph=${article.slug || article.id}`;
+    return `https://www.inkandwitness-narratives.co.ke/?monograph=${encodeURIComponent(article.id)}`;
   };
 
   function showToast(msg: string) {
