@@ -1,5 +1,9 @@
 # Literary Circle: fresh affiliate sign-in and registration verification
 
+Latest continuation: `2026-10-24-release-plan-tier-notifications.md` records the
+new fresh referral/recipient checks, offline release planner and clean-runner
+CI. Evidence below remains specific to the earlier deployed functional source.
+
 Date: 24 October 2026 (Africa/Nairobi).
 Phase: **staging verification / production release preparation**. Not a production rollout or completed audit.
 

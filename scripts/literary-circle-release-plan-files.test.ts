@@ -71,7 +71,13 @@ describe('bounded descriptor evidence reading', () => {
     vi.spyOn(fs, 'fstatSync').mockReturnValue({ size: 1, isFile: () => true } as fs.Stats);
     const read = vi.spyOn(fs, 'readSync'); const close = vi.spyOn(fs, 'closeSync');
     expect(() => readBoundedReleaseEvidence(file, cwd)).toThrow(/fixed size limit/);
-    expect(read.mock.calls.every(call => Number(call[3]) <= 65_537)).toBe(true);
+    expect(read).toHaveBeenCalled();
+    expect(read.mock.calls.every(call => {
+      // Node overloads readSync; Vitest infers its three-argument overload.
+      // Inspect the actual runtime argument list without an invalid tuple index.
+      const args: readonly unknown[] = call;
+      return args.length === 5 && typeof args[3] === 'number' && args[3] >= 0 && args[3] <= 65_537;
+    })).toBe(true);
     expect(close).toHaveBeenCalledTimes(1);
   });
 

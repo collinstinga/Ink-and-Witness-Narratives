@@ -3,10 +3,12 @@
 Date: 24–25 October 2026 (Africa/Nairobi). Working continuation of
 `2026-10-24-affiliate-auth-and-registration.md`.
 
-**Intermediate working checkpoint — do not infer completion or deployment.**
+**Working checkpoint — do not infer completion or deployment.**
 The previous verified functional deployment remains `2ec54c9` / protected
 `dpl_5dvMhjtqz81yj5TvQNhBQNzKgFVz`. New source in this checkpoint is not yet
-committed/deployed. Remote main and production remain unchanged.
+deployed. Functional source was committed and pushed as
+`cbbe3a0429dac5fdc7b1b3c2cff77bc455bc9e06`. Remote main and production remain
+unchanged. A following test-only correction is described below.
 
 ## Implemented and inspected
 
@@ -63,6 +65,14 @@ committed/deployed. Remote main and production remain unchanged.
   permissions, no credential persistence, no deploy step and no cloud secrets.
   Its result is pending until an actual pushed-commit run completes.
 - No full regression/build/deployment of these new changes has completed yet.
+- Actual CI run `40160597267` for `cbbe3a0` installed the frozen lockfile and
+  native dependencies successfully, then caught one TypeScript error in a new
+  test: Node's overloaded `readSync` mock inferred a three-element tuple while
+  the test inspected the real five-argument call. Corrected the assertion to
+  inspect a `readonly unknown[]`, enforce five actual arguments and a numeric
+  0–65,537 read length, retaining a non-empty-call assertion. No production
+  implementation or size limit was relaxed. Await the following commit's CI;
+  the first run correctly skipped regression/build after the type failure.
 
 ## Actual offline production review
 
