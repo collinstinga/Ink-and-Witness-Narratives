@@ -1690,7 +1690,13 @@ export async function createApp() {
     if (!isStagingVerificationBindingEnabled()) return res.status(404).json({ error: 'Not found.' });
     next();
   }, verifyAccessLimiter, async (req: Request, res: Response) => {
-    if (Object.keys(req.query || {}).length || Object.keys(req.body || {}).length) {
+    // api/index.ts removes Vercel's internal rewrite `path` from req.url,
+    // but the platform's already-parsed req.query can still retain it. Inspect
+    // only the normalized route URL for real query input; never trust or use
+    // the stale parsed target metadata. Malformed URLs remain fail-closed.
+    let hasQueryOptions = true;
+    try { hasQueryOptions = new URL(req.url, 'http://staging-verification.invalid').search !== ''; } catch { /* Rejected below. */ }
+    if (hasQueryOptions || Object.keys(req.body || {}).length) {
       return res.status(400).json({ error: 'Staging verification does not accept request options.' });
     }
     try {

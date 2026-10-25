@@ -316,12 +316,22 @@ import { createApp } from './server.js';
 describe('affiliate session route boundaries', () => {
   let server: Server;
   let baseUrl: string;
+  let simulatedPlatformQuery: Record<string, string> | undefined;
+  let platformQueryInjected = false;
   const validCookie = `iw_affiliate_session=aff_sess_v2_${'b'.repeat(64)}_${'c'.repeat(64)}`;
   const adminSessionToken = `sess_${'a'.repeat(64)}`;
 
   beforeAll(async () => {
     const app = await createApp();
-    server = http.createServer(app);
+    server = http.createServer((req, res) => {
+      if (simulatedPlatformQuery && req.url?.startsWith('/api/staging/runtime-binding')) {
+        // Vercel pre-parses rewrite metadata before api/index.ts normalizes
+        // req.url. Express 4 preserves this existing req.query object.
+        Object.defineProperty(req, 'query', { configurable: true, value: { ...simulatedPlatformQuery } });
+        platformQueryInjected = true;
+      }
+      app(req, res);
+    });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const address = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${address.port}`;
@@ -333,6 +343,8 @@ describe('affiliate session route boundaries', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    simulatedPlatformQuery = undefined;
+    platformQueryInjected = false;
     stagingBindingMocks.enabled.mockReturnValue(false);
     stagingBindingMocks.read.mockResolvedValue({ status: 'unavailable' });
     notificationEligibilityMocks.read.mockResolvedValue({ eventType: 'new_commission', total: 3, eligible: 2, excluded: 1,
@@ -1056,10 +1068,68 @@ describe('affiliate session route boundaries', () => {
     expect(storeMocks.getAuthSession).not.toHaveBeenCalled();
   });
 
+  it('accepts the normalized Vercel route URL despite leftover internal req.query.path metadata', async () => {
+    stagingBindingMocks.enabled.mockReturnValue(true);
+    simulatedPlatformQuery = { path: 'staging/runtime-binding' };
+    const binding = { projectId: 'ink-witness-staging-20261024', databaseId: '(default)', credentialIdentitySha256: 'a'.repeat(64),
+      migrationMarker: { status: 'complete', backupManifestSha256: 'b'.repeat(64) } };
+    stagingBindingMocks.read.mockResolvedValue({ status: 'verified', binding });
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding`);
+    expect(platformQueryInjected).toBe(true);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, ...binding });
+    expect(stagingBindingMocks.read).toHaveBeenCalledWith();
+    expect(response.headers.get('cache-control')).toContain('no-store');
+  });
+
+  it('keeps the non-staging 404 gate ahead of rewrite metadata and true query rejection', async () => {
+    simulatedPlatformQuery = { path: 'staging/runtime-binding' };
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding?projectId=production`);
+    expect(platformQueryInjected).toBe(true);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Not found.' });
+    expect(stagingBindingMocks.read).not.toHaveBeenCalled();
+    expect(response.headers.get('cache-control')).toContain('no-store');
+  });
+
   it('rejects HTTP-selected binding targets before reading a client', async () => {
     stagingBindingMocks.enabled.mockReturnValue(true);
     const response = await fetch(`${baseUrl}/api/staging/runtime-binding?projectId=production&databaseId=other&now=2099`);
     expect(response.status).toBe(400); expect(stagingBindingMocks.read).not.toHaveBeenCalled();
+  });
+
+  it.each(['?projectId=production', '?path=another-target', '?%64atabaseId=other'])('rejects real URL query input %s even with stale platform query metadata', async query => {
+    stagingBindingMocks.enabled.mockReturnValue(true);
+    simulatedPlatformQuery = { path: 'staging/runtime-binding' };
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding${query}`);
+    expect(platformQueryInjected).toBe(true);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Staging verification does not accept request options.' });
+    expect(stagingBindingMocks.read).not.toHaveBeenCalled();
+  });
+
+  it('still rejects actual GET body options after normalized platform routing', async () => {
+    stagingBindingMocks.enabled.mockReturnValue(true);
+    simulatedPlatformQuery = { path: 'staging/runtime-binding' };
+    const body = JSON.stringify({ projectId: 'production' });
+    const response = await new Promise<{ status: number; json: unknown }>((resolve, reject) => {
+      const outgoing = http.request(`${baseUrl}/api/staging/runtime-binding`, {
+        method: 'GET', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, incoming => {
+        let contents = '';
+        incoming.setEncoding('utf8');
+        incoming.on('data', chunk => { contents += chunk; });
+        incoming.on('error', reject);
+        incoming.on('end', () => {
+          try { resolve({ status: incoming.statusCode || 0, json: JSON.parse(contents) }); } catch (error) { reject(error); }
+        });
+      });
+      outgoing.on('error', reject);
+      outgoing.end(body);
+    });
+    expect(platformQueryInjected).toBe(true);
+    expect(response).toEqual({ status: 400, json: { error: 'Staging verification does not accept request options.' } });
+    expect(stagingBindingMocks.read).not.toHaveBeenCalled();
   });
 
   it.each(['unavailable', 'exception'])('returns only a generic no-store 503 for a staging %s', async failure => {
