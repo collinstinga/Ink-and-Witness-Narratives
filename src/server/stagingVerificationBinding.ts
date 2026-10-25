@@ -5,7 +5,10 @@ const PROJECT = 'ink-witness-staging-20261024';
 const DATABASE = '(default)';
 const RUNTIME_IDENTITY = `literary-staging-runtime@${PROJECT}.iam.gserviceaccount.com`;
 const MARKER_ID = 'literary-circle-founding-affiliates-v1';
-const BACKUP_SHA256 = '2df71f3312571b18964c52f10ef6e8f1a8bb52508e4087ad42cb4bc269579b02';
+// The completed migration pins its verified STAGING backup, not the original
+// production backup used by the earlier create-only seed. Independently read
+// from this exact stage/default marker and matched to its retained manifest.
+const BACKUP_SHA256 = '627f98fb6581b318ae0339ab469c279e28719b4f10512f114dac9da26a3e8a61';
 
 export interface StagingVerificationBinding {
   projectId: string;

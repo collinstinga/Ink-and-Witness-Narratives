@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const PROJECT = 'ink-witness-staging-20261024';
 const EMAIL = `literary-staging-runtime@${PROJECT}.iam.gserviceaccount.com`;
-const SHA = '2df71f3312571b18964c52f10ef6e8f1a8bb52508e4087ad42cb4bc269579b02';
+const SHA = '627f98fb6581b318ae0339ab469c279e28719b4f10512f114dac9da26a3e8a61';
 const MARKER = 'literary-circle-founding-affiliates-v1';
 const backend = vi.hoisted(() => {
   const state: {
@@ -98,12 +98,13 @@ describe('exact read-only isolated staging runtime binding', () => {
     expect(backend.read).not.toHaveBeenCalled();
   });
 
-  it.each(['missing', 'wrong_schema', 'wrong_id', 'incomplete', 'wrong_backup', 'sdk_failure'])('holds %s marker evidence without exposing SDK errors or record fields', async change => {
+  it.each(['missing', 'wrong_schema', 'wrong_id', 'incomplete', 'wrong_backup', 'original_production_backup', 'sdk_failure'])('holds %s marker evidence without exposing SDK errors or record fields', async change => {
     if (change === 'missing') backend.state.marker = undefined;
     if (change === 'wrong_schema') backend.state.marker.schemaVersion = 0;
     if (change === 'wrong_id') backend.state.marker.migrationId = 'another-migration';
     if (change === 'incomplete') backend.state.marker.status = 'in_progress';
     if (change === 'wrong_backup') backend.state.marker.backupManifestSha256 = 'f'.repeat(64);
+    if (change === 'original_production_backup') backend.state.marker.backupManifestSha256 = '2df71f3312571b18964c52f10ef6e8f1a8bb52508e4087ad42cb4bc269579b02';
     if (change === 'sdk_failure') backend.state.error = new Error('private-provider-key@example.test');
     expect(await readStagingVerificationBinding(environment())).toEqual({ status: 'unavailable' });
     expect(backend.read).toHaveBeenCalledTimes(1);
