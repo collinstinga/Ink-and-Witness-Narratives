@@ -189,7 +189,10 @@ describe('Vercel social HTML routing and build tracing', () => {
     expect(exclusions).not.toContain('data/');
   });
   it('routes only the homepage HTML to the dedicated handler and traces built assets', () => {
-    expect(config.rewrites.find((rule: { source: string }) => rule.source === '/')).toEqual({ source: '/', destination: '/api/social-preview' });
+    // High-level rewrites run after the filesystem and cannot override Vite's
+    // real index.html. An exact raw route must intercept root first.
+    expect(config.routes).toEqual([{ src: '^/$', dest: '/api/social-preview' }]);
+    expect(config.rewrites.some((rule: { source: string }) => rule.source === '/')).toBe(false);
     expect(config.functions['api/social-preview.ts'].includeFiles).toBe('dist/index.html');
     expect(config.rewrites.find((rule: { source: string }) => rule.source === '/api/:path*').destination).toBe('/api/index?path=:path*');
     expect(config.rewrites.find((rule: { source: string }) => rule.source === '/r/:code').destination).toBe('/api/index?path=affiliate/redirect/:code');
