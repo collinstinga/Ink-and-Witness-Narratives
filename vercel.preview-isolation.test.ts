@@ -4,7 +4,10 @@ import { describe, expect, it } from 'vitest';
 describe('controlled Literary Circle preview release', () => {
   it('does not auto-deploy the staging branch before scoped credentials are ready or disable production deployments', () => {
     const config = JSON.parse(fs.readFileSync(new URL('./vercel.json', import.meta.url), 'utf8'));
-    expect(config.git.deploymentEnabled).toEqual({ 'feature/literary-circle-upgrade': false });
+    expect(config.git.deploymentEnabled).toEqual({
+      'feature/literary-circle-upgrade': false,
+      'hotfix/social-link-previews-20261025': false,
+    });
     expect(config.git.deploymentEnabled.main).toBeUndefined();
   });
 
