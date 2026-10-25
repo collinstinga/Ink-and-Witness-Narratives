@@ -176,6 +176,7 @@ const notificationPreferenceMocks = vi.hoisted(() => ({
   optOut: vi.fn(),
 }));
 const notificationEligibilityMocks = vi.hoisted(() => ({ read: vi.fn() }));
+const stagingBindingMocks = vi.hoisted(() => ({ enabled: vi.fn(), read: vi.fn() }));
 
 const approvalMocks = vi.hoisted(() => ({
   approve: vi.fn(),
@@ -280,6 +281,10 @@ vi.mock('./src/server/affiliateNotificationEligibilityRead.js', async importOrig
   ...await importOriginal<typeof import('./src/server/affiliateNotificationEligibilityRead.js')>(),
   readAffiliateNotificationEligibility: notificationEligibilityMocks.read,
 }));
+vi.mock('./src/server/stagingVerificationBinding.js', () => ({
+  isStagingVerificationBindingEnabled: stagingBindingMocks.enabled,
+  readStagingVerificationBinding: stagingBindingMocks.read,
+}));
 vi.mock('./src/server/affiliateApproval.js', () => ({
   AffiliateApprovalNotFoundError: class AffiliateApprovalNotFoundError extends Error {},
   AffiliateApprovalValidationError: class AffiliateApprovalValidationError extends Error {},
@@ -328,6 +333,8 @@ describe('affiliate session route boundaries', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    stagingBindingMocks.enabled.mockReturnValue(false);
+    stagingBindingMocks.read.mockResolvedValue({ status: 'unavailable' });
     notificationEligibilityMocks.read.mockResolvedValue({ eventType: 'new_commission', total: 3, eligible: 2, excluded: 1,
       reasons: { automatic_tier_filter_requires_verified_evidence: 1 } });
     storeMocks.getAuthSession.mockResolvedValue({
@@ -1025,6 +1032,42 @@ describe('affiliate session route boundaries', () => {
     expect(await response.json()).toMatchObject({ success: true });
     if (kind === 'commission') expect(operation).toHaveBeenCalledWith('commission_one', 'REVERSED', 'Admin (Jake)', 'Confirmed refund');
     else expect(operation).toHaveBeenCalledWith('payout_one', 'mark_paid', 'RECEIPT-VERIFIED', undefined, 'Admin (Jake)');
+  });
+
+  it('keeps the staging attestation absent and no-store outside the exact preview gate', async () => {
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding`);
+    expect(response.status).toBe(404); expect(await response.json()).toEqual({ error: 'Not found.' });
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
+    expect(stagingBindingMocks.read).not.toHaveBeenCalled();
+  });
+
+  it('projects only the approved stage binding without requiring reader or writer sign-in', async () => {
+    stagingBindingMocks.enabled.mockReturnValue(true);
+    const binding = { projectId: 'ink-witness-staging-20261024', databaseId: '(default)', credentialIdentitySha256: 'a'.repeat(64),
+      migrationMarker: { status: 'complete', backupManifestSha256: 'b'.repeat(64), privateField: 'must-not-escape' }, privateKey: 'must-not-escape' };
+    stagingBindingMocks.read.mockResolvedValue({ status: 'verified', binding });
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding`);
+    expect(response.status).toBe(200); expect(await response.json()).toEqual({ success: true,
+      projectId: binding.projectId, databaseId: binding.databaseId, credentialIdentitySha256: binding.credentialIdentitySha256,
+      migrationMarker: { status: 'complete', backupManifestSha256: 'b'.repeat(64) } });
+    expect(stagingBindingMocks.read).toHaveBeenCalledWith(); expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(storeMocks.getAuthSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects HTTP-selected binding targets before reading a client', async () => {
+    stagingBindingMocks.enabled.mockReturnValue(true);
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding?projectId=production&databaseId=other&now=2099`);
+    expect(response.status).toBe(400); expect(stagingBindingMocks.read).not.toHaveBeenCalled();
+  });
+
+  it.each(['unavailable', 'exception'])('returns only a generic no-store 503 for a staging %s', async failure => {
+    stagingBindingMocks.enabled.mockReturnValue(true);
+    if (failure === 'exception') stagingBindingMocks.read.mockRejectedValueOnce(new Error('private-provider-secret@example.test'));
+    const response = await fetch(`${baseUrl}/api/staging/runtime-binding`);
+    expect(response.status).toBe(503); expect(await response.json()).toEqual({ error: 'Staging runtime binding could not be verified.' });
+    expect(response.headers.get('cache-control')).toContain('no-store');
   });
 
   it('protects notification operations and cron jobs before any runtime work', async () => {

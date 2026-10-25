@@ -96,6 +96,7 @@ import { getAffiliateNotificationRuntimeStatus, runAffiliateNotificationJob } fr
 import { reconcileAffiliateNotificationWebhook } from "./src/server/affiliateNotificationDelivery.js";
 import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntimeRequest } from "./src/server/affiliateNotificationRuntimeRequest.js";
 import { AffiliateNotificationEligibilityOverflowError, readAffiliateNotificationEligibility } from "./src/server/affiliateNotificationEligibilityRead.js";
+import { isStagingVerificationBindingEnabled, readStagingVerificationBinding } from "./src/server/stagingVerificationBinding.js";
 import {
   AffiliateApprovalNotFoundError,
   AffiliateApprovalValidationError,
@@ -1678,6 +1679,36 @@ export async function createApp() {
   // ==========================================
   // PUBLIC API ROUTES
   // ==========================================
+
+  // Operator-only attestation: absent outside this exact protected staging
+  // configuration, and read-only even there. Never accepts HTTP target options.
+  app.get('/api/staging/runtime-binding', (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, noarchive');
+    if (!isStagingVerificationBindingEnabled()) return res.status(404).json({ error: 'Not found.' });
+    next();
+  }, verifyAccessLimiter, async (req: Request, res: Response) => {
+    if (Object.keys(req.query || {}).length || Object.keys(req.body || {}).length) {
+      return res.status(400).json({ error: 'Staging verification does not accept request options.' });
+    }
+    try {
+      const result = await readStagingVerificationBinding();
+      if (result.status === 'not_found') return res.status(404).json({ error: 'Not found.' });
+      if (result.status === 'verified') return res.json({
+        success: true,
+        projectId: result.binding.projectId,
+        databaseId: result.binding.databaseId,
+        credentialIdentitySha256: result.binding.credentialIdentitySha256,
+        migrationMarker: {
+          status: result.binding.migrationMarker.status,
+          backupManifestSha256: result.binding.migrationMarker.backupManifestSha256,
+        },
+      });
+    } catch { /* No raw infrastructure error reaches this public response. */ }
+    return res.status(503).json({ error: 'Staging runtime binding could not be verified.' });
+  });
 
   // One coherent, non-cacheable payload for the public application's initial
   // render. The browser previously fanned out to six endpoints at once, which
