@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit",
     "migrate:sales:dry-run": "tsx scripts/backfill-sales-ledger.ts",
     "literary-circle:backup": "tsx scripts/backup-literary-circle.ts",
+    "literary-circle:release:plan": "tsx scripts/plan-literary-circle-release.ts",
     "literary-circle:migrate:dry-run": "tsx scripts/migrate-literary-circle.ts",
     "literary-circle:migrate:apply": "tsx scripts/migrate-literary-circle.ts --apply",
     "literary-circle:click-activation:dry-run": "tsx scripts/activate-affiliate-click-analytics.ts",

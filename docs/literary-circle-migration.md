@@ -95,8 +95,51 @@ npm run literary-circle:backup -- --environment=production --allow-production-re
 ```
 
 There is deliberately no production-apply flag in this checkpoint. Production
-write enablement is added only after the staging rehearsal and its idempotency
-verification have both passed.
+write enablement requires separately reviewed staging, preservation, approval
+and live drift checks. The original staging migration and its exact-nine repeat
+remain separate from later intentional test fixtures.
+
+### Offline production release planning
+
+`literary-circle:release:plan` builds a **review plan only** from an already
+verified local backup. It never initializes a database client, reads credentials,
+connects to a provider, approves an account, sends email or charges a payment.
+There is no `--apply`, write-authorization or freshness-bypass flag.
+
+```powershell
+pnpm run literary-circle:release:plan --expected-project=EXACT_PRODUCTION_PROJECT_ID --expected-database="(default)" --expected-affiliates=9 --backup=data/backups/EXACT_BACKUP/manifest.json --expected-backup-sha256=EXACT_MANIFEST_SHA256 --expected-cohort-sha256=PINNED_ORIGINAL_NINE_COHORT_SHA256 --source-commit=EXACT_40_CHARACTER_SOURCE_SHA --staging-evidence=data/release-reviews/EXACT_REVIEW/staging-evidence.json
+```
+
+The separately pinned cohort digest binds original document IDs, normalized
+referral identities and hashed email identities. Compute it from the preserved
+original-nine evidence, **not from a changed candidate cohort to bypass a
+conflict**. The plan also binds complete account and financial-policy digests.
+Existing commission arrangements stay unchanged; proposed rates are not activated.
+
+The fixed backup freshness window is 30 minutes; staging review evidence is
+valid for at most 24 hours and must bind the same source SHA. Stale evidence
+remains visibly blocked rather than being silently refreshed or relabelled.
+An omitted evidence file produces pending rehearsal checks, never assumed passes.
+The CLI exits **2 for a blocked review plan**, 1 for invalid inputs/integrity,
+and does not offer a release-authorized success mode.
+
+Optional evidence is a strict schema-1 operator report containing `sourceCommit`,
+`stagingProjectId`, `databaseId`, `deploymentId`, `deploymentUrl`, `verifiedAt`,
+and exactly these check IDs: `access_and_registration`, `financial_preservation`,
+`writer_controls`, `reader_purchases_and_chapters`, `subscription_referral_checkout`,
+`refund_reconciliation`, `notification_delivery`, `browser_mobile`. Each check
+has an explicit string status (`passed`, `pending`, `blocked`); a claimed pass
+requires the underlying artifact's SHA-256 digest. No arbitrary messages,
+credentials or customer identifiers belong in this report. Evidence paths must
+be regular local files within workspace `data/`, capped at 64 KiB; network/device
+paths, URI schemes, escapes, symbolic links and junctions are refused. Backup
+manifest/dataset paths receive the corresponding local-only link checks.
+
+Even a report claiming every rehearsal passed is **not authorization**. Plans
+always retain `writeAuthorized: false` and an empty database-write allowlist.
+A future separately reviewed apply path must independently validate the plan,
+current database state, policy/config/cohort drift, owner-authorized approval
+and its audit, and the exact staged production build before domain promotion.
 
 Run the dry-run command again with the same verified backup. A healthy repeat
 shows no membership or index changes, proving the migration is idempotent.

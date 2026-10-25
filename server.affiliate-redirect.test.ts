@@ -10,6 +10,8 @@ vi.hoisted(() => {
 
 const affiliateMocks = vi.hoisted(() => ({
   getAffiliateByCode: vi.fn(),
+  getAffiliateForLoginFresh: vi.fn(),
+  getSettingsFresh: vi.fn(),
   registerClick: vi.fn()
 }));
 
@@ -94,6 +96,12 @@ describe('affiliate redirect route', () => {
       status: 'active',
       linksDisabled: false
     });
+    affiliateMocks.getAffiliateForLoginFresh.mockResolvedValue({
+      affiliateCode: 'PARTNER_7', name: 'Current Partner', status: 'active', linksDisabled: false,
+      passwordHash: 'PRIVATE-PASSWORD-HASH', sessionVersion: 'PRIVATE-SESSION-GENERATION',
+      email: 'private@example.invalid', balanceAvailableKes: 999, payoutDetails: { bankAccountNumber: 'PRIVATE-PAYOUT' },
+    });
+    affiliateMocks.getSettingsFresh.mockResolvedValue({ defaultCommissionRate: 17 });
     affiliateMocks.registerClick.mockImplementation((_code, _articleId, campaign) => ({
       valid: true,
       affiliate: { affiliateCode: 'PARTNER_7', name: 'Test Partner' },
@@ -129,6 +137,87 @@ describe('affiliate redirect route', () => {
   function findCookie(response: Response, name: string): string | undefined {
     return getSetCookieHeaders(response).find(value => value.startsWith(`${name}=`));
   }
+
+  it.each(['/api/affiliate/validate/PARTNER_7', '/api/affiliate/validate-ref?code=partner_7'])(
+    'validates newly shared partners from current records using %s without a startup-cache prerequisite', async path => {
+      affiliateMocks.getAffiliateByCode.mockReturnValue(undefined);
+      const response = await fetch(`${baseUrl}${path}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toContain('no-store');
+      expect(response.headers.get('cdn-cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ valid: true, code: 'PARTNER_7', name: 'Current Partner', affiliateName: 'Current Partner', commissionRate: 17 });
+      expect(affiliateMocks.getAffiliateForLoginFresh).toHaveBeenCalledWith(expect.stringMatching(/^partner_7$/i));
+      expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
+      expect(affiliateMocks.registerClick).not.toHaveBeenCalled();
+      expect(response.headers.get('set-cookie')).toBeNull();
+    },
+  );
+
+  it.each([{ status: 'suspended' }, { status: 'pending' }, { linksDisabled: true }])(
+    'rejects current referral state %j even when the startup cache says active', async current => {
+      affiliateMocks.getAffiliateForLoginFresh.mockResolvedValueOnce({ affiliateCode: 'PARTNER_7', status: 'active', linksDisabled: false, ...current });
+      const response = await fetch(`${baseUrl}/api/affiliate/validate/PARTNER_7`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ valid: false });
+      expect(affiliateMocks.getSettingsFresh).not.toHaveBeenCalled();
+      expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
+      expect(response.headers.get('set-cookie')).toBeNull();
+    },
+  );
+
+  it('does not substitute a stale account or reveal backend details when shared validation fails', async () => {
+    affiliateMocks.getAffiliateForLoginFresh.mockRejectedValueOnce(new Error('PRIVATE-PROVIDER-DETAILS'));
+    const response = await fetch(`${baseUrl}/api/affiliate/validate/PARTNER_7`);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ valid: false, error: 'Referral validation is temporarily unavailable. Please retry.' });
+    expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('does not revive an unknown or removed referral from its cached profile', async () => {
+    affiliateMocks.getAffiliateForLoginFresh.mockResolvedValueOnce(undefined);
+    const response = await fetch(`${baseUrl}/api/affiliate/validate/PARTNER_7`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ valid: false });
+    expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
+    expect(affiliateMocks.getSettingsFresh).not.toHaveBeenCalled();
+  });
+
+  it('does not display a cached default rate after the current settings read fails', async () => {
+    affiliateMocks.getSettingsFresh.mockRejectedValueOnce(new Error('PRIVATE-SETTINGS-PROVIDER'));
+    const response = await fetch(`${baseUrl}/api/affiliate/validate/PARTNER_7`);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ valid: false, error: 'Referral validation is temporarily unavailable. Please retry.' });
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+
+  it.each(['', 'code=not%40an-email.test', 'code=PARTNER_7&code=OTHER', 'code=bad%2Fcode', `code=${'A'.repeat(65)}`])(
+    'rejects malformed public code query %s before shared database reads', async query => {
+      const response = await fetch(`${baseUrl}/api/affiliate/validate-ref?${query}`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ valid: false });
+      expect(affiliateMocks.getAffiliateForLoginFresh).not.toHaveBeenCalled();
+      expect(affiliateMocks.getSettingsFresh).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains an explicit current partner rate without a redundant programme-settings read', async () => {
+    affiliateMocks.getAffiliateForLoginFresh.mockResolvedValueOnce({ affiliateCode: 'PARTNER_7', name: 'Current Partner', status: 'active', customCommissionRate: 22 });
+    const response = await fetch(`${baseUrl}/api/affiliate/validate/PARTNER_7`);
+    expect(await response.json()).toMatchObject({ valid: true, commissionRate: 22 });
+    expect(affiliateMocks.getSettingsFresh).not.toHaveBeenCalled();
+  });
+
+  it('keeps redirect tracking on its existing fresh transaction without a startup identity preflight', async () => {
+    affiliateMocks.getAffiliateByCode.mockReturnValue(undefined);
+    affiliateMocks.getAffiliateForLoginFresh.mockResolvedValue(undefined);
+    const response = await requestRedirect('/r/PARTNER_7?article=piece_42');
+    expect(response.status).toBe(302);
+    expect(getRelativeRedirect(response).searchParams.get('article')).toBe('piece_42');
+    expect(affiliateMocks.registerClick).toHaveBeenCalledTimes(1);
+    expect(affiliateMocks.getAffiliateByCode).not.toHaveBeenCalled();
+    expect(affiliateMocks.getAffiliateForLoginFresh).not.toHaveBeenCalled();
+  });
 
   it('lands a homepage link on the homepage and records exactly one click', async () => {
     const response = await requestRedirect('/api/affiliate/redirect/PARTNER_7');

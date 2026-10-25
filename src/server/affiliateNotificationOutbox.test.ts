@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import type { Firestore } from 'firebase-admin/firestore';
 import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS } from './affiliateNotifications.js';
 import { storeHeldAffiliateNotifications } from './affiliateNotificationOutbox.js';
+import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
+import { affiliateTierPeriodDocumentId } from './affiliateTierPeriods.js';
 
 const NOW = '2026-10-23T09:00:00.000Z';
 type Ref = { path: string; id: string };
@@ -125,6 +127,30 @@ describe('create-only held partner notification outbox', () => {
     expect(await storeHeldAffiliateNotifications(h.input)).toEqual({ status: 'created', intentCount: 1 });
     expect(h.reads.filter(path => path === 'site_configs/affiliate_literary_circle')).toHaveLength(1);
     expect(h.writes.every(path => path.startsWith('affiliate_notification_outbox/'))).toBe(true);
+  });
+
+  it('prepares and deduplicates an automatic current-month audience with pinned canonical evidence but no financial writes', async () => {
+    const h = harness();
+    const notificationSettings = h.documents.get('site_configs/affiliate_notifications') as typeof DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS;
+    notificationSettings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = ['literary-partner'];
+    const account = h.documents.get('affiliates/partner-one') as any;
+    account.literaryCircle.schemaVersion = 1;
+    account.literaryCircle.tier = { id: 'literary-patron', source: 'monthly_performance', assignedAt: NOW, qualificationPeriod: '2026-09' };
+    const circle = structuredClone(DEFAULT_LITERARY_CIRCLE_SETTINGS);
+    circle.revision = 4; circle.enabled = true;
+    circle.commissionPolicy = { status: 'active', version: 1, effectiveAt: '2026-10-01T00:00:00.000Z', subscriptionRenewalsEligible: false };
+    const path = `affiliate_tier_periods/${affiliateTierPeriodDocumentId('partner-one', '2026-10')}`;
+    h.documents.set('site_configs/affiliate_literary_circle', circle);
+    h.documents.set(path, { schemaVersion: 1, affiliateId: 'partner-one', periodKey: '2026-10', revision: 1,
+      evidenceComplete: true, members: [], awardedMilestones: [] });
+    const before = structuredClone([...h.documents]);
+    expect(await storeHeldAffiliateNotifications(h.input)).toEqual({ status: 'created', intentCount: 1 });
+    expect(h.documents.get(intentPath(h))).toMatchObject({ tierEvidenceSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(h.reads.filter(item => item === path)).toHaveLength(1);
+    expect(await storeHeldAffiliateNotifications(h.input)).toEqual({ status: 'existing', intentCount: 1 });
+    for (const [key, value] of before) expect(h.documents.get(key)).toEqual(value);
+    expect(h.writes).toHaveLength(2);
+    expect(h.writes.every(item => item.startsWith('affiliate_notification_outbox/'))).toBe(true);
   });
 
   it('deduplicates concurrent requests and later retries without rewriting records', async () => {

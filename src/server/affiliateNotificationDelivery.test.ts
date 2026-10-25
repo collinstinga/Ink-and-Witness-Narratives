@@ -5,6 +5,9 @@ import type { AffiliatePublicProfile } from '../types.js';
 import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS } from './affiliateNotifications.js';
 import { planAffiliateNotifications, type AffiliateNotificationSource } from './affiliateNotificationPlan.js';
 import { NewsletterProviderError } from './newsletterEmail.js';
+import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
+import { affiliateTierPeriodDocumentId } from './affiliateTierPeriods.js';
+import { verifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationMonthlyTiers.js';
 import {
   affiliateNotificationDeliveryHash as hash,
   deliverHeldAffiliateNotification,
@@ -121,6 +124,25 @@ function harness(eventType: 'new_commission' | 'new_release' = 'new_commission')
     failCommit: (count: number) => { failCommitNumber = count; },
     repinReview: () => { env.AFFILIATE_NOTIFICATION_DELIVERY_REVIEW_SHA256 = hash(review); },
   };
+}
+
+function prepareMonthlyTier(h: ReturnType<typeof harness>) {
+  h.settings.templates.find(item => item.eventType === 'new_commission')!.eligibility.tierIds = ['literary-partner'];
+  h.review.settingsSha256 = hash(h.settings); h.repinReview();
+  h.affiliate.literaryCircle!.schemaVersion = 1;
+  h.affiliate.literaryCircle!.tier = { id: 'literary-patron', source: 'monthly_performance', assignedAt: NOW, qualificationPeriod: '2026-09' };
+  const circle = structuredClone(DEFAULT_LITERARY_CIRCLE_SETTINGS);
+  circle.enabled = true; circle.revision = 4;
+  circle.commissionPolicy = { status: 'active', version: 1, effectiveAt: '2026-10-01T00:00:00.000Z', subscriptionRenewalsEligible: false };
+  const period = { schemaVersion: 1, affiliateId: 'partner-one', periodKey: '2026-10', revision: 1,
+    evidenceComplete: true, members: [], awardedMilestones: [] };
+  const path = `affiliate_tier_periods/${affiliateTierPeriodDocumentId('partner-one', '2026-10')}`;
+  h.documents.set('site_configs/affiliate_literary_circle', circle); h.documents.set(path, period);
+  const proof = verifiedAffiliateNotificationMonthlyTiers({ affiliates: [h.affiliate], settings: circle,
+    periods: new Map([['partner-one', period]]), now: NOW });
+  h.intent.tierEvidenceSha256 = proof['partner-one'].evidenceSha256;
+  h.documents.get(`affiliate_notification_outbox/${h.intent.eventId}`).intentEvidence = [{ id: h.intent.id, sha256: hash(h.intent) }];
+  return { circle, period, path };
 }
 
 describe('guarded partner notification delivery', () => {
@@ -293,6 +315,40 @@ describe('guarded partner notification delivery', () => {
     h.beforeTransaction(index => { if (index === 2) circle.tiers[0].enabled = false; });
     expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
     expect(h.delivery()).toMatchObject({ status: 'cancelled' });
+    expect(h.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the exact complete canonical monthly summary twice before the injected test transport', async () => {
+    const h = harness(); const { path } = prepareMonthlyTier(h);
+    const before = structuredClone([...h.documents]);
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'accepted' });
+    expect(h.reads.filter(item => item === path)).toHaveLength(2);
+    expect(h.sendEmail).toHaveBeenCalledTimes(1);
+    for (const [key, value] of before) expect(h.documents.get(key)).toEqual(value);
+    expect(h.writes.every(item => item.startsWith('affiliate_notification_deliveries/'))).toBe(true);
+  });
+
+  it.each(['policy', 'summary', 'missing', 'incomplete', 'manual_override'])('cancels an automatic audience when %s evidence changes after leasing, even if the selected tier is unchanged', async change => {
+    const h = harness(); const evidence = prepareMonthlyTier(h);
+    h.beforeTransaction(index => {
+      if (index !== 2) return;
+      if (change === 'policy') evidence.circle.revision++;
+      if (change === 'summary') evidence.period.revision++;
+      if (change === 'missing') h.documents.delete(evidence.path);
+      if (change === 'incomplete') evidence.period.evidenceComplete = false;
+      if (change === 'manual_override') h.affiliate.literaryCircle!.tier = { id: 'literary-partner', source: 'manual', assignedAt: NOW };
+    });
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
+    expect(h.delivery()).toMatchObject({ status: 'cancelled' }); expect(h.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('holds a previously pinned month after Nairobi month rollover instead of reusing its zero-sale default tier', async () => {
+    const h = harness(); prepareMonthlyTier(h);
+    h.advance(Date.parse('2026-10-31T21:00:00.000Z') - Date.parse(NOW));
+    h.review.reviewedAt = '2026-10-31T20:00:00.000Z'; h.review.expiresAt = '2026-11-01T20:00:00.000Z'; h.repinReview();
+    h.documents.set(`affiliate_tier_periods/${affiliateTierPeriodDocumentId('partner-one', '2026-11')}`,
+      { schemaVersion: 1, affiliateId: 'partner-one', periodKey: '2026-11', revision: 1, evidenceComplete: true, members: [], awardedMilestones: [] });
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
     expect(h.sendEmail).not.toHaveBeenCalled();
   });
 

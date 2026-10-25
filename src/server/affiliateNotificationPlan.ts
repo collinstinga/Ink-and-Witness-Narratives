@@ -4,6 +4,10 @@ import {
   summarizeAffiliateNotificationEligibility,
   validateAffiliateNotificationSettings,
 } from './affiliateNotifications.js';
+import {
+  isVerifiedAffiliateNotificationMonthlyTier,
+  type VerifiedAffiliateNotificationMonthlyTiers,
+} from './affiliateNotificationTierFilter.js';
 
 const SUPPORTED_EVENTS = ['activation', 'new_release', 'new_commission', 'tier_upgrade',
   'upcoming_campaign', 'inactivity_reminder', 'exclusive_opportunity'] as const;
@@ -37,6 +41,8 @@ export interface HeldAffiliateNotificationIntent {
   settingsRevision: number;
   state: 'held';
   dueAt: string;
+  /** Pins automatic tier audience eligibility to exact canonical qualification. */
+  tierEvidenceSha256?: string;
 }
 
 export interface AffiliateNotificationPlan {
@@ -74,6 +80,8 @@ export function planAffiliateNotifications(input: {
   affiliates: AffiliatePublicProfile[];
   /** Exact manual assignments proved from fresh server settings; never client input. */
   verifiedManualTierIds?: Record<string, string>;
+  /** Fresh canonical monthly summaries and effective policy, never client input. */
+  verifiedMonthlyTiers?: VerifiedAffiliateNotificationMonthlyTiers;
   now: string;
 }): AffiliateNotificationPlan {
   const source = input.source;
@@ -128,6 +136,7 @@ export function planAffiliateNotifications(input: {
       : affiliate;
     const eligibility = summarizeAffiliateNotificationEligibility([eligibilityAffiliate], template, {
       verifiedManualTierIds: input.verifiedManualTierIds,
+      verifiedMonthlyTiers: input.verifiedMonthlyTiers,
       ...(source.eventType === 'tier_upgrade' && source.targetTierId
         ? { verifiedUpgradeTierIds: { [affiliate.id]: source.targetTierId } } : {}),
     });
@@ -162,6 +171,11 @@ export function planAffiliateNotifications(input: {
         continue;
       }
     }
+    const monthlyTier = input.verifiedMonthlyTiers?.[affiliate.id];
+    const pinsMonthlyTier = template.eligibility.tierIds.length > 0
+      && !(source.eventType === 'tier_upgrade' && source.targetTierId)
+      && ['default', 'monthly_performance'].includes(affiliate.literaryCircle?.tier.source || '')
+      && isVerifiedAffiliateNotificationMonthlyTier(monthlyTier);
     result.intents.push({
       schemaVersion: 1,
       id: digest('ani1_', [eventId, affiliate.id]),
@@ -171,6 +185,7 @@ export function planAffiliateNotifications(input: {
       settingsRevision: settings.revision,
       state: 'held',
       dueAt,
+      ...(pinsMonthlyTier ? { tierEvidenceSha256: monthlyTier.evidenceSha256 } : {}),
     });
   }
   return result;

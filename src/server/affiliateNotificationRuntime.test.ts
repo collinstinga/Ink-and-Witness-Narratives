@@ -208,6 +208,19 @@ describe('server-owned notification runtime orchestration', () => {
     expect(failed.counts.failed).toBe(1); expect(h.documents.get(path)).toEqual(corrupt);
   });
 
+  it('defers tier-filtered eligibility to the authoritative fresh outbox adapter instead of blocking canonical automatic audiences', async () => {
+    const h = harness(); addCampaign(h, 'campaign-one');
+    h.documents.get('site_configs/affiliate_notifications').templates.find((template: any) => template.eventType === 'upcoming_campaign')
+      .eligibility = { tierIds: ['literary-ambassador'] };
+    adapters.plan.mockReturnValueOnce({ eventId: `ane1_${'0'.repeat(64)}`, intents: [],
+      reasons: { automatic_tier_filter_requires_verified_evidence: 1 } });
+    const output = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, ENV);
+    expect(output.intentCount).toBe(1);
+    expect(adapters.scheduled).toHaveBeenCalledWith(expect.objectContaining({ affiliateIds: ['partner-one'] }), ENV);
+    expect(h.queries.some(query => query.collection === 'affiliate_commissions' || query.collection === 'affiliate_tier_periods')).toBe(false);
+    expect(adapters.deliver).not.toHaveBeenCalled();
+  });
+
   it('rotates preparation past expired/invalid leading sources instead of starving later valid campaigns', async () => {
     const h = harness(); for (let i = 0; i < 30; i++) addCampaign(h, `campaign-${String(i).padStart(3, '0')}`);
     adapters.inspect.mockImplementation(async ({ kind, sourceId, evidenceId }) => sourceId === 'campaign-025' ? resolved(sourceFor(kind, sourceId, evidenceId)) : null);

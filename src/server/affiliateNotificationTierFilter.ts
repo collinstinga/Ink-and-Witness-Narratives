@@ -1,6 +1,18 @@
 import type { AffiliatePublicProfile } from '../types.js';
 
 export const AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED = 'automatic_tier_filter_requires_verified_evidence';
+/** Internal server-derived proof; never accepted from a request or stored profile. */
+export interface VerifiedAffiliateNotificationMonthlyTier {
+  tierId: string;
+  evidenceSha256: string;
+}
+export type VerifiedAffiliateNotificationMonthlyTiers = Record<string, VerifiedAffiliateNotificationMonthlyTier>;
+
+export function isVerifiedAffiliateNotificationMonthlyTier(value: unknown): value is VerifiedAffiliateNotificationMonthlyTier {
+  return record(value) && Object.keys(value).length === 2 && typeof value.tierId === 'string'
+    && SAFE_TIER.test(value.tierId) && typeof value.evidenceSha256 === 'string'
+    && /^[a-f0-9]{64}$/.test(value.evidenceSha256);
+}
 const SAFE_TIER = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 
@@ -16,7 +28,8 @@ function canonicalTime(value: unknown): number | null {
 /** No history scan, invented default tier, cache, account edit or financial
  * mutation. The caller must read these settings and affiliate snapshots fresh
  * in its planning/delivery transaction. Only explicit, effective manual
- * recognition is currently supported for general notification tier filters.
+ * recognition is handled here; automatic monthly proof has a separate bounded
+ * canonical-period resolver and must not be inferred from these stored IDs.
  * Verified committed tier_upgrade destinations have their own source proof.
  */
 export function verifiedManualAffiliateNotificationTierIds(

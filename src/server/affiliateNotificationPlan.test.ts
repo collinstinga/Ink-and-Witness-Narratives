@@ -76,6 +76,21 @@ describe('held partner notification planning', () => {
     expect(planAffiliateNotifications({ ...candidate, verifiedManualTierIds: { 'partner-one': 'literary-ambassador' } }).intents).toEqual([]);
   });
 
+  it('selects a freshly verified monthly tier instead of the stale stored ID and pins its evidence', () => {
+    const candidate = input();
+    candidate.settings.templates.find(template => template.eventType === 'new_commission')!.eligibility.tierIds = ['literary-ambassador'];
+    const evidence = { 'partner-one': { tierId: 'literary-ambassador', evidenceSha256: 'a'.repeat(64) } };
+    const plan = planAffiliateNotifications({ ...candidate, verifiedMonthlyTiers: evidence });
+    expect(plan.intents).toHaveLength(1);
+    expect(plan.intents[0].tierEvidenceSha256).toBe('a'.repeat(64));
+    expect(candidate.affiliates[0].literaryCircle!.tier.id).toBe('literary-partner');
+    expect(planAffiliateNotifications({ ...candidate, verifiedMonthlyTiers: {
+      'partner-one': { tierId: 'literary-ambassador', evidenceSha256: 'invalid' },
+    } }).intents).toEqual([]);
+    candidate.affiliates[0].literaryCircle!.tier.source = 'manual';
+    expect(planAffiliateNotifications({ ...candidate, verifiedMonthlyTiers: evidence }).intents).toEqual([]);
+  });
+
   it('creates stable IDs across retries, recipient order and template revisions', () => {
     const first = input();
     const expected = planAffiliateNotifications(first);

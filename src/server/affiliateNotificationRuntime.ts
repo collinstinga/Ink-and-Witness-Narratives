@@ -241,7 +241,11 @@ async function runPreparation(db: Firestore, now: string, env: NodeJS.ProcessEnv
         const plan = planAffiliateNotifications({ source: resolved.source, settings, affiliates, now,
           verifiedManualTierIds: verifiedManualAffiliateNotificationTierIds(affiliates, circle, now),
         });
-        if (!plan.intents.length) {
+        // Tier-filtered audiences are decided authoritatively by the fresh
+        // outbox transaction, including exact monthly summaries. This cheap
+        // prefilter must not reject a canonical automatic tier using a stale ID.
+        const tierFiltered = (settings.templates.find(template => template.eventType === resolved.source.eventType)?.eligibility?.tierIds?.length || 0) > 0;
+        if (!plan.intents.length && !tierFiltered) {
           increment(output.counts, plan.reasons?.[AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED]
             ? AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED : 'ineligible');
           continue;

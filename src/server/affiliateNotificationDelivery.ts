@@ -10,6 +10,8 @@ import { NewsletterProviderError, sendNewsletterEmail } from './newsletterEmail.
 import { newsletterOutcomeForResendEvent, verifyResendWebhook, type NewsletterWebhookHeaders } from './newsletterWebhook.js';
 import { AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS } from './affiliateNotificationEvents.js';
 import { verifiedManualAffiliateNotificationTierIds } from './affiliateNotificationTierFilter.js';
+import type { VerifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationTierFilter.js';
+import { readVerifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationMonthlyTiers.js';
 
 export const AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION = 'affiliate_notification_deliveries';
 export const AFFILIATE_NOTIFICATION_DELIVERY_CONFIG_ID = 'affiliate_notification_delivery';
@@ -275,7 +277,8 @@ async function loadEligible(input: {
   );
   const intent = intentSnapshot.data();
   const review = reviewSnapshot.data();
-  if (!intentSnapshot.exists || !record(intent) || !exactKeys(intent, ['schemaVersion', 'id', 'eventId', 'eventType', 'affiliateId', 'settingsRevision', 'state', 'dueAt', 'kind', 'createdAt'])
+  if (!intentSnapshot.exists || !record(intent) || !exactKeys(intent, ['schemaVersion', 'id', 'eventId', 'eventType', 'affiliateId', 'settingsRevision', 'state', 'dueAt', 'tierEvidenceSha256', 'kind', 'createdAt'])
+    || intent.tierEvidenceSha256 !== undefined && (typeof intent.tierEvidenceSha256 !== 'string' || !HASH.test(intent.tierEvidenceSha256))
     || intent.kind !== 'intent' || intent.schemaVersion !== 1 || intent.state !== 'held' || intent.id !== intentId
     || !/^ane1_[a-f0-9]{64}$/.test(intent.eventId) || !iso(intent.createdAt) || iso(intent.createdAt)! > nowMs
     || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(intent.affiliateId)
@@ -308,15 +311,19 @@ async function loadEligible(input: {
   if (source.eventType === 'new_release' && nowMs >= iso(source.occurredAt)! + AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS) return null;
   const template = settings.templates.find(item => item.eventType === source.eventType);
   let verifiedManualTierIds: Record<string, string> | undefined;
-  if (template?.eligibility.tierIds.length && source.eventType !== 'tier_upgrade') {
-    // Automatic performance tiers cannot be inferred from a stale stored ID.
-    // Explicit manual recognition is supported only against these fresh,
-    // transactionally read settings; no commission-history scan is added.
+  let verifiedMonthlyTiers: VerifiedAffiliateNotificationMonthlyTiers | undefined;
+  if (template?.eligibility.tierIds.length && !(source.eventType === 'tier_upgrade' && source.targetTierId)) {
+    // Resolve exact current canonical summaries against the effective policy;
+    // missing evidence stays held. No commission-history scan or repair.
     const circle = await transaction.get(db.collection('site_configs').doc('affiliate_literary_circle'));
     verifiedManualTierIds = verifiedManualAffiliateNotificationTierIds([affiliate], circle.exists ? circle.data() : undefined, now);
+    verifiedMonthlyTiers = await readVerifiedAffiliateNotificationMonthlyTiers({
+      db, transaction, affiliates: [affiliate], settings: circle.exists ? circle.data() : undefined, now,
+    });
   }
   const plan = planAffiliateNotifications({ source, settings, affiliates: [affiliate], now,
     ...(verifiedManualTierIds ? { verifiedManualTierIds } : {}),
+    ...(verifiedMonthlyTiers ? { verifiedMonthlyTiers } : {}),
   });
   if (plan.eventId !== intent.eventId || plan.intents.length !== 1
     || affiliateNotificationDeliveryHash(plan.intents[0]) !== affiliateNotificationDeliveryHash(Object.fromEntries(Object.entries(intent).filter(([key]) => !['kind', 'createdAt'].includes(key))))) return null;

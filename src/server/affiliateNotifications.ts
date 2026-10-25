@@ -11,7 +11,11 @@ import type {
 import { getDb, getFirestoreDoc, sanitizeForFirestore } from './db.js';
 import { normalizeAffiliateNotificationPreferences } from './affiliateNotificationPreferences.js';
 import { hasValidAffiliateWriterApproval } from './affiliateApproval.js';
-import { AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED } from './affiliateNotificationTierFilter.js';
+import {
+  AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED,
+  isVerifiedAffiliateNotificationMonthlyTier,
+  type VerifiedAffiliateNotificationMonthlyTiers,
+} from './affiliateNotificationTierFilter.js';
 
 export const AFFILIATE_NOTIFICATION_SETTINGS_DOCUMENT_ID = 'affiliate_notifications';
 export const AFFILIATE_NOTIFICATION_SCHEMA_VERSION = 1 as const;
@@ -513,6 +517,8 @@ export function summarizeAffiliateNotificationEligibility(
   evidence: {
     /** Build from current server-read Literary Circle settings, not a request. */
     verifiedManualTierIds?: Record<string, string>;
+    /** Current complete canonical period and approved effective policy only. */
+    verifiedMonthlyTiers?: VerifiedAffiliateNotificationMonthlyTiers;
     /** Internal committed-transition planner only; never a generic preview map. */
     verifiedUpgradeTierIds?: Record<string, string>;
   } = {},
@@ -529,15 +535,20 @@ export function summarizeAffiliateNotificationEligibility(
     if (template.eligibility.requireComplimentaryAccess && affiliate.literaryCircle.complimentaryAccess.status !== 'active') { exclude('complimentary_access_not_active'); continue; }
     if (template.eligibility.foundingMembersOnly && !affiliate.literaryCircle.foundingMember) { exclude('not_founding_member'); continue; }
     if (template.eligibility.tierIds.length) {
-      const tierId = affiliate.literaryCircle.tier.id;
+      let tierId = affiliate.literaryCircle.tier.id;
       const verifiedUpgrade = template.eventType === 'tier_upgrade' && evidence.verifiedUpgradeTierIds?.[affiliate.id] === tierId;
       if (!verifiedUpgrade) {
-        if (affiliate.literaryCircle.tier.source !== 'manual') {
+        if (affiliate.literaryCircle.tier.source === 'manual') {
+          if (evidence.verifiedManualTierIds?.[affiliate.id] !== tierId) {
+            exclude('manual_tier_filter_requires_current_settings');
+            continue;
+          }
+        } else if (['default', 'monthly_performance'].includes(affiliate.literaryCircle.tier.source)
+          && isVerifiedAffiliateNotificationMonthlyTier(evidence.verifiedMonthlyTiers?.[affiliate.id])) {
+          // The persisted automatic tier ID may belong to a previous month.
+          tierId = evidence.verifiedMonthlyTiers![affiliate.id].tierId;
+        } else {
           exclude(AUTOMATIC_AFFILIATE_NOTIFICATION_TIER_FILTER_UNSUPPORTED);
-          continue;
-        }
-        if (evidence.verifiedManualTierIds?.[affiliate.id] !== tierId) {
-          exclude('manual_tier_filter_requires_current_settings');
           continue;
         }
       }

@@ -1,0 +1,5 @@
+# Explicitly allow only the native build scripts required by this locked app.
+onlyBuiltDependencies:
+  - argon2
+  - esbuild
+  - sharp

@@ -12,6 +12,8 @@ import {
   type HeldAffiliateNotificationIntent,
 } from './affiliateNotificationPlan.js';
 import { verifiedManualAffiliateNotificationTierIds } from './affiliateNotificationTierFilter.js';
+import { readVerifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationMonthlyTiers.js';
+import type { VerifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationTierFilter.js';
 
 export const AFFILIATE_NOTIFICATION_OUTBOX_COLLECTION = 'affiliate_notification_outbox';
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -121,7 +123,8 @@ export async function storeHeldAffiliateNotifications(input: {
           const snapshot = byId.get(evidence.id);
           const record = snapshot?.data() as IntentRecord | undefined;
           if (!snapshot?.exists || !record || record.kind !== 'intent' || record.schemaVersion !== 1
-            || Object.keys(record).some(key => !['schemaVersion', 'id', 'eventId', 'eventType', 'affiliateId', 'settingsRevision', 'state', 'dueAt', 'kind', 'createdAt'].includes(key))
+            || Object.keys(record).some(key => !['schemaVersion', 'id', 'eventId', 'eventType', 'affiliateId', 'settingsRevision', 'state', 'dueAt', 'tierEvidenceSha256', 'kind', 'createdAt'].includes(key))
+            || record.tierEvidenceSha256 !== undefined && (typeof record.tierEvidenceSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(record.tierEvidenceSha256))
             || record.id !== evidence.id || record.eventId !== existing.id || record.state !== 'held'
             || record.eventType !== source.eventType || !Number.isSafeInteger(record.settingsRevision) || record.settingsRevision < 0
             || record.createdAt !== existing.createdAt
@@ -152,11 +155,15 @@ export async function storeHeldAffiliateNotifications(input: {
       }
       const template = settings.templates.find(item => item.eventType === source.eventType)!;
       let verifiedManualTierIds: Record<string, string> | undefined;
+      let verifiedMonthlyTiers: VerifiedAffiliateNotificationMonthlyTiers | undefined;
       if (template.eligibility.tierIds.length && !(source.eventType === 'tier_upgrade' && source.targetTierId)) {
         const circleSnapshot = await transaction.get(db.collection('site_configs').doc('affiliate_literary_circle'));
         verifiedManualTierIds = verifiedManualAffiliateNotificationTierIds(affiliates, circleSnapshot.exists ? circleSnapshot.data() : undefined, now);
+        verifiedMonthlyTiers = await readVerifiedAffiliateNotificationMonthlyTiers({
+          db, transaction, affiliates, settings: circleSnapshot.exists ? circleSnapshot.data() : undefined, now,
+        });
       }
-      const plan = planAffiliateNotifications({ source, settings, affiliates, now, verifiedManualTierIds });
+      const plan = planAffiliateNotifications({ source, settings, affiliates, now, verifiedManualTierIds, verifiedMonthlyTiers });
       if (!plan.intents.length) return { status: 'ineligible' as const, intentCount: 0 };
       const records: IntentRecord[] = plan.intents.map(intent => ({ ...intent, kind: 'intent', createdAt: now }));
       const intentSnapshots = await transaction.getAll(...records.map(record => collection.doc(record.id)));

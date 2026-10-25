@@ -81,7 +81,6 @@ import {
   AFFILIATE_NOTIFICATION_EVENT_TYPES,
   getAffiliateNotificationSettingsFresh,
   saveAffiliateNotificationSettings,
-  summarizeAffiliateNotificationEligibility,
   validateAffiliateNotificationSettings
 } from "./src/server/affiliateNotifications.js";
 import {
@@ -96,7 +95,7 @@ import {
 import { getAffiliateNotificationRuntimeStatus, runAffiliateNotificationJob } from "./src/server/affiliateNotificationRuntime.js";
 import { reconcileAffiliateNotificationWebhook } from "./src/server/affiliateNotificationDelivery.js";
 import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntimeRequest } from "./src/server/affiliateNotificationRuntimeRequest.js";
-import { verifiedManualAffiliateNotificationTierIds } from "./src/server/affiliateNotificationTierFilter.js";
+import { AffiliateNotificationEligibilityOverflowError, readAffiliateNotificationEligibility } from "./src/server/affiliateNotificationEligibilityRead.js";
 import {
   AffiliateApprovalNotFoundError,
   AffiliateApprovalValidationError,
@@ -6249,32 +6248,42 @@ ${currentDraft || prompt}
   });
 
   // Public: Validate Referral Code (Both query & param formats)
-  const handleValidateRef = (req: Request, res: Response) => {
+  const handleValidateRef = async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     try {
-      const code = (req.params.code || req.query.code) as string;
-      if (!code) {
+      const rawCode = req.params.code || req.query.code;
+      if (typeof rawCode !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(rawCode.trim())) {
         return res.json({ valid: false });
       }
-
-      const aff = store.affiliates.getAffiliateByCode(code);
+      const code = rawCode.trim();
+      // Reuse the bounded reservation/account identity resolver. A startup
+      // directory cannot prove that a newly approved partner exists, or that
+      // a writer has not since suspended their account/referral links.
+      const aff = await store.affiliates.getAffiliateForLoginFresh(code);
       if (!aff || aff.status !== 'active' || aff.linksDisabled) {
         return res.json({ valid: false });
       }
+      const commissionRate = aff.customCommissionRate
+        || (await store.affiliates.getSettingsFresh()).defaultCommissionRate || 15;
 
+      // Validation is public metadata only: never return an account/profile
+      // spread, credential, session, payout detail or financial counter.
       res.json({
         valid: true,
         code: aff.affiliateCode,
         affiliateName: aff.name,
         name: aff.name,
-        commissionRate: aff.customCommissionRate || store.affiliates.getSettings().defaultCommissionRate || 15
+        commissionRate
       });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed to validate code", valid: false });
+    } catch {
+      res.status(503).json({ error: 'Referral validation is temporarily unavailable. Please retry.', valid: false });
     }
   };
 
-  app.get("/api/affiliate/validate-ref", handleValidateRef);
-  app.get("/api/affiliate/validate/:code", handleValidateRef);
+  app.get("/api/affiliate/validate-ref", referralClickLimiter, handleValidateRef);
+  app.get("/api/affiliate/validate/:code", referralClickLimiter, handleValidateRef);
 
   // Public / Promoters: Affiliate Registration
   app.post("/api/affiliate/register", registerLimiter, publicWriteValidators.affiliateRegister, async (req: Request, res: Response) => {
@@ -7136,25 +7145,19 @@ ${currentDraft || prompt}
       if (!AFFILIATE_NOTIFICATION_EVENT_TYPES.includes(eventType)) {
         return res.status(400).json({ success: false, error: 'A supported partner notification event is required.' });
       }
-      const settings = req.body?.settings
-        ? validateAffiliateNotificationSettings(req.body.settings)
-        : await getAffiliateNotificationSettingsFresh();
-      const template = settings.templates.find(candidate => candidate.eventType === eventType);
-      if (!template) {
-        return res.status(400).json({ success: false, error: 'The selected partner notification template is unavailable.' });
-      }
-      const affiliates = await getAllFirestoreDocs<AffiliatePublicProfile>('affiliates');
-      const tierEvidence = template.eligibility.tierIds.length
-        ? { verifiedManualTierIds: verifiedManualAffiliateNotificationTierIds(affiliates,
-          (await getDb().collection('site_configs').doc('affiliate_literary_circle').get()).data(), new Date().toISOString()) }
-        : {};
-      const summary = summarizeAffiliateNotificationEligibility(affiliates, template, tierEvidence);
+      const summary = await readAffiliateNotificationEligibility({
+        eventType,
+        ...(Object.hasOwn(req.body || {}, 'settings') ? { settings: req.body.settings } : {}),
+      });
       return res.json({ success: true, summary });
     } catch (err: any) {
       if (err instanceof AffiliateNotificationValidationError) {
         return res.status(400).json({ success: false, error: err.message });
       }
-      console.error('[Affiliate Notifications] Failed to calculate eligibility.', err);
+      if (err instanceof AffiliateNotificationEligibilityOverflowError) {
+        return res.status(503).json({ success: false, code: err.code, error: err.message });
+      }
+      console.error('[Affiliate Notifications] Failed to calculate eligibility.');
       return res.status(503).json({
         success: false,
         error: 'Partner notification eligibility could not be checked right now. Please retry.'

@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AffiliateFinancialReadError } from './src/server/affiliateFinancialRead.js';
 import { verifyAffiliatePassword } from './src/server/affiliateCredentials.js';
+import { AffiliateNotificationEligibilityOverflowError } from './src/server/affiliateNotificationEligibilityRead.js';
 
 vi.hoisted(() => {
   process.env.VERCEL = '1';
@@ -174,6 +175,7 @@ const notificationPreferenceMocks = vi.hoisted(() => ({
   save: vi.fn(),
   optOut: vi.fn(),
 }));
+const notificationEligibilityMocks = vi.hoisted(() => ({ read: vi.fn() }));
 
 const approvalMocks = vi.hoisted(() => ({
   approve: vi.fn(),
@@ -274,6 +276,10 @@ vi.mock('./src/server/affiliateNotificationPreferences.js', () => ({
     allMarketingOptOut: true,
   },
 }));
+vi.mock('./src/server/affiliateNotificationEligibilityRead.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./src/server/affiliateNotificationEligibilityRead.js')>(),
+  readAffiliateNotificationEligibility: notificationEligibilityMocks.read,
+}));
 vi.mock('./src/server/affiliateApproval.js', () => ({
   AffiliateApprovalNotFoundError: class AffiliateApprovalNotFoundError extends Error {},
   AffiliateApprovalValidationError: class AffiliateApprovalValidationError extends Error {},
@@ -322,6 +328,8 @@ describe('affiliate session route boundaries', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    notificationEligibilityMocks.read.mockResolvedValue({ eventType: 'new_commission', total: 3, eligible: 2, excluded: 1,
+      reasons: { automatic_tier_filter_requires_verified_evidence: 1 } });
     storeMocks.getAuthSession.mockResolvedValue({
       sessionId: adminSessionToken,
       userId: 'admin_1',
@@ -1030,6 +1038,66 @@ describe('affiliate session route boundaries', () => {
     const cron = await fetch(`${baseUrl}/api/internal/affiliate-notifications/dispatch`);
     expect(cron.status).toBe(401);
     expect(cron.headers.get('cache-control')).toContain('no-store');
+  });
+
+  it('returns only a fresh aggregate notification eligibility preview with no-store protections', async () => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/notifications/eligibility`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ eventType: 'new_commission' }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, summary: { eventType: 'new_commission', total: 3, eligible: 2, excluded: 1,
+      reasons: { automatic_tier_filter_requires_verified_evidence: 1 } } });
+    expect(notificationEligibilityMocks.read).toHaveBeenCalledWith({ eventType: 'new_commission' });
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(response.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(response.headers.get('vercel-cdn-cache-control')).toBe('no-store');
+  });
+
+  it('blocks anonymous and cross-site eligibility previews before the bounded database helper', async () => {
+    const anonymous = await fetch(`${baseUrl}/api/admin/affiliates/notifications/eligibility`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin: baseUrl, 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify({ eventType: 'new_commission' }),
+    });
+    expect(anonymous.status).toBe(401);
+    const crossSite = await fetch(`${baseUrl}/api/admin/affiliates/notifications/eligibility`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: 'https://untrusted.example', 'sec-fetch-site': 'cross-site' }, body: JSON.stringify({ eventType: 'new_commission' }),
+    });
+    expect(crossSite.status).toBe(403); expect(notificationEligibilityMocks.read).not.toHaveBeenCalled();
+  });
+
+  it.each(['affiliateIds', 'now', 'db', 'verifiedMonthlyTiers'])('rejects eligibility %s injection even from the writer', async field => {
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/notifications/eligibility`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ eventType: 'new_commission', [field]: 'injected' }),
+    });
+    expect(response.status).toBe(400); expect(notificationEligibilityMocks.read).not.toHaveBeenCalled();
+  });
+
+  it('returns an explicit safe 503 for eligibility audience overflow without any partial counts', async () => {
+    notificationEligibilityMocks.read.mockRejectedValueOnce(new AffiliateNotificationEligibilityOverflowError());
+    const response = await fetch(`${baseUrl}/api/admin/affiliates/notifications/eligibility`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+        origin: baseUrl, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ eventType: 'new_commission' }),
+    });
+    expect(response.status).toBe(503); const body = await response.json() as Record<string, any>;
+    expect(body).toMatchObject({ success: false, code: 'AFFILIATE_NOTIFICATION_ELIGIBILITY_OVERFLOW' });
+    expect(body).not.toHaveProperty('summary'); expect(response.headers.get('cache-control')).toContain('no-store');
+  });
+
+  it('does not reveal raw eligibility provider errors or log them', async () => {
+    notificationEligibilityMocks.read.mockRejectedValueOnce(new Error('private-sdk-token@example.test'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await fetch(`${baseUrl}/api/admin/affiliates/notifications/eligibility`, {
+        method: 'POST', headers: { 'content-type': 'application/json', cookie: `iw_session=${adminSessionToken}`,
+          origin: baseUrl, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ eventType: 'new_commission' }),
+      });
+      expect(response.status).toBe(503); expect(JSON.stringify(await response.json())).not.toContain('private-sdk');
+      expect(log).toHaveBeenCalledWith('[Affiliate Notifications] Failed to calculate eligibility.');
+      expect(JSON.stringify(log.mock.calls)).not.toContain('private-sdk');
+    } finally { log.mockRestore(); }
   });
 
   it('rejects runtime recipient and clock injection even from an administrator', async () => {
