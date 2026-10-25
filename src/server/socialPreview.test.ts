@@ -181,6 +181,13 @@ describe('canonical public image and HTML projection', () => {
 
 describe('Vercel social HTML routing and build tracing', () => {
   const config = JSON.parse(readFileSync(path.join(process.cwd(), 'vercel.json'), 'utf8'));
+  it('excludes private runtime data without hiding nested source-code data folders', () => {
+    const exclusions = readFileSync(path.join(process.cwd(), '.vercelignore'), 'utf8').split(/\r?\n/);
+    expect(exclusions).toContain('/data/');
+    expect(exclusions).toContain('/uploads/');
+    expect(exclusions).not.toContain('data');
+    expect(exclusions).not.toContain('data/');
+  });
   it('routes only the homepage HTML to the dedicated handler and traces built assets', () => {
     expect(config.rewrites.find((rule: { source: string }) => rule.source === '/')).toEqual({ source: '/', destination: '/api/social-preview' });
     expect(config.functions['api/social-preview.ts'].includeFiles).toBe('dist/index.html');
