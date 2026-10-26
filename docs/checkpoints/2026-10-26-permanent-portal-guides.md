@@ -76,3 +76,10 @@ original unsaved form nodes. No mutation or unexpected API request occurred.
 The initial guide source's remote CI passed 148 suites / 2,060 tests plus types
 and frontend/server builds. This follow-up must receive its own exact-source
 CI/build checks before promotion; the older staged build is superseded.
+
+Independent review additionally identified the deliberately focused topic
+heading (`tabindex=-1`) after the last control. The same keyboard helper now
+detects a focused non-control with no later/earlier tabbable control and wraps
+appropriately. Added a fourth keyboard unit case and an actual browser
+topic-selection-then-Tab assertion. Ordinary navigation and native Escape remain
+unchanged; independent re-review found no further actionable issue.

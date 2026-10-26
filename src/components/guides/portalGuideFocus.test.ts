@@ -5,7 +5,7 @@ function fixture(single = false) {
   const first = { focus: vi.fn(), getClientRects: () => [1] };
   const last = single ? first : { focus: vi.fn(), getClientRects: () => [1] };
   const controls = single ? [first] : [first, last];
-  const document = { activeElement: first };
+  const document: { activeElement: unknown } = { activeElement: first };
   const dialog = { ownerDocument: document, querySelectorAll: () => controls, contains: (node: unknown) => controls.includes(node as typeof first), focus: vi.fn() };
   const event = { key: 'Tab', shiftKey: false, currentTarget: dialog as unknown as HTMLDialogElement, preventDefault: vi.fn(), stopPropagation: vi.fn() };
   return { first, last, document, dialog, event };
@@ -35,5 +35,14 @@ describe('help dialog keyboard boundary', () => {
     expect(f.event.preventDefault).not.toHaveBeenCalled();
     expect(f.event.stopPropagation).toHaveBeenCalledTimes(1);
     expect(f.first.focus).not.toHaveBeenCalled();
+  });
+  it('wraps forward from a programmatically focused topic heading after the last control', () => {
+    const f = fixture();
+    const heading = { compareDocumentPosition: () => 2 };
+    f.document.activeElement = heading;
+    f.dialog.contains = (node: unknown) => node === heading || node === f.first || node === f.last;
+    containPortalGuideKeyboardEvent(f.event);
+    expect(f.first.focus).toHaveBeenCalledTimes(1);
+    expect(f.event.preventDefault).toHaveBeenCalledTimes(1);
   });
 });
