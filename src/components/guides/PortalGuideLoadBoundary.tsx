@@ -1,5 +1,6 @@
 import React, { Component, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { containPortalGuideKeyboardEvent } from './portalGuideFocus.js';
 
 interface Props {
   onClose: () => void;
@@ -19,7 +20,7 @@ function GuideStatusDialog({ onClose, title, children }: Pick<Props, 'onClose' |
   }, []);
   const content = <dialog ref={dialogRef} aria-label={title}
     onCancel={event => { event.preventDefault(); onClose(); }}
-    onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}
+    onClick={event => event.stopPropagation()} onKeyDown={containPortalGuideKeyboardEvent}
     className="m-auto w-[calc(100%-2rem)] max-w-md rounded-2xl border border-slate-600 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/80">
     <h2 className="font-serif text-xl font-bold">{title}</h2>
     {children}

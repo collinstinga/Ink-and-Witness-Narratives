@@ -64,3 +64,15 @@ staged production read-only smoke, source/environment/alias fences and final
 canonical checks retaining the corrected M-Pesa production configuration. Record
 exact commit/deployment IDs and actual results in the external release ledger;
 do not infer deployment from this source checkpoint.
+
+### Final loading/failure hardening
+
+An additional real-browser slow-chunk check caught Tab reaching `BODY` from
+the native loading dialog's single button. Added explicit first/last Tab
+cycling shared by loaded, loading and failed-help dialogs; native Escape is
+not prevented. Three new unit assertions and five browser checks passed,
+including both roles' slow/failed chunks, focus restoration and unchanged
+original unsaved form nodes. No mutation or unexpected API request occurred.
+The initial guide source's remote CI passed 148 suites / 2,060 tests plus types
+and frontend/server builds. This follow-up must receive its own exact-source
+CI/build checks before promotion; the older staged build is superseded.

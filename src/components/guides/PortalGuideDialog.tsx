@@ -2,6 +2,7 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowLeft, ArrowRight, BookOpen, Search, X } from 'lucide-react';
 import type { PortalGuideDefinition, PortalGuideSection } from '../../data/portalGuideTypes.js';
+import { containPortalGuideKeyboardEvent } from './portalGuideFocus.js';
 
 export interface PortalGuideDialogProps {
   guide: PortalGuideDefinition;
@@ -166,7 +167,7 @@ export function PortalGuideDialog(props: PortalGuideDialogProps) {
   const dialog = <dialog ref={dialogRef} aria-label={props.guide.title}
     onCancel={event => { event.preventDefault(); closeRef.current(); }}
     onClick={event => event.stopPropagation()}
-    onKeyDown={event => event.stopPropagation()}
+    onKeyDown={containPortalGuideKeyboardEvent}
     className="m-auto h-[90dvh] max-h-[56rem] w-[calc(100%-1.5rem)] max-w-5xl overflow-hidden rounded-2xl border border-slate-600 bg-slate-950 p-0 text-slate-100 shadow-2xl backdrop:bg-black/80">
     <PortalGuidePanel {...props} />
   </dialog>;
