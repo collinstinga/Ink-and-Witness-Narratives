@@ -1328,6 +1328,34 @@ export interface AffiliateNotificationEligibilitySummary {
  * account identifiers, review secrets, or message bodies. */
 export type AffiliateNotificationRuntimeMode = 'prepare' | 'dispatch';
 
+export type ProductionAffiliateNotificationMode = 'production_test' | 'production_live';
+
+/** Writer-safe review controls. Transport, recipients and clocks remain server-owned. */
+export interface ProductionAffiliateNotificationReviewRequest {
+  expectedRevision: number;
+  mode: ProductionAffiliateNotificationMode;
+  durationDays: number;
+  includeFoundingWelcome: boolean;
+}
+
+export interface ProductionAffiliateNotificationRolloutStatus {
+  status: 'disabled' | 'blocked' | 'unreviewed' | 'paused' | 'expired' | 'settings_changed' | 'ready';
+  revision: number;
+  environmentMode: ProductionAffiliateNotificationMode | null;
+  mode?: ProductionAffiliateNotificationMode;
+  activatedAt?: string;
+  expiresAt?: string;
+  settingsRevision?: number;
+  foundingWelcomeCount: number;
+  maximumReviewDays: number;
+  testRecipientConfigured: boolean;
+  /** Server-computed ability to attempt a review; never inferred from a blocked snapshot. */
+  reviewAvailable?: boolean;
+  testDeliveryStatus?: string;
+}
+
+export type ProductionAffiliateNotificationTestStatus = 'accepted' | 'already_processed' | 'blocked' | 'ineligible' | 'failed';
+
 export interface AffiliateNotificationRuntimeLimits {
   activeAffiliates: number;
   campaigns: number;
@@ -1354,6 +1382,8 @@ export interface AffiliateNotificationRuntimeResult {
 
 export interface AffiliateNotificationRuntimeStatus {
   status: 'ready' | 'disabled' | 'blocked' | 'failed';
+  /** Trusted server environment; omitted by older staging snapshots. */
+  environmentMode?: 'staging_test' | ProductionAffiliateNotificationMode | null;
   deliveryGate: 'allowed' | 'disabled' | 'blocked';
   sampledDeliveries: number;
   counts: Record<string, number>;

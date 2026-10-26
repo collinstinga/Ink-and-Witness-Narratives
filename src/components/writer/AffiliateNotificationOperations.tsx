@@ -6,6 +6,7 @@ import type {
   AffiliateNotificationRuntimeStatus,
 } from '../../types.js';
 import { api } from '../../utils/api.js';
+import AffiliateNotificationRolloutControls from './AffiliateNotificationRolloutControls.js';
 
 const COUNT_LABELS: ReadonlyArray<readonly [string, string]> = [
   ['leased', 'Leased'], ['dispatching', 'Dispatching'], ['retry_pending', 'Waiting for retry'],
@@ -19,14 +20,15 @@ const COUNT_LABELS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 const RESULT_LABELS: Record<AffiliateNotificationRuntimeResult['status'], string> = {
-  completed: 'Bounded staging job completed.', disabled: 'The staging job is disabled.',
-  blocked: 'Safety gates blocked the staging job.', busy: 'Another staging job is already running.',
+  completed: 'Bounded notification job completed.', disabled: 'The notification job is disabled.',
+  blocked: 'Safety gates blocked the notification job.', busy: 'Another notification job is already running.',
   overflow: 'The dataset exceeds the reviewed batch limits. No oversized audience was processed.',
-  invalid: 'The staging job request was not accepted.', conflict: 'A safety conflict needs investigation before retrying.',
-  failed: 'The staging job could not complete. Check operations before retrying.',
+  invalid: 'The notification job request was not accepted.', conflict: 'A safety conflict needs investigation before retrying.',
+  failed: 'The notification job could not complete. Check operations before retrying.',
 };
 
 const DISPATCH_CONFIRMATION = 'Send this bounded staging test to the separately reviewed allowlist? Every message is rechecked before sending. This does not enable production email.';
+const LIVE_DISPATCH_CONFIRMATION = 'Dispatch this bounded production notification batch to eligible affiliates under the separate live review? Every message is rechecked for consent, eligibility and current review before sending. This may send real affiliate emails.';
 
 function count(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -36,7 +38,7 @@ export function affiliateNotificationOperationAvailability(
   runtime: AffiliateNotificationRuntimeStatus | null,
   locked = false,
 ): { prepare: boolean; dispatch: boolean } {
-  const ready = !locked && runtime?.status === 'ready' && runtime.cursor?.busy !== true;
+  const ready = !locked && runtime?.status === 'ready' && runtime.cursor?.busy !== true && runtime.environmentMode !== 'production_test';
   return { prepare: ready, dispatch: ready && runtime?.deliveryGate === 'allowed' };
 }
 
@@ -50,7 +52,7 @@ export async function requestAffiliateNotificationOperation(input: {
   run: (mode: AffiliateNotificationRuntimeMode) => Promise<{ success: boolean; result: AffiliateNotificationRuntimeResult }>;
 }): Promise<AffiliateNotificationRuntimeResult | null> {
   if (!affiliateNotificationOperationAvailability(input.runtime, input.locked)[input.mode]) return null;
-  if (input.mode === 'dispatch' && !input.confirmDispatch(DISPATCH_CONFIRMATION)) return null;
+  if (input.mode === 'dispatch' && !input.confirmDispatch(input.runtime?.environmentMode === 'production_live' ? LIVE_DISPATCH_CONFIRMATION : DISPATCH_CONFIRMATION)) return null;
   return (await input.run(input.mode)).result;
 }
 
@@ -79,6 +81,7 @@ export function AffiliateNotificationOperationsView({
 }: OperationsViewProps) {
   const availability = affiliateNotificationOperationAvailability(runtime, loading || Boolean(busy) || disabled || Boolean(error));
   const snapshotReady = runtime?.status === 'ready';
+  const production = runtime?.environmentMode === 'production_live' || runtime?.environmentMode === 'production_test';
   return (
     <section aria-labelledby="affiliate-notification-operations-heading" aria-busy={loading || Boolean(busy)}
       className="rounded-2xl border border-cyan-400/20 bg-slate-950/60 p-4">
@@ -87,7 +90,7 @@ export function AffiliateNotificationOperationsView({
           <h4 id="affiliate-notification-operations-heading" className="flex items-center gap-2 font-serif text-lg font-semibold text-white">
             <ShieldCheck aria-hidden="true" className="h-4 w-4 text-cyan-300" /> Notification operations
           </h4>
-          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-400">Production sending remains blocked. Preparing held intents does not send email. Dispatch is limited to an explicitly reviewed staging test allowlist.</p>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-400">Production sending is default-off and requires a separate valid review. Preparing held intents does not send email. Staging dispatch is limited to its reviewed allowlist; production dispatch requires a valid live review. Owner-only tests use the review controls below.</p>
         </div>
         <button type="button" onClick={onRefresh} disabled={loading || Boolean(busy)}
           className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-700 px-3 text-xs font-semibold text-slate-200 disabled:opacity-40">
@@ -97,13 +100,13 @@ export function AffiliateNotificationOperationsView({
 
       <div className="mt-3 text-xs leading-relaxed" aria-live="polite" aria-atomic="true">
         {error ? <p role="alert" className="text-rose-200">{error}</p>
-          : !runtime ? <p className="text-slate-400">Check operations before running a staging job.</p>
+          : !runtime ? <p className="text-slate-400">Check operations before running a notification job.</p>
             : !snapshotReady ? <p className="text-amber-100">{runtime.status === 'disabled'
               ? 'Notification jobs are off in this environment. No operational records were queried.'
-              : runtime.status === 'blocked' ? 'This environment has not passed the staging safety gates. Jobs cannot run here.'
-                : 'Operations could not be checked. Refresh before running a staging job.'}</p>
-              : <p className="text-cyan-100">Staging preparation is available. {runtime.deliveryGate === 'allowed'
-                ? 'A separate reviewed staging delivery gate is open.' : 'Delivery remains locked until its separate staging review is valid.'}
+              : runtime.status === 'blocked' ? 'This environment has not passed its safety gates. Jobs cannot run here.'
+                : 'Operations could not be checked. Refresh before running a notification job.'}</p>
+              : <p className="text-cyan-100">{production ? 'Production preparation is available under its current review. ' : 'Staging preparation is available. '}{runtime.deliveryGate === 'allowed'
+                ? 'A separate reviewed delivery gate is open.' : 'Delivery remains locked until its separate review is valid.'}
                 {runtime.cursor?.busy ? ' A delivery job is currently running.' : ''}</p>}
       </div>
 
@@ -123,11 +126,11 @@ export function AffiliateNotificationOperationsView({
       <div className="mt-4 flex flex-col gap-2 sm:flex-row">
         <button type="button" disabled={!availability.prepare} onClick={() => onRun('prepare')}
           className="min-h-11 rounded-xl border border-cyan-300/30 bg-cyan-400/10 px-4 text-xs font-semibold text-cyan-100 disabled:opacity-40">
-          {busy === 'prepare' ? 'Preparing held records…' : 'Prepare staging intents'}
+          {busy === 'prepare' ? 'Preparing held records…' : production ? 'Prepare production intents' : 'Prepare staging intents'}
         </button>
         <button type="button" disabled={!availability.dispatch} onClick={() => onRun('dispatch')}
           className="min-h-11 rounded-xl border border-amber-300/30 bg-amber-400/10 px-4 text-xs font-semibold text-amber-100 disabled:opacity-40">
-          {busy === 'dispatch' ? 'Running reviewed staging test…' : 'Dispatch reviewed staging test'}
+          {busy === 'dispatch' ? production ? 'Running reviewed production batch…' : 'Running reviewed staging test…' : production ? 'Dispatch reviewed production batch' : 'Dispatch reviewed staging test'}
         </button>
       </div>
       {disabled ? <p className="mt-2 text-xs text-slate-400">Save pending template changes and wait for current checks before running a job.</p> : null}
@@ -135,7 +138,7 @@ export function AffiliateNotificationOperationsView({
 
       {result ? (
         <div role="status" aria-live="polite" className="mt-4 rounded-xl border border-slate-700 p-3 text-xs">
-          <p className="font-semibold text-slate-100">{RESULT_LABELS[result.status] || 'The staging job returned an unrecognized outcome.'}</p>
+          <p className="font-semibold text-slate-100">{RESULT_LABELS[result.status] || 'The notification job returned an unrecognized outcome.'}</p>
           <p className="mt-1 text-slate-400">Scanned {count(result.scanned)} · attempted {count(result.attempted)} · held intents {count(result.intentCount)}.</p>
           <AggregateCounts values={result.counts} />
           {result.hasMore ? <p className="mt-2 text-amber-100">More records remain beyond this bounded run. Review the result before another run.</p> : null}
@@ -168,7 +171,7 @@ export default function AffiliateNotificationOperations({ disabled = false }: { 
       if (mounted.current && !controller.signal.aborted && id === requestId.current) setRuntime(response.runtime);
     } catch {
       if (mounted.current && !controller.signal.aborted && id === requestId.current) {
-        setRuntime(null); setError('Operations could not be checked. Refresh before running a staging job.');
+        setRuntime(null); setError('Operations could not be checked. Refresh before running a notification job.');
       }
     } finally {
       if (mounted.current && !controller.signal.aborted && id === requestId.current) {
@@ -200,7 +203,7 @@ export default function AffiliateNotificationOperations({ disabled = false }: { 
       if (mounted.current && !controller.signal.aborted && next) { setResult(next); await refresh(); }
     } catch {
       if (mounted.current && !controller.signal.aborted) {
-        setError('The staging job could not be confirmed. Refresh operations before retrying; it may already have started.');
+        setError('The notification job could not be confirmed. Refresh operations before retrying; it may already have started.');
       }
     } finally {
       running.current = false;
@@ -208,6 +211,9 @@ export default function AffiliateNotificationOperations({ disabled = false }: { 
     }
   };
 
-  return <AffiliateNotificationOperationsView runtime={runtime} loading={loading} busy={busy} disabled={disabled}
-    result={result} error={error} onRefresh={() => void refresh()} onRun={mode => void run(mode)} />;
+  return <div className="space-y-4">
+    <AffiliateNotificationOperationsView runtime={runtime} loading={loading} busy={busy} disabled={disabled}
+      result={result} error={error} onRefresh={() => void refresh()} onRun={mode => void run(mode)} />
+    <AffiliateNotificationRolloutControls disabled={disabled || Boolean(busy)} onChange={() => void refresh()} />
+  </div>;
 }

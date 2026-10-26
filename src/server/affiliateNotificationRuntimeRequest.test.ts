@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntimeRequest } from './affiliateNotificationRuntimeRequest.js';
+import { isAffiliateNotificationCronAuthorized, isProductionAffiliateNotificationTestRequest,
+  parseAffiliateNotificationRuntimeRequest, parseProductionAffiliateNotificationPauseRequest } from './affiliateNotificationRuntimeRequest.js';
 
 describe('notification runtime HTTP boundary', () => {
+  it('accepts a bounded pause revision and an empty writer-test request only', () => {
+    expect(parseProductionAffiliateNotificationPauseRequest({ expectedRevision: 1 })).toEqual({ expectedRevision: 1 });
+    expect(isProductionAffiliateNotificationTestRequest({})).toBe(true);
+    for (const value of [null, [], undefined, 'test', { recipient: 'unapproved@example.invalid' }, { now: '2026-10-26' }, { env: {} }]) {
+      expect(isProductionAffiliateNotificationTestRequest(value)).toBe(false);
+      expect(parseProductionAffiliateNotificationPauseRequest(value)).toBeNull();
+    }
+    for (const value of [{ expectedRevision: 0 }, { expectedRevision: '1' }, { expectedRevision: 1, recipient: 'unapproved@example.invalid' }]) {
+      expect(parseProductionAffiliateNotificationPauseRequest(value)).toBeNull();
+    }
+  });
   it.each(['prepare', 'dispatch'] as const)('accepts mode %s only', mode => {
     expect(parseAffiliateNotificationRuntimeRequest({ mode })).toBe(mode);
   });

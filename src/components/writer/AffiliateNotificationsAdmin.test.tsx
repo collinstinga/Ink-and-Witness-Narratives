@@ -7,7 +7,7 @@ import { AffiliateNotificationsAdmin } from './AffiliateNotificationsAdmin.js';
 const settings = () => JSON.parse(JSON.stringify(DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS));
 
 describe('AffiliateNotificationsAdmin', () => {
-  it('renders all seven separate partner events behind the preview-only gate', () => {
+  it('renders all seven separate partner events without treating templates as send authorization', () => {
     const markup = renderToStaticMarkup(
       <AffiliateNotificationsAdmin
         settings={settings()}
@@ -24,7 +24,10 @@ describe('AffiliateNotificationsAdmin', () => {
     );
 
     expect(markup).toContain('Partner notifications');
-    expect(markup).toContain('Preview-only safety gate');
+    expect(markup).toContain('Templates do not authorize delivery');
+    expect(markup).toContain('preview_only');
+    expect(markup).toContain('exact saved revision');
+    expect(markup).toContain('Production stays default-off');
     expect(markup).toContain('Literary Circle activation');
     expect(markup).toContain('New release');
     expect(markup).toContain('Upcoming campaign');
@@ -53,7 +56,7 @@ describe('AffiliateNotificationsAdmin', () => {
 
     expect(markup).toContain('Writer approval, active status, valid email and accepted terms are mandatory');
     expect(markup).toContain('separate marketing consent');
-    expect(markup).toContain('configured, but delivery locked');
+    expect(markup).toContain('configured; separate review required');
     expect(markup).toContain('Saving never sends a message');
   });
 

@@ -33,6 +33,7 @@ import {
   type AffiliateNotificationSourceVerifier,
 } from './affiliateNotificationDelivery.js';
 import type { sendNewsletterEmail } from './newsletterEmail.js';
+import { readProductionAffiliateNotificationReview } from './affiliateNotificationRollout.js';
 
 export const AFFILIATE_NOTIFICATION_RUNTIME_LIMITS = Object.freeze({
   activeAffiliates: 200,
@@ -45,6 +46,7 @@ export const AFFILIATE_NOTIFICATION_RUNTIME_LIMITS = Object.freeze({
   dispatchedIntentsPerRun: 10,
   statusDeliveries: 500,
   statusIntents: 1_000,
+  operationalCommissionsPerRun: 5,
 });
 const OUTBOX = 'affiliate_notification_outbox';
 const PREPARE_CURSOR = 'runtime_prepare_cursor_v1';
@@ -64,6 +66,8 @@ interface RuntimeCursor {
   id: string;
   mode: RuntimeMode;
   afterKey: string | null;
+  /** Pin the timestamp of an operational commission anchor against edits. */
+  afterCreatedAt?: string | null;
   updatedAt: string;
   leaseToken?: string;
   leaseExpiresAt?: string;
@@ -72,7 +76,7 @@ interface RuntimeCursor {
 
 interface SourceCandidate {
   key: string;
-  kind: 'new_release' | 'upcoming_campaign' | 'exclusive_opportunity';
+  kind: 'activation' | 'new_release' | 'upcoming_campaign' | 'exclusive_opportunity';
   sourceId: string;
   evidenceId?: string;
   occurredAt?: string;
@@ -94,18 +98,21 @@ function result(mode: RuntimeMode, status: RuntimeStatus): AffiliateNotification
 }
 
 function validCursor(value: unknown, id: string, mode: RuntimeMode, now: number): value is RuntimeCursor {
-  return record(value) && Object.keys(value).every(key => ['schemaVersion', 'kind', 'id', 'mode', 'afterKey', 'updatedAt', 'leaseToken', 'leaseExpiresAt', 'lastCompletedAt'].includes(key))
+  return record(value) && Object.keys(value).every(key => ['schemaVersion', 'kind', 'id', 'mode', 'afterKey', 'afterCreatedAt', 'updatedAt', 'leaseToken', 'leaseExpiresAt', 'lastCompletedAt'].includes(key))
     && value.schemaVersion === 1 && value.kind === 'runtime_cursor' && value.id === id && value.mode === mode
     && (value.afterKey === null || typeof value.afterKey === 'string' && value.afterKey.length <= 220
       && (mode === 'dispatch' ? INTENT_ID.test(value.afterKey) : /^[A-Za-z0-9_.:-]+$/.test(value.afterKey)))
+    && (value.afterCreatedAt === undefined || value.afterCreatedAt === null || iso(value.afterCreatedAt) !== null)
+    && (!id.startsWith('runtime_operational_') || (value.afterKey === null
+      ? value.afterCreatedAt === undefined || value.afterCreatedAt === null : iso(value.afterCreatedAt) !== null))
     && iso(value.updatedAt) !== null && iso(value.updatedAt)! <= now
     && (value.lastCompletedAt === undefined || iso(value.lastCompletedAt) !== null && iso(value.lastCompletedAt)! <= now)
     && (value.leaseToken === undefined && value.leaseExpiresAt === undefined
       || typeof value.leaseToken === 'string' && /^[a-f0-9]{48}$/.test(value.leaseToken) && iso(value.leaseExpiresAt) !== null);
 }
 
-async function leaseCursor(db: Firestore, mode: RuntimeMode, now: string): Promise<{ status: 'leased'; cursor: RuntimeCursor; token: string } | { status: 'busy' | 'conflict' }> {
-  const id = mode === 'prepare' ? PREPARE_CURSOR : DELIVERY_CURSOR;
+async function leaseCursor(db: Firestore, mode: RuntimeMode, now: string, explicitId?: string): Promise<{ status: 'leased'; cursor: RuntimeCursor; token: string } | { status: 'busy' | 'conflict' }> {
+  const id = explicitId || (mode === 'prepare' ? PREPARE_CURSOR : DELIVERY_CURSOR);
   const ref = db.collection(AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION).doc(id);
   const token = crypto.randomBytes(24).toString('hex');
   return db.runTransaction(async transaction => {
@@ -122,13 +129,13 @@ async function leaseCursor(db: Firestore, mode: RuntimeMode, now: string): Promi
   });
 }
 
-async function finishCursor(db: Firestore, lease: { cursor: RuntimeCursor; token: string }, afterKey: string | null, now: string): Promise<boolean> {
+async function finishCursor(db: Firestore, lease: { cursor: RuntimeCursor; token: string }, afterKey: string | null, now: string, afterCreatedAt?: string | null): Promise<boolean> {
   const ref = db.collection(AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION).doc(lease.cursor.id);
   return db.runTransaction(async transaction => {
     const snapshot = await transaction.get(ref); const previous = snapshot.data();
     if (!snapshot.exists || !validCursor(previous, lease.cursor.id, lease.cursor.mode, iso(now)!) || previous.leaseToken !== lease.token) return false;
     const { leaseToken: _token, leaseExpiresAt: _expiry, ...clean } = previous;
-    transaction.set(ref, { ...clean, afterKey, updatedAt: now, lastCompletedAt: now });
+    transaction.set(ref, { ...clean, afterKey, ...(afterCreatedAt !== undefined ? { afterCreatedAt } : {}), updatedAt: now, lastCompletedAt: now });
     return true;
   });
 }
@@ -179,8 +186,66 @@ export function affiliateNotificationRuntimeSourceVerifier(db: Firestore, env: N
   };
 }
 
+/** A durable, bounded cursor repairs a missed post-commit notification hook,
+ * never the financial record itself. The lower bound excludes the historical
+ * ledger. Ordering uses createdAt plus the document-name tie break. Completed
+ * scans deliberately cycle within this reviewed activation window: createdAt
+ * is not a commit timestamp, so a permanent high-water mark could miss a late
+ * commit. Each run still reads at most six commissions; deterministic intent
+ * identities prevent duplicate sends. This is bounded catch-up, not a claim of
+ * a perfectly ordered change stream or zero re-reads. */
+async function recoverProspectiveCommissions(input: {
+  db: Firestore; now: string; activatedAt: string; output: AffiliateNotificationRuntimeResult; commissions: boolean; tiers: boolean;
+}, env: NodeJS.ProcessEnv): Promise<void> {
+  const { db, now, activatedAt, output } = input;
+  const id = `runtime_operational_${hash(activatedAt).slice(0, 24)}`;
+  const lease = await leaseCursor(db, 'prepare', now, id);
+  if (lease.status !== 'leased') { increment(output.counts, lease.status); return; }
+  let afterKey = lease.cursor.afterKey;
+  let afterCreatedAt = lease.cursor.afterCreatedAt ?? null;
+  try {
+    let query = db.collection('affiliate_commissions').where('createdAt', '>=', activatedAt)
+      .orderBy('createdAt').orderBy(FieldPath.documentId());
+    if (afterKey) {
+      const [previous] = await db.getAll(db.collection('affiliate_commissions').doc(afterKey));
+      if (!previous?.exists || iso(previous.data()?.createdAt) === null || previous.data()!.createdAt < activatedAt
+        || previous.data()!.createdAt !== afterCreatedAt || previous.data()!.createdAt > now) {
+        output.status = 'conflict'; return;
+      }
+      query = query.startAfter(previous);
+    }
+    const page = await query.limit(AFFILIATE_NOTIFICATION_RUNTIME_LIMITS.operationalCommissionsPerRun + 1).get();
+    for (const snapshot of page.docs.slice(0, AFFILIATE_NOTIFICATION_RUNTIME_LIMITS.operationalCommissionsPerRun)) {
+      output.scanned++;
+      if (!SAFE_ID.test(snapshot.id) || iso(snapshot.data().createdAt) === null || snapshot.data().createdAt < activatedAt
+        || snapshot.data().createdAt > now) { output.status = 'conflict'; break; }
+      let completed = true;
+      for (const kind of [input.commissions ? 'new_commission' as const : null,
+        input.tiers && snapshot.data().literaryCircleTierTransition ? 'tier_upgrade' as const : null].filter(Boolean)) {
+        output.attempted++;
+        const prepared = await prepareCommittedAffiliateNotification({ db, kind: kind!, sourceId: snapshot.id, now }, env);
+        increment(output.counts, prepared.status); output.intentCount += prepared.intentCount;
+        if (prepared.status === 'failed') { completed = false; output.status = 'failed'; output.hasMore = true; break; }
+      }
+      if (!completed) break;
+      afterKey = snapshot.id;
+      afterCreatedAt = snapshot.data().createdAt;
+    }
+    const more = page.docs.length > AFFILIATE_NOTIFICATION_RUNTIME_LIMITS.operationalCommissionsPerRun;
+    if (more) output.hasMore = true;
+    else if (output.status === 'completed') { afterKey = null; afterCreatedAt = null; }
+  } catch {
+    output.status = 'failed'; output.hasMore = true;
+  } finally {
+    if (!await finishCursor(db, lease, afterKey, now, afterCreatedAt)) output.status = 'conflict';
+  }
+}
+
 async function runPreparation(db: Firestore, now: string, env: NodeJS.ProcessEnv): Promise<AffiliateNotificationRuntimeResult> {
   const output = result('prepare', 'completed');
+  const production = env.AFFILIATE_NOTIFICATION_EVENT_MODE === 'production_held'
+    ? await readProductionAffiliateNotificationReview({ db, now }, env) : null;
+  if (env.AFFILIATE_NOTIFICATION_EVENT_MODE === 'production_held' && production?.review.mode !== 'production_live') return result('prepare', 'blocked');
   const [settingsSnapshot] = await db.getAll(db.collection('site_configs').doc('affiliate_notifications'));
   if (!settingsSnapshot?.exists) return result('prepare', 'disabled');
   const settings = validateAffiliateNotificationSettings(settingsSnapshot.data());
@@ -202,6 +267,17 @@ async function runPreparation(db: Firestore, now: string, env: NodeJS.ProcessEnv
   if (!audience.length) return output;
   const candidates: SourceCandidate[] = [];
   const enabled = (kind: string) => settings.templates.some(template => template.eventType === kind && template.enabled);
+  if (production && enabled('activation')) for (const affiliate of affiliates) {
+    if (iso(affiliate.approvedAt) !== null && (affiliate.approvedAt! >= production.review.activatedAt
+      || production.review.foundingWelcome?.affiliateIds.includes(affiliate.id))) {
+      candidates.push({ key: `activation:${affiliate.id}`, kind: 'activation', sourceId: affiliate.id });
+    }
+  }
+  if (production && (enabled('new_commission') || enabled('tier_upgrade'))) {
+    await recoverProspectiveCommissions({ db, now, activatedAt: production.review.activatedAt, output,
+      commissions: enabled('new_commission'), tiers: enabled('tier_upgrade') }, env);
+    if (output.status !== 'completed') return output;
+  }
   if (enabled('upcoming_campaign')) for (const snapshot of campaigns.docs) {
     const value = snapshot.data();
     if (!SAFE_ID.test(snapshot.id) || !Number.isSafeInteger(value.revision) || value.revision < 1) continue;
@@ -230,13 +306,25 @@ async function runPreparation(db: Firestore, now: string, env: NodeJS.ProcessEnv
     if (first < 0) first = 0;
     const batch = candidates.slice(first, first + AFFILIATE_NOTIFICATION_RUNTIME_LIMITS.preparedSourcesPerRun);
     for (const candidate of batch) {
+      const previousAfterKey = afterKey;
       output.scanned++; output.attempted++; afterKey = candidate.key;
       try {
-        const resolved = candidate.kind === 'new_release'
+        if (candidate.kind === 'activation') {
+          const prepared = await prepareCommittedAffiliateNotification({ db, kind: 'activation', sourceId: candidate.sourceId, now }, env);
+          increment(output.counts, prepared.status); output.intentCount += prepared.intentCount;
+          if (prepared.status === 'failed') {
+            afterKey = previousAfterKey; output.status = 'failed'; output.hasMore = true; break;
+          }
+          continue;
+        }
+        const inspected = candidate.kind === 'new_release'
           ? await resolveAffiliateNotificationSource({ db, source: { eventType: 'new_release', sourceId: candidate.sourceId,
             sourceVersion: 1, occurredAt: candidate.occurredAt! }, now }, env)
           : await inspectScheduledAffiliateNotificationSource({ db, kind: candidate.kind, sourceId: candidate.sourceId,
             evidenceId: candidate.evidenceId, now }, env);
+        // Both resolvers return their own transaction-bound production review
+        // verifier; rewrapping it duplicates reads without adding authority.
+        const resolved = inspected;
         if (!resolved) { increment(output.counts, 'ineligible'); continue; }
         const plan = planAffiliateNotifications({ source: resolved.source, settings, affiliates, now,
           verifiedManualTierIds: verifiedManualAffiliateNotificationTierIds(affiliates, circle, now),
@@ -258,10 +346,18 @@ async function runPreparation(db: Firestore, now: string, env: NodeJS.ProcessEnv
         if ('counts' in prepared) for (const [status, count] of Object.entries(prepared.counts)) increment(output.counts, status, count!);
         else increment(output.counts, prepared.status);
         output.intentCount += prepared.intentCount;
-      } catch { increment(output.counts, 'failed'); }
+        if ('counts' in prepared ? Boolean(prepared.counts.failed) : prepared.status === 'failed') {
+          afterKey = previousAfterKey; output.status = 'failed'; output.hasMore = true; break;
+        }
+      } catch {
+        increment(output.counts, 'failed'); afterKey = previousAfterKey;
+        output.status = 'failed'; output.hasMore = true; break;
+      }
     }
-    output.hasMore = first + batch.length < candidates.length;
-    if (!output.hasMore) afterKey = null;
+    const sourcesHaveMore = first + batch.length < candidates.length;
+    output.hasMore = Boolean(output.hasMore) || sourcesHaveMore;
+    if (!sourcesHaveMore && output.status === 'completed') afterKey = null;
+    if (output.status !== 'completed') return output;
     if (enabled('inactivity_reminder')) {
       for (let offset = 0; offset < audience.length; offset += AFFILIATE_NOTIFICATION_RUNTIME_LIMITS.inactivityBatch) {
         const prepared = await prepareScheduledAffiliateNotifications({ db, kind: 'inactivity_reminder',
@@ -328,7 +424,8 @@ async function runDispatch(input: {
 
 /** Server-owned orchestration only: callers authenticate administrators/cron.
  * Preparing held intents NEVER sends. Dispatch requires its independent reviewed
- * staging gate before cursor/query access. No production project is accepted.
+ * environment/review gate before cursor/query access. Production additionally
+ * requires a current signed live review; owner-test mode is a separate flow.
  */
 export async function runAffiliateNotificationJob(input: {
   db: Firestore;
@@ -356,6 +453,10 @@ export async function runAffiliateNotificationJob(input: {
   const now = input.now; const clock = input.clock || (() => now || new Date().toISOString());
   const startedAt = clock(); if (iso(startedAt) === null) return result(mode, 'invalid');
   try {
+    if (environment.AFFILIATE_NOTIFICATION_EVENT_MODE === 'production_held') {
+      const production = await readProductionAffiliateNotificationReview({ db, now: startedAt }, environment);
+      if (production?.review.mode !== 'production_live') return result(mode, 'blocked');
+    }
     return mode === 'prepare' ? await runPreparation(db, startedAt, environment)
       : await runDispatch({ db, clock, intentIds, ...(sendEmail ? { sendEmail } : {}) }, environment);
   } catch {
@@ -374,11 +475,23 @@ export async function getAffiliateNotificationRuntimeStatus(input: {
   const db = input.db; const environment = { ...env }; const now = input.now || new Date().toISOString();
   const sourceGate = affiliateNotificationSourceGate(db, environment);
   const deliveryGate = affiliateNotificationDeliveryGate(db, environment);
-  const empty = { deliveryGate, sampledDeliveries: 0, counts: {}, preparedIntents: 0,
+  // The environment is server-owned. Do not infer a delivery capability from
+  // mutable review documents or from a truthy/partially matched mode label.
+  const configuredMode = environment.AFFILIATE_NOTIFICATION_DELIVERY_MODE;
+  const environmentMode: AffiliateNotificationRuntimeStatus['environmentMode'] = configuredMode === 'staging_test' || configuredMode === 'production_test' || configuredMode === 'production_live'
+    ? configuredMode : null;
+  const empty = { deliveryGate, environmentMode, sampledDeliveries: 0, counts: {}, preparedIntents: 0,
     truncated: { deliveries: false, intents: false }, limits: AFFILIATE_NOTIFICATION_RUNTIME_LIMITS };
   if (sourceGate !== 'held') return { ...empty, status: sourceGate };
   if (iso(now) === null) return { ...empty, status: 'failed' };
   try {
+    if (environment.AFFILIATE_NOTIFICATION_EVENT_MODE === 'production_held') {
+      const production = await readProductionAffiliateNotificationReview({ db, now }, environment);
+      if (!production) return { ...empty, status: 'blocked' };
+      // Controlled tests have a separate writer-only ledger/status, never a
+      // falsely empty marketing queue or a scan of customer/affiliate records.
+      if (production.review.mode === 'production_test') return { ...empty, status: 'disabled' };
+    }
     const deliveries = await db.collection(AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION).where('kind', '==', 'delivery').limit(501).get();
     const intents = await db.collection(OUTBOX).where('kind', '==', 'intent').limit(1_001).get();
     const [cursorSnapshot] = await db.getAll(db.collection(AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION).doc(DELIVERY_CURSOR));
@@ -388,7 +501,7 @@ export async function getAffiliateNotificationRuntimeStatus(input: {
       increment(counts, record(value) && DELIVERY_STATUSES.has(value.status) ? value.status : 'invalid_record');
     }
     const cursor = cursorSnapshot?.data();
-    return { status: 'ready', deliveryGate, sampledDeliveries: Math.min(500, deliveries.docs.length), counts,
+    return { status: 'ready', deliveryGate, environmentMode, sampledDeliveries: Math.min(500, deliveries.docs.length), counts,
       preparedIntents: Math.min(1_000, intents.docs.length),
       truncated: { deliveries: deliveries.docs.length > 500, intents: intents.docs.length > 1_000 },
       limits: AFFILIATE_NOTIFICATION_RUNTIME_LIMITS,

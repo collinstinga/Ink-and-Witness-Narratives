@@ -5,6 +5,9 @@ import { getFirestoreClientTarget } from './db.js';
 import type { AffiliateAccount, AffiliateSaleCommission } from '../types.js';
 import { literaryCirclePeriodKey, normalizeLiteraryCircleSettings, resolveLiteraryCircleSettingsForTransaction } from './literaryCircle.js';
 import { MAX_TIER_TRANSITION_PRIOR_COMMISSIONS, validateStoredLiteraryCircleTierTransition } from './literaryCircleTierTransition.js';
+import {
+  affiliateNotificationRolloutHash, authorizeProductionAffiliateNotificationSource, productionAffiliateNotificationGate,
+} from './affiliateNotificationRollout.js';
 
 type SourceKind = 'activation' | 'new_commission' | 'new_release' | 'tier_upgrade';
 type PreparationStatus = 'disabled' | 'blocked' | 'ineligible' | 'created' | 'existing' | 'failed';
@@ -31,6 +34,7 @@ export const AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS = 7 * 86_400_000;
 export function affiliateNotificationSourceGate(db: Firestore, env: NodeJS.ProcessEnv): 'held' | 'disabled' | 'blocked' {
   const mode = (env.AFFILIATE_NOTIFICATION_EVENT_MODE || 'off').trim().toLowerCase();
   if (mode === 'off') return 'disabled';
+  if (mode === 'production_held') return productionAffiliateNotificationGate(db, env) === 'allowed' ? 'held' : 'blocked';
   if (mode !== 'held') return 'blocked';
   const project = (env.FIREBASE_PROJECT_ID || '').trim();
   const allowed = (env.LITERARY_CIRCLE_STAGING_PROJECT_IDS || '').split(',').map(value => value.trim()).filter(Boolean);
@@ -44,6 +48,24 @@ export function affiliateNotificationSourceGate(db: Firestore, env: NodeJS.Proce
     || denied.has(project) || actualTarget?.projectId !== project || actualTarget?.firestoreDatabaseId !== database
     || env.FIRESTORE_EMULATOR_HOST || env.FIREBASE_DATABASE_EMULATOR_HOST || env.FIREBASE_AUTH_EMULATOR_HOST) return 'blocked';
   return 'held';
+}
+
+/** Extend a trusted source with the independently signed production review.
+ * Its fresh transaction read also fences pause, edits, expiry and cutover. */
+export async function withProductionAffiliateNotificationAuthorization(input: {
+  db: Firestore; resolved: ResolvedAffiliateNotificationSource | null; now: string;
+}, env: NodeJS.ProcessEnv): Promise<ResolvedAffiliateNotificationSource | null> {
+  if (!input.resolved || env.AFFILIATE_NOTIFICATION_EVENT_MODE !== 'production_held') return input.resolved;
+  const resolved = input.resolved;
+  const authorization = await authorizeProductionAffiliateNotificationSource({ db: input.db, source: resolved.source, now: input.now }, env);
+  if (!authorization) return null;
+  return { ...resolved, evidenceSha256: affiliateNotificationRolloutHash([resolved.evidenceSha256, authorization.envelopeSha256]),
+    verifySource: async transaction => {
+      if (!await resolved.verifySource(transaction)) return false;
+      const fresh = await authorizeProductionAffiliateNotificationSource({ db: input.db, transaction, source: resolved.source, now: input.now }, env);
+      return fresh?.envelopeSha256 === authorization.envelopeSha256;
+    },
+  };
 }
 
 export function affiliateNotificationSourceFingerprint(value: unknown): string {
@@ -87,7 +109,8 @@ function matchesSettlementTime(commission: Record<string, unknown>, payment: Rec
   return typeof selected === 'string' && selected === commission.createdAt;
 }
 
-/** Internal post-commit adapter. Defaults off and can prepare held records only in staging. */
+/** Internal post-commit adapter. Defaults off; production additionally requires
+ * independent signed source authorization before held records are prepared. */
 async function consumeCommittedAffiliateNotification(input: {
   db: Firestore;
   kind: SourceKind;
@@ -242,7 +265,7 @@ async function consumeCommittedAffiliateNotification(input: {
         ...(kind === 'tier_upgrade' ? { targetTierId: primary.literaryCircleTierTransition.toTierId } : {}),
       };
     }
-    return await consume({ source, context,
+    const resolved = await withProductionAffiliateNotificationAuthorization({ db, now, resolved: { source, context,
       evidenceSha256: affiliateNotificationSourceFingerprint(refs.map((ref, index) => [ref.path, expected[index]])),
       verifySource: async transaction => {
         const snapshots = await transaction.getAll(...refs);
@@ -252,7 +275,8 @@ async function consumeCommittedAffiliateNotification(input: {
           return snapshot && affiliateNotificationSourceFingerprint(snapshot.exists ? snapshot.data() : null) === expected[index];
         });
       },
-    }, audience || [source.targetAffiliateId!], now);
+    } }, env);
+    return resolved ? await consume(resolved, audience || [source.targetAffiliateId!], now) : result('ineligible');
   } catch {
     // Approval/payment commits must stay successful if notification preparation
     // fails. A bounded replay of the committed source can recover it later.

@@ -4,6 +4,7 @@ import type { AffiliateNotificationSource } from './affiliateNotificationPlan.js
 import {
   affiliateNotificationSourceFingerprint as fingerprint,
   affiliateNotificationSourceGate,
+  withProductionAffiliateNotificationAuthorization,
   type ResolvedAffiliateNotificationSource,
 } from './affiliateNotificationEvents.js';
 import { validateAffiliateNotificationSettings } from './affiliateNotifications.js';
@@ -181,7 +182,10 @@ async function readScheduledSource(input: ScheduledInput, env: NodeJS.ProcessEnv
   }
 
   const expected = values.map(fingerprint);
-  return {
+  // Scheduled preparation is also called directly, outside the runtime job.
+  // Fence that shared boundary, not only callers, and pin the signed review in
+  // the eventual outbox transaction so pause/expiry cannot prepare a backlog.
+  return withProductionAffiliateNotificationAuthorization({ db, now, resolved: {
     source, context, evidenceSha256: fingerprint(refs.map((ref, index) => [ref.path, expected[index]])),
     ...(cooldown ? { cooldown } : {}),
     verifySource: async (transaction: Transaction) => {
@@ -192,7 +196,7 @@ async function readScheduledSource(input: ScheduledInput, env: NodeJS.ProcessEnv
         return snapshot?.exists && fingerprint(snapshot.data()) === expected[index];
       });
     },
-  };
+  } }, env);
 }
 
 /** Reconstruct the precise persisted source from current committed evidence.

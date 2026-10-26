@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Firestore, Transaction } from 'firebase-admin/firestore';
 
@@ -7,7 +8,9 @@ vi.mock('./db.js', () => ({
   getFirestoreDoc: vi.fn(), sanitizeForFirestore: (value: unknown) => value,
 }));
 
-import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS } from './affiliateNotifications.js';
+import { DEFAULT_AFFILIATE_NOTIFICATION_SETTINGS, validateAffiliateNotificationSettings } from './affiliateNotifications.js';
+import { AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN, AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT,
+  affiliateNotificationRolloutHash } from './affiliateNotificationRollout.js';
 import { DEFAULT_AFFILIATE_NOTIFICATION_PREFERENCES, AFFILIATE_MARKETING_DISCLOSURE_VERSION } from './affiliateNotificationPreferences.js';
 import { prepareScheduledAffiliateNotifications, resolveScheduledAffiliateNotificationSource } from './affiliateNotificationSchedule.js';
 import { resolveAffiliateNotificationSource } from './affiliateNotificationEvents.js';
@@ -91,9 +94,75 @@ function source(h: ReturnType<typeof harness>): AffiliateNotificationSource {
   return [...h.documents.values()].find(value => value.kind === 'source').source;
 }
 
+// Real signed-review validation is used here; no mocked authorization adapter
+// can accidentally make a test-only mode prepare ordinary marketing records.
+function productionFixture(h: ReturnType<typeof harness>, mode: 'production_test' | 'production_live' = 'production_live') {
+  const recipient = 'approved-owner@example.invalid';
+  const sha = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
+  const env: NodeJS.ProcessEnv = {
+    AFFILIATE_NOTIFICATION_EVENT_MODE: 'production_held', AFFILIATE_NOTIFICATION_DELIVERY_MODE: mode,
+    FIREBASE_PROJECT_ID: AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT, FIRESTORE_DATABASE_ID: '(default)', VERCEL_ENV: 'production',
+    AFFILIATE_NOTIFICATION_PRODUCTION_BASE_URL: AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN,
+    AFFILIATE_NOTIFICATION_SIGNING_SECRET: 'isolated-scheduled-review-fixture-secret-not-a-real-secret',
+    AFFILIATE_NOTIFICATION_TEST_RECIPIENT_SHA256: sha(recipient), RESEND_API_KEY: 'fixture-provider-never-sent',
+    NEWSLETTER_FROM_EMAIL: 'Writer <sender@example.invalid>', RESEND_WEBHOOK_SECRET: 'fixture-webhook-never-used',
+  };
+  h.db.projectId = AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT;
+  const settings = validateAffiliateNotificationSettings(h.settings);
+  const review = { schemaVersion: 1, revision: 1, mode, projectId: AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT,
+    databaseId: '(default)', canonicalBaseUrl: AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN,
+    fromEmail: env.NEWSLETTER_FROM_EMAIL!, providerAccountSha256: sha(env.RESEND_API_KEY!), settingsRevision: settings.revision,
+    settingsSha256: affiliateNotificationRolloutHash(settings), activatedAt: EARLY, reviewedAt: EARLY,
+    expiresAt: '2026-10-30T00:00:00.000Z', reviewedBySha256: sha('writer@example.invalid'),
+    ...(mode === 'production_test' ? { testRecipient: recipient } : { verifiedTestDeliveryId: `nld_${'a'.repeat(48)}` }),
+  };
+  const unsigned = { schemaVersion: 1, revision: 1, state: 'reviewed', review, reviewSha256: affiliateNotificationRolloutHash(review) };
+  const commit = () => {
+    unsigned.reviewSha256 = affiliateNotificationRolloutHash(unsigned.review);
+    const signature = crypto.createHmac('sha256', env.AFFILIATE_NOTIFICATION_SIGNING_SECRET!)
+      .update(`affiliate-production-review-v1\0${affiliateNotificationRolloutHash(unsigned)}`).digest('hex');
+    h.documents.set('site_configs/affiliate_notification_rollout', { ...structuredClone(unsigned), signature });
+  };
+  commit();
+  return { env, unsigned, commit };
+}
+
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('bounded scheduled partner notification sources', () => {
+  it.each(['upcoming_campaign', 'exclusive_opportunity', 'inactivity_reminder'] as const)('cannot prepare %s outbox records in controlled production test mode', async kind => {
+    const h = harness(); const production = productionFixture(h, 'production_test');
+    expect(await prepareScheduledAffiliateNotifications(request(h, kind), production.env)).toEqual({ attempted: 1, counts: { ineligible: 1 }, intentCount: 0 });
+    expect(h.writes).toEqual([]);
+    expect(h.db.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each(['upcoming_campaign', 'exclusive_opportunity', 'inactivity_reminder'] as const)('prepares and reconstructs %s only under the genuine current signed live review', async kind => {
+    const h = harness(); const production = productionFixture(h);
+    expect(await prepareScheduledAffiliateNotifications(request(h, kind), production.env)).toEqual({ attempted: 1, counts: { created: 1 }, intentCount: 1 });
+    const resolved = await resolveScheduledAffiliateNotificationSource({ db: h.client, source: source(h), now: NOW }, production.env);
+    expect(resolved).not.toBeNull();
+    expect(await resolved!.verifySource(h.tx())).toBe(true);
+    expect(h.writes.every(path => path.startsWith('affiliate_notification_outbox/'))).toBe(true);
+  });
+
+  it.each(['unreviewed', 'paused', 'expired'] as const)('keeps direct scheduled preparation off for a %s production review', async state => {
+    const h = harness(); const production = productionFixture(h);
+    if (state === 'unreviewed') h.documents.delete('site_configs/affiliate_notification_rollout');
+    if (state === 'paused') { production.unsigned.state = 'paused'; production.commit(); }
+    if (state === 'expired') { production.unsigned.review.expiresAt = NOW; production.commit(); }
+    expect((await prepareScheduledAffiliateNotifications(request(h), production.env)).counts).toEqual({ ineligible: 1 });
+    expect(h.writes).toEqual([]);
+  });
+
+  it('pins the production review again in the outbox transaction and cancels a concurrent writer pause', async () => {
+    const h = harness(); const production = productionFixture(h);
+    h.beforeTransaction(() => { production.unsigned.state = 'paused'; production.commit(); });
+    expect((await prepareScheduledAffiliateNotifications(request(h), production.env)).counts).toEqual({ ineligible: 1 });
+    expect(h.db.runTransaction).toHaveBeenCalledTimes(1);
+    expect(h.writes).toEqual([]);
+  });
+
   it.each(['upcoming_campaign', 'exclusive_opportunity', 'inactivity_reminder'] as const)('prepares/replays %s without touching accounts, finances or the immutable held records', async kind => {
     const h = harness(); const original = structuredClone([...h.documents]);
     expect(await prepareScheduledAffiliateNotifications(request(h, kind), ENV)).toEqual({ attempted: 1, counts: { created: 1 }, intentCount: 1 });

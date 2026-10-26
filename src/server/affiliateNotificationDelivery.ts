@@ -12,6 +12,10 @@ import { AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS } from './affiliateNotificati
 import { verifiedManualAffiliateNotificationTierIds } from './affiliateNotificationTierFilter.js';
 import type { VerifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationTierFilter.js';
 import { readVerifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationMonthlyTiers.js';
+import {
+  authorizeProductionAffiliateNotificationSource, productionAffiliateNotificationGate, productionAffiliateNotificationMode,
+  readProductionAffiliateNotificationReview, reconcileProductionAffiliateNotificationTest, type ProductionAffiliateNotificationReview,
+} from './affiliateNotificationRollout.js';
 
 export const AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION = 'affiliate_notification_deliveries';
 export const AFFILIATE_NOTIFICATION_DELIVERY_CONFIG_ID = 'affiliate_notification_delivery';
@@ -77,6 +81,7 @@ export interface AffiliateNotificationDeliveryReview {
   expiresAt: string;
   reviewedBy: string;
 }
+type ReviewedDelivery = AffiliateNotificationDeliveryReview | ProductionAffiliateNotificationReview;
 
 type DeliveryStatus = 'leased' | 'dispatching' | 'retry_pending' | 'accepted' | 'delivered'
   | 'bounced' | 'complained' | 'suppressed' | 'failed' | 'dead_letter' | 'cancelled';
@@ -128,11 +133,13 @@ export interface AffiliateNotificationDeliveryResult {
 
 /** Environment gate is checked before Firestore access. Template settings remain
  * preview_only. A separate short-lived, hash-pinned review authorizes only a
- * maximum of five explicitly consented staging test addresses. Never production.
+ * maximum of five explicitly consented staging addresses, or the independently
+ * signed production review. Production remains default-off without both gates.
  */
 export function affiliateNotificationDeliveryGate(db: Firestore, env: NodeJS.ProcessEnv): 'allowed' | 'disabled' | 'blocked' {
   const mode = env.AFFILIATE_NOTIFICATION_DELIVERY_MODE || 'off';
   if (mode === 'off') return 'disabled';
+  if (productionAffiliateNotificationMode(env)) return productionAffiliateNotificationGate(db, env, true);
   if (mode !== 'staging_test') return 'blocked';
   const projectId = env.FIREBASE_PROJECT_ID || '';
   const allowed = (env.LITERARY_CIRCLE_STAGING_PROJECT_IDS || '').split(',').map(value => value.trim()).filter(Boolean);
@@ -184,7 +191,7 @@ function buildEmail(input: {
   settings: LiteraryCircleNotificationSettings;
   source: AffiliateNotificationSource;
   variables: Record<string, string>;
-  review: AffiliateNotificationDeliveryReview;
+  review: ReviewedDelivery;
   secret: string;
 }): Omit<Parameters<typeof sendNewsletterEmail>[0], 'idempotencyKey' | 'deliveryId' | 'fetchImpl'> {
   const template = input.settings.templates.find(item => item.eventType === input.source.eventType)!;
@@ -257,7 +264,7 @@ async function isSuppressed(db: Firestore, transaction: Transaction, email: stri
 interface Loaded {
   intent: HeldAffiliateNotificationIntent;
   source: AffiliateNotificationSource;
-  review: AffiliateNotificationDeliveryReview;
+  review: ReviewedDelivery;
   email: ReturnType<typeof buildEmail>;
   evidenceSha256: string;
   contentSha256: string;
@@ -270,19 +277,29 @@ async function loadEligible(input: {
 }): Promise<Loaded | 'not_due' | null> {
   const { db, transaction, intentId, env, now } = input;
   const nowMs = iso(now)!;
+  const productionMode = productionAffiliateNotificationMode(env);
+  const production = productionMode ? await readProductionAffiliateNotificationReview({ db, transaction, now }, env) : null;
+  // A controlled writer test can never drain the affiliate outbox.
+  if (productionMode && (!production || production.review.mode !== 'production_live')) return null;
   const [intentSnapshot, reviewSnapshot, settingsSnapshot] = await transaction.getAll(
     db.collection('affiliate_notification_outbox').doc(intentId),
     db.collection('site_configs').doc(AFFILIATE_NOTIFICATION_DELIVERY_CONFIG_ID),
     db.collection('site_configs').doc('affiliate_notifications'),
   );
   const intent = intentSnapshot.data();
-  const review = reviewSnapshot.data();
+  let review: ReviewedDelivery;
+  if (production) review = production.review;
+  else {
+    const stagingReview = reviewSnapshot.data();
+    if (!validReview(stagingReview, env, nowMs)) return null;
+    review = stagingReview;
+  }
   if (!intentSnapshot.exists || !record(intent) || !exactKeys(intent, ['schemaVersion', 'id', 'eventId', 'eventType', 'affiliateId', 'settingsRevision', 'state', 'dueAt', 'tierEvidenceSha256', 'kind', 'createdAt'])
     || intent.tierEvidenceSha256 !== undefined && (typeof intent.tierEvidenceSha256 !== 'string' || !HASH.test(intent.tierEvidenceSha256))
     || intent.kind !== 'intent' || intent.schemaVersion !== 1 || intent.state !== 'held' || intent.id !== intentId
     || !/^ane1_[a-f0-9]{64}$/.test(intent.eventId) || !iso(intent.createdAt) || iso(intent.createdAt)! > nowMs
     || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(intent.affiliateId)
-    || !validReview(review, env, nowMs) || !settingsSnapshot.exists) return null;
+    || !settingsSnapshot.exists) return null;
   const due = iso(intent.dueAt);
   if (due === null) return null;
   if (due > nowMs) return 'not_due';
@@ -305,9 +322,10 @@ async function loadEligible(input: {
     || !affiliateSnapshot.exists) return null;
   const affiliate = { ...affiliateSnapshot.data(), id: intent.affiliateId } as AffiliatePublicProfile;
   const email = normalizeNewsletterEmail(affiliate.email);
-  if (!email || !review.allowedRecipients.includes(email) || await isSuppressed(db, transaction, email)) return null;
+  if (!email || review.mode === 'staging_test' && !review.allowedRecipients.includes(email) || await isSuppressed(db, transaction, email)) return null;
   const source = sourceRecord.source as AffiliateNotificationSource;
   if (!source || iso(source.occurredAt) === null || iso(source.occurredAt)! > iso(intent.createdAt)!) return null;
+  if (production && (await authorizeProductionAffiliateNotificationSource({ db, transaction, now, source }, env))?.reviewSha256 !== production.reviewSha256) return null;
   if (source.eventType === 'new_release' && nowMs >= iso(source.occurredAt)! + AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS) return null;
   const template = settings.templates.find(item => item.eventType === source.eventType);
   let verifiedManualTierIds: Record<string, string> | undefined;
@@ -550,6 +568,12 @@ export async function reconcileAffiliateNotificationWebhook(input: {
     const now = (input.clock || (() => new Date().toISOString()))(), nowMs = iso(now);
     const eventMs = iso(event.created_at);
     if (nowMs === null || eventMs === null || eventMs > nowMs + 5 * 60_000) return { status: 'invalid' };
+    if (productionAffiliateNotificationMode(env)) {
+      const writerTest = await reconcileProductionAffiliateNotificationTest({ db: input.db, deliveryId: outcome.deliveryId,
+        providerMessageId: outcome.providerMessageId, eventId: input.headers.id, eventAt: event.created_at, now,
+        recipients: 'to' in event.data ? event.data.to : undefined, status: outcome.status });
+      if (writerTest) return writerTest;
+    }
     const ref = input.db.collection(AFFILIATE_NOTIFICATION_DELIVERY_COLLECTION).doc(outcome.deliveryId);
     return await input.db.runTransaction(async transaction => {
       const snapshot = await transaction.get(ref), previous = snapshot.data();

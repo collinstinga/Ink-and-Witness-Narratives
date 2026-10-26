@@ -243,6 +243,8 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
       steps: [
         'Open Affiliates Control → Partner Notifications to review event templates, timing, eligibility and the delivery-mode/status notices.',
         'Use the preview and eligibility controls to inspect the intended message. Save preview settings stores configuration; it does not itself send or queue mail.',
+        'Open Production notification review to inspect server mode and review expiry. When available, approve an explicit time-limited owner-only test review, then separately confirm its one controlled test. Refresh for the signed delivered receipt; provider acceptance alone is not delivery.',
+        'A live review additionally requires the verified owner-test receipt and separately configured server gates. Review approval itself sends nothing. Prepare holds eligible records; Dispatch requires its own confirmation. Pause the production review to stop subsequent authorization. Changing saved templates requires a renewed review of that exact revision.',
         'Respect marketing consent, opt-outs and suppression. An account upgrade is not blanket permission to send promotional or inactivity emails.',
         'Treat preview-only, held or disabled delivery as not live. Do not promise activation, commission, tier or campaign emails until the separate reviewed production delivery gate is verified.',
       ],

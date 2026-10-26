@@ -95,6 +95,7 @@ import {
 import { getAffiliateNotificationRuntimeStatus, runAffiliateNotificationJob } from "./src/server/affiliateNotificationRuntime.js";
 import { reconcileAffiliateNotificationWebhook } from "./src/server/affiliateNotificationDelivery.js";
 import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntimeRequest } from "./src/server/affiliateNotificationRuntimeRequest.js";
+import { affiliateNotificationWebhookModeEnabled, registerAffiliateNotificationRolloutRoutes } from "./src/server/affiliateNotificationRolloutRoutes.js";
 import { AffiliateNotificationEligibilityOverflowError, readAffiliateNotificationEligibility } from "./src/server/affiliateNotificationEligibilityRead.js";
 import { isStagingVerificationBindingEnabled, readStagingVerificationBinding } from "./src/server/stagingVerificationBinding.js";
 import {
@@ -1973,7 +1974,7 @@ export async function createApp() {
     try {
       // Reuse the existing raw-body/signature endpoint. Partner outcomes have
       // a separate ledger and must be handled before newsletter's no-record exit.
-      if ((process.env.AFFILIATE_NOTIFICATION_DELIVERY_MODE || 'off').trim().toLowerCase() === 'staging_test') {
+      if (affiliateNotificationWebhookModeEnabled()) {
         const partnerOutcome = await reconcileAffiliateNotificationWebhook({
           db: getDb(), payload, headers, webhookSecret
         });
@@ -7098,6 +7099,11 @@ ${currentDraft || prompt}
     res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     next();
   };
+
+  registerAffiliateNotificationRolloutRoutes(app, {
+    requireAdminAuth, noStore: noStoreNotificationRuntime,
+    rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
+  });
 
   app.get('/api/admin/affiliates/notifications/runtime', noStoreNotificationRuntime, requireAdminAuth,
     affiliateNotificationRuntimeLimiter, async (_req: Request, res: Response) => {

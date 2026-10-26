@@ -10,6 +10,18 @@ export function parseAffiliateNotificationRuntimeRequest(body: unknown): Affilia
   return mode === 'prepare' || mode === 'dispatch' ? mode : null;
 }
 
+/** Neither review pause nor writer probes accept client-selected addresses,
+ * source identities, clocks, provider transports or environment overrides. */
+export function parseProductionAffiliateNotificationPauseRequest(body: unknown): { expectedRevision: number } | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1
+    || !Object.hasOwn(body, 'expectedRevision')) return null;
+  const revision = (body as { expectedRevision: unknown }).expectedRevision;
+  return typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 1 ? { expectedRevision: revision } : null;
+}
+export function isProductionAffiliateNotificationTestRequest(body: unknown): boolean {
+  return Boolean(body) && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === 0;
+}
+
 /** No default/shared application key. Missing or weak cron configuration keeps
  * unattended execution locked, independently of the delivery review gate. */
 export function isAffiliateNotificationCronAuthorized(authorization: unknown, env: NodeJS.ProcessEnv = process.env): boolean {

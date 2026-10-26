@@ -140,12 +140,12 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
     ));
     if (
       newlyEnabled.length
-      && !window.confirm('Enable these templates for future event wiring? Delivery remains preview-only and no email will be sent now.')
+      && !window.confirm('Enable these event templates? Saving does not send or authorize delivery. A separate signed review must match this saved revision, and changed settings require explicit renewed review.')
     ) return;
     try {
       const saved = await onSave(draft);
       setDraft(cloneSettings(saved));
-      setNotice('Partner notification templates saved in preview-only mode. No email was sent or queued.');
+      setNotice('Partner notification templates saved. No email was sent or queued by this save. Sending remains default-off and separately gated; changed settings require an explicit renewed review bound to this saved revision.');
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Partner notification settings could not be saved.');
     }
@@ -178,7 +178,7 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
           </p>
         </div>
         <div className="flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-950/30 px-3 py-2 text-xs font-semibold text-amber-100">
-          <LockKeyhole className="h-4 w-4" /> Preview-only safety gate
+          <LockKeyhole className="h-4 w-4" /> Templates do not authorize delivery
         </div>
       </header>
 
@@ -193,7 +193,7 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
         </div>
         <div className="rounded-xl border border-violet-500/20 bg-violet-950/20 p-3 text-xs text-violet-100">
           <BellRing className="mb-2 h-4 w-4" />
-          Provider: {providerConfigured ? 'configured, but delivery locked' : 'not configured'}. Saving never sends a message.
+          Provider: {providerConfigured ? 'configured; separate review required' : 'not configured'}. Saving never sends a message.
         </div>
       </div>
 
@@ -206,8 +206,8 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
           className="mt-0.5 h-4 w-4 accent-violet-500"
         />
         <span>
-          <strong className="block text-white">Mark this configuration ready for later automation</strong>
-          This flag does not activate delivery while mode is <code className="text-violet-200">preview_only</code>.
+          <strong className="block text-white">Mark this template configuration ready for review</strong>
+          Template mode remains <code className="text-violet-200">preview_only</code>. This flag does not authorize sending. Production stays default-off unless the server gates and a separate signed review of this exact saved revision are valid.
         </span>
       </label>
 
@@ -257,7 +257,7 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
                           onChange={event => updateTemplate(template.eventType, current => ({ ...current, enabled: event.target.checked }))}
                           className="h-4 w-4 accent-violet-500"
                         />
-                        Prepare this event template for future wiring
+                        Enable this template for separately reviewed events
                       </label>
 
                       <div className="grid gap-3 sm:grid-cols-2">
@@ -394,7 +394,7 @@ export const AffiliateNotificationsAdmin: React.FC<AffiliateNotificationsAdminPr
             className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-40"
           >
             {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : dirty ? <Save className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
-            {saving ? 'Saving…' : dirty ? 'Save preview settings' : 'Saved'}
+            {saving ? 'Saving…' : dirty ? 'Save template settings' : 'Saved'}
           </button>
         </div>
       </footer>

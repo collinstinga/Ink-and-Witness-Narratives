@@ -34,7 +34,7 @@ describe('notification operations panel', () => {
     const run = vi.spyOn(api, 'runAdminAffiliateNotificationRuntime');
     const html = renderToStaticMarkup(<AffiliateNotificationOperations />);
     expect(run).not.toHaveBeenCalled();
-    expect(html).toContain('Production sending remains blocked');
+    expect(html).toContain('Production sending is default-off');
     expect(html).toContain('Preparing held intents does not send email');
     expect(html).toContain('Checking operations');
     expect(html).toMatch(/disabled=""[^>]*>Prepare staging intents/);
@@ -50,6 +50,7 @@ describe('notification operations panel', () => {
     }
     expect(affiliateNotificationOperationAvailability(status({ deliveryGate: 'allowed', cursor: { busy: true } }))).toEqual({ prepare: false, dispatch: false });
     expect(affiliateNotificationOperationAvailability(status({ deliveryGate: 'allowed' }), true)).toEqual({ prepare: false, dispatch: false });
+    expect(affiliateNotificationOperationAvailability(status({ deliveryGate: 'allowed', environmentMode: 'production_test' }))).toEqual({ prepare: false, dispatch: false });
   });
 
   it('never presents disabled zero counts as proof there is no historical queue', () => {
@@ -110,6 +111,19 @@ describe('notification operations panel', () => {
     accepted.mockClear();
     await requestAffiliateNotificationOperation({ mode: 'prepare', runtime: status(), locked: false, confirmDispatch: accepted, run });
     expect(accepted).not.toHaveBeenCalled(); expect(run).toHaveBeenLastCalledWith('prepare');
+  });
+
+  it('makes production dispatch honest about real emails rather than calling it a staging test', async () => {
+    const runtime = status({ environmentMode: 'production_live', deliveryGate: 'allowed' });
+    const html = markup(runtime);
+    expect(html).toContain('Dispatch reviewed production batch');
+    expect(html).toContain('Production preparation is available under its current review');
+    expect(html).not.toContain('Dispatch reviewed staging test');
+    const confirmDispatch = vi.fn(() => true);
+    const run = vi.fn(async () => ({ success: true, result: result({ mode: 'dispatch' }) }));
+    await requestAffiliateNotificationOperation({ mode: 'dispatch', runtime, locked: false, confirmDispatch, run });
+    expect(confirmDispatch).toHaveBeenCalledWith(expect.stringContaining('real affiliate emails'));
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
 

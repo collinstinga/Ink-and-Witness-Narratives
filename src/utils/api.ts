@@ -48,6 +48,9 @@ import {
   AffiliateNotificationRuntimeMode,
   AffiliateNotificationRuntimeResult,
   AffiliateNotificationRuntimeStatus,
+  ProductionAffiliateNotificationReviewRequest,
+  ProductionAffiliateNotificationRolloutStatus,
+  ProductionAffiliateNotificationTestStatus,
   LiteraryCircleNotificationEventType,
   LiteraryCircleNotificationSettings,
   LiteraryCircleOnboardingStatus,
@@ -2879,6 +2882,46 @@ export const api = {
       },
       'Failed to run partner notification operations.'
     );
+  },
+
+  async getAdminAffiliateNotificationRollout(options: { signal?: AbortSignal } = {}): Promise<{
+    success: true; rollout: ProductionAffiliateNotificationRolloutStatus;
+  }> {
+    return safeFetchJson('/api/admin/affiliates/notifications/rollout', {
+      cache: 'no-store', signal: options.signal, headers: { 'x-admin-token': getWriterToken() || '' },
+    }, 'Failed to check production partner notification review.');
+  },
+
+  async updateAdminAffiliateNotificationRollout(
+    request: ProductionAffiliateNotificationReviewRequest, options: { signal?: AbortSignal } = {},
+  ): Promise<{ success: true; rollout: ProductionAffiliateNotificationRolloutStatus }> {
+    // Pick the exact contract rather than forwarding caller-supplied properties.
+    const { expectedRevision, mode, durationDays, includeFoundingWelcome } = request;
+    return safeFetchJson('/api/admin/affiliates/notifications/rollout', {
+      method: 'PUT', cache: 'no-store', signal: options.signal,
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify({ expectedRevision, mode, durationDays, includeFoundingWelcome }),
+    }, 'Production notification review was not confirmed. Refresh before trying again.');
+  },
+
+  async pauseAdminAffiliateNotificationRollout(
+    expectedRevision: number, options: { signal?: AbortSignal } = {},
+  ): Promise<{ success: true; rollout: ProductionAffiliateNotificationRolloutStatus }> {
+    return safeFetchJson('/api/admin/affiliates/notifications/rollout/pause', {
+      method: 'POST', cache: 'no-store', signal: options.signal,
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify({ expectedRevision }),
+    }, 'Pausing was not confirmed. Refresh to check the current review state.');
+  },
+
+  async testAdminAffiliateNotificationRollout(options: { signal?: AbortSignal } = {}): Promise<{
+    success: boolean; result: { status: ProductionAffiliateNotificationTestStatus }; rollout: ProductionAffiliateNotificationRolloutStatus;
+  }> {
+    return safeFetchJson('/api/admin/affiliates/notifications/rollout/test', {
+      method: 'POST', cache: 'no-store', signal: options.signal,
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify({}),
+    }, 'The owner-only test could not be confirmed. Refresh before trying again; it may already have started.');
   },
 
   async updateAdminLiteraryCircleResources(

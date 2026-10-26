@@ -9,6 +9,11 @@ import { DEFAULT_LITERARY_CIRCLE_SETTINGS } from './literaryCircle.js';
 import { affiliateTierPeriodDocumentId } from './affiliateTierPeriods.js';
 import { verifiedAffiliateNotificationMonthlyTiers } from './affiliateNotificationMonthlyTiers.js';
 import {
+  AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN, AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT,
+  pauseProductionAffiliateNotifications, saveProductionAffiliateNotificationReview,
+  sendProductionAffiliateNotificationTest,
+} from './affiliateNotificationRollout.js';
+import {
   affiliateNotificationDeliveryHash as hash,
   deliverHeldAffiliateNotification,
   reconcileAffiliateNotificationWebhook,
@@ -36,6 +41,7 @@ function harness(eventType: 'new_commission' | 'new_release' = 'new_commission')
   const db = {
     target: { projectId: 'ink-witness-circle-staging', firestoreDatabaseId: '(default)' },
     collection: (name: string) => ({ doc: (id: string): Ref => ({ id, path: `${name}/${id}` }) }),
+    getAll: vi.fn(async (...refs: Ref[]) => refs.map(snapshot)),
     runTransaction: vi.fn(async (callback: (transaction: any) => Promise<any>) => {
       let release!: () => void;
       const previous = queue;
@@ -393,6 +399,109 @@ describe('guarded partner notification delivery', () => {
     h.advance(121_000);
     expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'accepted' });
     expect(h.sendEmail.mock.calls[1][0]).toEqual(h.sendEmail.mock.calls[0][0]);
+  });
+});
+
+/** No network transport: exercises real review signatures, delivery ledger and
+ * webhook verifier together using a private in-memory SDK fixture. */
+async function productionDeliveryHarness(live = true) {
+  const h = harness();
+  const owner = 'approved-owner@example.invalid';
+  const key = Buffer.from('production-notification-unit-webhook-key');
+  Object.assign(h.input.env, {
+    VERCEL_ENV: 'production', FIREBASE_PROJECT_ID: AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT,
+    FIRESTORE_DATABASE_ID: '(default)', AFFILIATE_NOTIFICATION_EVENT_MODE: 'production_held',
+    AFFILIATE_NOTIFICATION_DELIVERY_MODE: 'production_test',
+    AFFILIATE_NOTIFICATION_PRODUCTION_BASE_URL: AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN,
+    AFFILIATE_NOTIFICATION_TEST_RECIPIENT_EMAIL: owner,
+    AFFILIATE_NOTIFICATION_TEST_RECIPIENT_SHA256: crypto.createHash('sha256').update(owner).digest('hex'),
+    RESEND_WEBHOOK_SECRET: `whsec_${key.toString('base64')}`,
+  });
+  h.db.target.projectId = AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT;
+  const reviewInput = { db: h.input.db, authenticatedWriterEmail: 'actual-writer@example.invalid' };
+  const request = { expectedRevision: 0, mode: 'production_test' as const, durationDays: 7, includeFoundingWelcome: false };
+  await saveProductionAffiliateNotificationReview({ ...reviewInput, request, now: h.input.clock() }, h.input.env);
+  const sign = (id: string, providerMessageId: string, recipient: string, type = 'email.delivered') => {
+    const eventAt = h.input.clock();
+    const payload = JSON.stringify({ type, created_at: eventAt, data: { email_id: providerMessageId,
+      to: [recipient], from: 'writer@example.test', tags: { delivery_id: id } } });
+    const headers = { id: `evt_${id}_${type}`, timestamp: String(Math.floor(Date.now() / 1_000)), signature: '' };
+    headers.signature = `v1,${crypto.createHmac('sha256', key).update(`${headers.id}.${headers.timestamp}.${payload}`).digest('base64')}`;
+    return { db: h.input.db, env: h.input.env, payload, headers, webhookSecret: h.input.env.RESEND_WEBHOOK_SECRET, clock: h.input.clock };
+  };
+  const probe = await sendProductionAffiliateNotificationTest({ ...reviewInput, clock: h.input.clock,
+    sendEmail: vi.fn(async () => ({ providerMessageId: 'unit_owner_probe' })) }, h.input.env);
+  expect(probe.status).toBe('accepted');
+  const hook = sign(probe.deliveryId!, 'unit_owner_probe', owner);
+  const writesBeforeTampering = h.writes.length;
+  expect(await reconcileAffiliateNotificationWebhook({ ...hook, payload: `${hook.payload} ` })).toEqual({ status: 'failed' });
+  expect(h.writes).toHaveLength(writesBeforeTampering);
+  expect(await reconcileAffiliateNotificationWebhook(hook)).toEqual({ status: 'recorded' });
+  if (live) {
+    h.advance(1_000); h.input.env.AFFILIATE_NOTIFICATION_DELIVERY_MODE = 'production_live';
+    expect(await saveProductionAffiliateNotificationReview({ ...reviewInput, request: { ...request,
+      expectedRevision: 1, mode: 'production_live' }, now: h.input.clock() }, h.input.env)).toMatchObject({ status: 'ready' });
+    // The ordinary sale is prospective, not the pre-activation fixture sale.
+    h.advance(1_000);
+    const source = { ...h.source, occurredAt: h.input.clock() };
+    const plan = planAffiliateNotifications({ source, settings: h.settings, affiliates: [h.affiliate], now: h.input.clock() });
+    const intent = { ...plan.intents[0], kind: 'intent', createdAt: h.input.clock() };
+    h.input.intentId = intent.id;
+    h.documents.set(`affiliate_notification_outbox/${intent.id}`, intent);
+    h.documents.set(`affiliate_notification_outbox/${plan.eventId}`, {
+      schemaVersion: 1, kind: 'source', id: plan.eventId, source, sourceSha256: hash(source),
+      audienceSha256: hash([h.affiliate.id]), intentEvidence: [{ id: intent.id, sha256: hash(intent) }],
+      createdAt: h.input.clock(), deliveryMode: 'preview_only',
+    });
+  }
+  return { ...h, sign };
+}
+
+describe('real signed production review / mocked transport integration', () => {
+  it('owner-only test mode reconciles a signed receipt but cannot drain an ordinary affiliate intent', async () => {
+    const h = await productionDeliveryHarness(false);
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
+    expect(h.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('sends a prospective ordinary message once under a signed live review, preserving account and sale data', async () => {
+    const h = await productionDeliveryHarness();
+    const before = structuredClone([...h.documents].filter(([path]) => !path.startsWith('affiliate_notification_deliveries/')));
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'accepted' });
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'already_processed' });
+    expect(h.sendEmail).toHaveBeenCalledTimes(1); expect(h.verifySource).toHaveBeenCalledTimes(2);
+    expect(h.sendEmail.mock.calls[0][0].html).toContain(`${AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN}/#affiliates`);
+    for (const [path, value] of before) expect(h.documents.get(path)).toEqual(value);
+  });
+
+  it('a pause between claim and pre-send validation cancels rather than dispatching', async () => {
+    const h = await productionDeliveryHarness();
+    let validated = 0;
+    // The source verifier runs inside the claim transaction. Install the same
+    // signed pause state after its first read to emulate the later commit.
+    h.verifySource.mockImplementation(async () => {
+      validated++;
+      if (validated === 1) {
+        const { signature: _signature, ...review } = h.documents.get('site_configs/affiliate_notification_rollout');
+        const paused = { ...review, state: 'paused', revision: review.revision + 1 };
+        h.documents.set('site_configs/affiliate_notification_rollout', { ...paused,
+          signature: crypto.createHmac('sha256', h.input.env.AFFILIATE_NOTIFICATION_SIGNING_SECRET)
+            .update(`affiliate-production-review-v1\0${hash(paused)}`).digest('hex') });
+      }
+      return { eligible: true, variables: { commissionAmount: 'KES 75', pieceTitle: 'A piece' }, evidenceSha256: hash('source') };
+    });
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
+    expect(h.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('an authenticated review pause prevents a later dispatch without deleting any held intent', async () => {
+    const h = await productionDeliveryHarness();
+    const intent = structuredClone(h.documents.get(`affiliate_notification_outbox/${h.input.intentId}`));
+    await pauseProductionAffiliateNotifications({ db: h.input.db, expectedRevision: 2,
+      authenticatedWriterEmail: 'actual-writer@example.invalid', now: h.input.clock() }, h.input.env);
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
+    expect(h.sendEmail).not.toHaveBeenCalled();
+    expect(h.documents.get(`affiliate_notification_outbox/${h.input.intentId}`)).toEqual(intent);
   });
 });
 

@@ -6,12 +6,15 @@ import type { AffiliateNotificationSource } from './affiliateNotificationPlan.js
 const adapters = vi.hoisted(() => ({
   sourceGate: vi.fn(), deliveryGate: vi.fn(), resolve: vi.fn(), inspect: vi.fn(),
   committed: vi.fn(), scheduled: vi.fn(), deliver: vi.fn(), plan: vi.fn(), verify: vi.fn(),
+  review: vi.fn(), authorize: vi.fn(),
 }));
 
 vi.mock('./affiliateNotificationEvents.js', () => ({
   affiliateNotificationSourceGate: adapters.sourceGate, prepareCommittedAffiliateNotification: adapters.committed,
   resolveAffiliateNotificationSource: adapters.resolve,
+  withProductionAffiliateNotificationAuthorization: adapters.authorize,
 }));
+vi.mock('./affiliateNotificationRollout.js', () => ({ readProductionAffiliateNotificationReview: adapters.review }));
 vi.mock('./affiliateNotificationSchedule.js', () => ({
   inspectScheduledAffiliateNotificationSource: adapters.inspect, prepareScheduledAffiliateNotifications: adapters.scheduled,
 }));
@@ -33,6 +36,8 @@ import {
 const NOW = '2026-10-24T10:00:00.000Z';
 const COLLECTION = 'affiliate_notification_deliveries';
 const ENV: NodeJS.ProcessEnv = { AFFILIATE_NOTIFICATION_EVENT_MODE: 'held', AFFILIATE_NOTIFICATION_DELIVERY_MODE: 'staging_test' };
+const PRODUCTION_ENV: NodeJS.ProcessEnv = { AFFILIATE_NOTIFICATION_EVENT_MODE: 'production_held', AFFILIATE_NOTIFICATION_DELIVERY_MODE: 'production_live' };
+const ACTIVATED_AT = '2026-10-24T08:00:00.000Z';
 type Ref = { id: string; path: string };
 type Filters = Array<[string, string, unknown]>;
 
@@ -55,7 +60,7 @@ function resolved(source: AffiliateNotificationSource) {
 
 function harness() {
   const documents = new Map<string, any>(); const writes: string[] = [];
-  const queries: Array<{ collection: string; filters: Filters; maximum: number; after?: string }> = [];
+  const queries: Array<{ collection: string; filters: Filters; maximum: number; after?: string; order: string[] }> = [];
   const snapshot = (ref: Ref) => ({ id: ref.id, ref, exists: documents.has(ref.path), data: () => structuredClone(documents.get(ref.path)) });
   const makeTransaction = () => {
     const pending: Array<{ ref: Ref; value: any }> = [];
@@ -67,19 +72,29 @@ function harness() {
       commit: () => { for (const { ref, value } of pending) { documents.set(ref.path, value); writes.push(ref.path); } },
     };
   };
-  const query = (collection: string, filters: Filters = [], maximum?: number, after?: string): any => ({
+  const query = (collection: string, filters: Filters = [], maximum?: number, after?: string | ReturnType<typeof snapshot>, order: string[] = []): any => ({
     doc: (id: string) => ({ id, path: `${collection}/${id}` }),
-    where: (field: string, op: string, value: unknown) => query(collection, [...filters, [field, op, value]], maximum, after),
-    orderBy: () => query(collection, filters, maximum, after),
-    startAfter: (value: string) => query(collection, filters, maximum, value),
-    limit: (value: number) => query(collection, filters, value, after),
+    where: (field: string, op: string, value: unknown) => query(collection, [...filters, [field, op, value]], maximum, after, order),
+    orderBy: (field: unknown) => query(collection, filters, maximum, after, [...order, typeof field === 'string' ? field : '__name__']),
+    startAfter: (value: string | ReturnType<typeof snapshot>) => query(collection, filters, maximum, value, order),
+    limit: (value: number) => query(collection, filters, value, after, order),
     get: async () => {
       if (!Number.isSafeInteger(maximum) || maximum! < 1 || maximum! > 1_001) throw new Error('unbounded query');
-      queries.push({ collection, filters: structuredClone(filters), maximum: maximum!, ...(after ? { after } : {}) });
+      const afterId = typeof after === 'string' ? after : after?.id;
+      queries.push({ collection, filters: structuredClone(filters), maximum: maximum!, ...(afterId ? { after: afterId } : {}), order });
+      const compare = (a: Ref, b: Ref) => {
+        for (const field of order.length ? order : ['__name__']) {
+          const left = field === '__name__' ? a.id : documents.get(a.path)?.[field];
+          const right = field === '__name__' ? b.id : documents.get(b.path)?.[field];
+          if (left < right) return -1;
+          if (left > right) return 1;
+        }
+        return 0;
+      };
       const matches = [...documents].filter(([path, value]) => path.startsWith(`${collection}/`) && !path.slice(collection.length + 1).includes('/')
-        && filters.every(([field, op, expected]) => op === '==' && value[field] === expected))
-        .map(([path]) => ({ path, id: path.slice(collection.length + 1) })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
-        .filter(ref => !after || ref.id > after).slice(0, maximum);
+        && filters.every(([field, op, expected]) => op === '==' ? value[field] === expected : op === '>=' && value[field] >= (expected as any)))
+        .map(([path]) => ({ path, id: path.slice(collection.length + 1) })).sort(compare)
+        .filter(ref => !after || (typeof after === 'string' ? ref.id > after : compare(ref, after.ref) > 0)).slice(0, maximum);
       return { docs: matches.map(snapshot) };
     },
   });
@@ -126,6 +141,8 @@ beforeEach(() => {
   adapters.scheduled.mockImplementation(async ({ affiliateIds, kind }) => ({ attempted: kind === 'inactivity_reminder' ? affiliateIds.length : 1,
     counts: { created: kind === 'inactivity_reminder' ? affiliateIds.length : 1 }, intentCount: affiliateIds.length }));
   adapters.deliver.mockResolvedValue({ status: 'accepted' });
+  adapters.review.mockResolvedValue({ review: { mode: 'production_live', activatedAt: ACTIVATED_AT } });
+  adapters.authorize.mockImplementation(async ({ resolved: value }) => value);
 });
 
 describe('server-owned notification runtime orchestration', () => {
@@ -322,5 +339,98 @@ describe('server-owned notification runtime orchestration', () => {
     const output = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, ENV);
     expect(output.status).toBe('failed'); expect(JSON.stringify(output)).not.toMatch(/private|SECRET|@/);
     expect(h.writes).toEqual([]); expect(adapters.deliver).not.toHaveBeenCalled();
+  });
+});
+
+function productionHarness() {
+  const h = harness();
+  adapters.sourceGate.mockImplementation((_db, env) => env.AFFILIATE_NOTIFICATION_EVENT_MODE === 'production_held' ? 'held' : 'disabled');
+  adapters.deliveryGate.mockImplementation((_db, env) => ['production_test', 'production_live'].includes(env.AFFILIATE_NOTIFICATION_DELIVERY_MODE) ? 'allowed' : 'disabled');
+  h.documents.set('site_configs/affiliate_notifications', { enabled: true, revision: 1,
+    templates: [{ eventType: 'new_commission', enabled: true }] });
+  return h;
+}
+
+function addOperationalCommission(h: ReturnType<typeof harness>, id: string, createdAt = '2026-10-24T09:00:00.000Z') {
+  h.documents.set(`affiliate_commissions/${id}`, { id, createdAt, status: 'confirmed', preservedAmount: 75 });
+}
+
+describe('production reviewed runtime boundaries and bounded recovery', () => {
+  it.each(['prepare', 'dispatch'] as const)('production_test never runs an ordinary %s job or reads its audience', async mode => {
+    const h = productionHarness(); adapters.review.mockResolvedValue({ review: { mode: 'production_test', activatedAt: ACTIVATED_AT } });
+    const env = { ...PRODUCTION_ENV, AFFILIATE_NOTIFICATION_DELIVERY_MODE: 'production_test' };
+    expect(await runAffiliateNotificationJob({ db: h.client, mode, now: NOW }, env)).toMatchObject({ status: 'blocked', attempted: 0 });
+    const status = await getAffiliateNotificationRuntimeStatus({ db: h.client, now: NOW }, env);
+    expect(status).toMatchObject({ status: 'disabled', environmentMode: 'production_test', sampledDeliveries: 0 });
+    expect(h.queries).toEqual([]); expect(h.writes).toEqual([]); expect(h.db.getAll).not.toHaveBeenCalled();
+    expect(adapters.committed).not.toHaveBeenCalled(); expect(adapters.deliver).not.toHaveBeenCalled();
+  });
+
+  it.each(['prepare', 'dispatch'] as const)('a missing current review blocks %s before operational reads or leases', async mode => {
+    const h = productionHarness(); adapters.review.mockResolvedValue(null);
+    expect((await runAffiliateNotificationJob({ db: h.client, mode, now: NOW }, PRODUCTION_ENV)).status).toBe('blocked');
+    expect(h.queries).toEqual([]); expect(h.writes).toEqual([]); expect(h.db.getAll).not.toHaveBeenCalled();
+    expect(adapters.deliver).not.toHaveBeenCalled();
+  });
+
+  it('uses six-row bounded timestamp/ID pages, preserves same-time siblings and never edits finances', async () => {
+    const h = productionHarness(); const originalPartner = structuredClone(h.documents.get('affiliates/partner-one'));
+    for (let i = 1; i <= 7; i++) addOperationalCommission(h, `sale-${i}`);
+    addOperationalCommission(h, 'historical', '2026-10-23T09:00:00.000Z');
+    const originalSales = structuredClone([...h.documents].filter(([path]) => path.startsWith('affiliate_commissions/')));
+    const first = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    expect(first).toMatchObject({ status: 'completed', scanned: 5, attempted: 5, hasMore: true });
+    const cursor = [...h.documents].find(([path]) => path.startsWith(`${COLLECTION}/runtime_operational_`))!;
+    expect(cursor[1]).toMatchObject({ afterKey: 'sale-5', afterCreatedAt: '2026-10-24T09:00:00.000Z' });
+    const second = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    expect(second).toMatchObject({ status: 'completed', scanned: 2, attempted: 2 });
+    expect(adapters.committed.mock.calls.map(([input]) => input.sourceId)).toEqual(Array.from({ length: 7 }, (_, i) => `sale-${i + 1}`));
+    expect(h.documents.get(cursor[0])).toMatchObject({ afterKey: null, afterCreatedAt: null });
+    const pages = h.queries.filter(query => query.collection === 'affiliate_commissions');
+    expect(pages).toHaveLength(2);
+    expect(pages.every(query => query.maximum === 6 && query.order?.join(',') === 'createdAt,__name__')).toBe(true);
+    expect(h.documents.get('affiliates/partner-one')).toEqual(originalPartner);
+    expect([...h.documents].filter(([path]) => path.startsWith('affiliate_commissions/'))).toEqual(originalSales);
+    expect(adapters.deliver).not.toHaveBeenCalled();
+  });
+
+  it('a failed source is retried before cursor advancement, with deterministic already-created results preserved', async () => {
+    const h = productionHarness(); for (let i = 1; i <= 3; i++) addOperationalCommission(h, `sale-${i}`);
+    adapters.committed.mockResolvedValueOnce({ status: 'created', intentCount: 1 })
+      .mockResolvedValueOnce({ status: 'failed', intentCount: 0 });
+    const first = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    expect(first).toMatchObject({ status: 'failed', attempted: 2, hasMore: true, counts: { created: 1, failed: 1 } });
+    const cursor = [...h.documents].find(([path]) => path.startsWith(`${COLLECTION}/runtime_operational_`))!;
+    expect(cursor[1]).toMatchObject({ afterKey: 'sale-1', afterCreatedAt: '2026-10-24T09:00:00.000Z' });
+    expect((await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV)).status).toBe('completed');
+    expect(adapters.committed.mock.calls.map(([input]) => input.sourceId)).toEqual(['sale-1', 'sale-2', 'sale-2', 'sale-3']);
+    expect(adapters.deliver).not.toHaveBeenCalled();
+  });
+
+  it.each(['edited', 'deleted'] as const)('fails closed on a %s timestamp anchor without silently skipping the next page', async mutation => {
+    const h = productionHarness(); for (let i = 1; i <= 7; i++) addOperationalCommission(h, `sale-${i}`);
+    await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    if (mutation === 'deleted') h.documents.delete('affiliate_commissions/sale-5');
+    else addOperationalCommission(h, 'sale-5', '2026-10-24T09:30:00.000Z');
+    adapters.committed.mockClear();
+    const outcome = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    expect(outcome.status).toBe('conflict'); expect(adapters.committed).not.toHaveBeenCalled();
+    const cursor = [...h.documents].find(([path]) => path.startsWith(`${COLLECTION}/runtime_operational_`))!;
+    expect(cursor[1]).toMatchObject({ afterKey: 'sale-5', afterCreatedAt: '2026-10-24T09:00:00.000Z' });
+    expect(cursor[1].leaseToken).toBeUndefined();
+  });
+
+  it('cycles only the reviewed window to catch late commits without claiming createdAt is a commit watermark', async () => {
+    const h = productionHarness(); addOperationalCommission(h, 'sale-z');
+    const seen = new Set<string>(); adapters.committed.mockImplementation(async ({ sourceId }) => {
+      const exists = seen.has(sourceId); seen.add(sourceId);
+      return { status: exists ? 'existing' : 'created', intentCount: exists ? 0 : 1 };
+    });
+    await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    addOperationalCommission(h, 'late-sale-a', '2026-10-24T08:30:00.000Z');
+    const next = await runAffiliateNotificationJob({ db: h.client, mode: 'prepare', now: NOW }, PRODUCTION_ENV);
+    expect(next).toMatchObject({ status: 'completed', counts: { created: 1, existing: 1 }, intentCount: 1 });
+    expect(adapters.committed.mock.calls.map(([input]) => input.sourceId)).toEqual(['sale-z', 'late-sale-a', 'sale-z']);
+    expect(adapters.deliver).not.toHaveBeenCalled();
   });
 });
