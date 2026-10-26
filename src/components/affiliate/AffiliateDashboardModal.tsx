@@ -71,9 +71,13 @@ import {
 import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/affiliateTerms.js';
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 import { selectLiteraryCircleOnboardingPieces } from '../../utils/literaryCircleOnboarding.js';
+import { PortalGuideLoadBoundary, PortalGuideLoading } from '../guides/PortalGuideLoadBoundary.js';
 
 const AffiliateNotificationPreferencesPanel = React.lazy(
   () => import('./AffiliateNotificationPreferencesPanel.js'),
+);
+const AffiliatePortalGuide = React.lazy(
+  () => import('./AffiliatePortalGuide.js'),
 );
 
 interface AffiliateDashboardModalProps {
@@ -94,6 +98,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   onLogout
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
+  const [showPortalGuide, setShowPortalGuide] = useState(false);
   const [data, setData] = useState<AffiliateDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -357,6 +362,8 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       // Fresh financial reads are explicit: open, successful actions, or Refresh.
       // A hidden repeating ledger poll wastes the shared Spark read allowance.
       void loadDashboard();
+    } else {
+      setShowPortalGuide(false);
     }
     return () => { dashboardRequestIdRef.current += 1; };
   }, [isOpen]);
@@ -712,6 +719,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   });
 
   return (
+    <>
     <div 
       id="affiliate-dashboard-modal-backdrop"
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/85 backdrop-blur-md overflow-y-auto"
@@ -752,17 +760,28 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                   </span>
                 ) : (
                   <span className="px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 font-mono text-[10px]">
-                    15% Flatbed Rate
+                    Current {commissionRate}% Rate
                   </span>
                 )}
               </div>
               <p className="text-xs text-slate-400 font-mono mt-0.5">
-                Commission Rate: <strong className="text-emerald-400 font-bold">{commissionRate}%</strong> per verified monograph purchase • Attribution: {data?.settings?.attributionDays || 30} Days
+                Commission Rate: <strong className="text-emerald-400 font-bold">{commissionRate}%</strong> on eligible verified purchases • Referral: one eligible checkout journey
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 self-end sm:self-center flex-wrap">
+            <button
+              id="affiliate-portal-guide-btn"
+              type="button"
+              onClick={() => setShowPortalGuide(true)}
+              aria-haspopup="dialog"
+              aria-expanded={showPortalGuide}
+              className="flex min-h-11 items-center gap-1.5 rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-3 py-2 text-xs font-mono text-cyan-100 transition-colors hover:bg-cyan-400/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+            >
+              <HelpCircle aria-hidden="true" className="h-4 w-4" />
+              <span>Guide &amp; Demo</span>
+            </button>
             <button
               onClick={handleTestCoinDrop}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-950/40 hover:bg-amber-900/60 border border-amber-700/60 text-amber-300 hover:text-white text-xs font-mono transition-all cursor-pointer shadow-sm"
@@ -1114,7 +1133,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         {data?.clicks?.toLocaleString() || 0}
                       </p>
                       <p className="text-[10px] text-slate-500 font-mono mt-0.5">
-                        {data?.uniqueVisitors || 0} unique visitors
+                        {data?.uniqueVisitors || 0} estimated unique visitors
                       </p>
                     </div>
 
@@ -1128,7 +1147,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                         {data?.totalConfirmedSales || 0}
                       </p>
                       <p className="text-[10px] text-emerald-400 font-mono mt-0.5">
-                        {data?.clicks ? ((data.totalConfirmedSales / data.clicks) * 100).toFixed(1) : 0}% conv. rate
+                        Verified transactions · not distinct readers
                       </p>
                     </div>
 
@@ -1200,7 +1219,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                           Share this link anywhere readers congregate
                         </h3>
                         <p className="text-xs text-slate-300 mt-1 max-w-xl">
-                          Anyone who visits via this link receives a 30-day attribution cookie. When they purchase any monograph, your {commissionRate}% commission is automatically logged in real-time.
+                          Share your personal link to introduce a reader in their current browser session. Single-use attribution is bound to one eligible checkout journey; only confirmed payment earns commission. Later independent visits do not earn lifetime commissions. Recorded sales use the applicable verified rate.
                         </p>
                       </div>
 
@@ -1686,7 +1705,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                       <ShoppingBag className="w-8 h-8 mx-auto text-slate-600 mb-2" />
                       <p className="font-semibold text-slate-300">No matching referral sales found</p>
                       <p className="text-slate-500 mt-1">
-                        Transactions will appear here instantly when readers purchase via your referral link.
+                        Eligible transactions appear after payment and referral attribution are verified. Use Refresh to check the latest records.
                       </p>
                     </div>
                   ) : (
@@ -2211,5 +2230,17 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
         )}
       </div>
     </div>
+    {showPortalGuide ? (
+      <PortalGuideLoadBoundary onClose={() => setShowPortalGuide(false)}>
+      <React.Suspense fallback={<PortalGuideLoading onClose={() => setShowPortalGuide(false)} />}>
+        <AffiliatePortalGuide
+          open={showPortalGuide}
+          onClose={() => setShowPortalGuide(false)}
+          navigationNotice="This guide never switches your live dashboard tab. Close it, save any unfinished edits, then choose the named tab yourself. Programme terms and access checks still apply."
+        />
+      </React.Suspense>
+      </PortalGuideLoadBoundary>
+    ) : null}
+    </>
   );
 };

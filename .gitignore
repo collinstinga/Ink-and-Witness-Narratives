@@ -7,6 +7,14 @@ coverage/
 *.tmp
 *.tmp.*
 data/
+# These reviewed files are public client-side help, not runtime database data.
+!src/data/
+src/data/*
+!src/data/portalGuideTypes.ts
+!src/data/affiliatePortalGuide.ts
+!src/data/affiliatePortalGuide.test.ts
+!src/data/writerPortalGuide.ts
+!src/data/writerPortalGuide.test.ts
 uploads/
 .env*
 !.env.example

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react';
 import { 
   LayoutDashboard, 
   FileText, 
@@ -60,6 +60,9 @@ import { AffiliatesAdminTab } from './AffiliatesAdminTab.js';
 import { WriterNewsletter } from './WriterNewsletter.js';
 import { WriterReaderExperience } from './WriterReaderExperience.js';
 import { WriterSubscriptions } from './WriterSubscriptions.js';
+import { PortalGuideLoadBoundary, PortalGuideLoading } from '../guides/PortalGuideLoadBoundary.js';
+
+const WriterPortalGuide = lazy(() => import('./WriterPortalGuide.js').then(module => ({ default: module.WriterPortalGuide })));
 
 interface WriterDashboardProps {
   onClose: () => void;
@@ -97,6 +100,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
   const [currentTab, setCurrentTab] = useState<WriterNavTab>(initialTab || 'overview');
   const [currentSubTab, setCurrentSubTab] = useState<string | undefined>(initialSubTab);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   // Sync with initialTab prop if it changes externally
   useEffect(() => {
@@ -412,7 +416,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
     <div id="writer-dashboard-root" className="fixed inset-0 z-50 bg-[#050811] text-slate-100 flex flex-col md:flex-row overflow-hidden font-sans">
       
       {/* Mobile Top Header */}
-      <header className="md:hidden flex items-center justify-between px-4 py-3 bg-[#080d1a] border-b border-slate-800">
+      <header className="md:hidden flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-[#080d1a] border-b border-slate-800">
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold font-serif">
             IW
@@ -421,6 +425,15 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            id="mobile-writer-guide-btn"
+            type="button"
+            onClick={() => setGuideOpen(true)}
+            aria-haspopup="dialog"
+            className="min-h-11 rounded-lg border border-sky-800 bg-sky-950 px-2.5 py-1.5 text-[11px] font-mono text-sky-200"
+          >
+            Guide &amp; Demo
+          </button>
           <button
             id="mobile-email-terminal-btn"
             onClick={() => handleTabChange('newsletter')}
@@ -527,6 +540,17 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
         {/* Navigation Items */}
         <div className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+
+          <button
+            id="sidebar-writer-guide-btn"
+            type="button"
+            onClick={() => { setGuideOpen(true); setMobileNavOpen(false); }}
+            aria-haspopup="dialog"
+            className="flex min-h-11 w-full items-center gap-2.5 rounded-xl border border-sky-800/60 bg-sky-950/40 px-3 py-2.5 text-xs font-semibold text-sky-200 hover:bg-sky-950"
+          >
+            <BookOpen className="h-4 w-4" aria-hidden="true" />
+            <span>Guide &amp; Demo</span>
+          </button>
           
           {/* Overview */}
           <button
@@ -886,6 +910,18 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
       {/* Main Content Area */}
       <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto">
+          <div className="mb-4 hidden justify-end md:flex">
+            <button
+              id="desktop-writer-guide-btn"
+              type="button"
+              onClick={() => setGuideOpen(true)}
+              aria-haspopup="dialog"
+              className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-sky-800 bg-sky-950/40 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-950"
+            >
+              <BookOpen className="h-4 w-4" aria-hidden="true" />
+              Guide &amp; Demo
+            </button>
+          </div>
           {currentTab === 'overview' && (
             <WriterOverview
               stats={stats}
@@ -1048,6 +1084,14 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
         articles={pieces}
         onCategoriesUpdated={(updated) => setCategories(updated)}
       />
+
+      {guideOpen ? (
+        <PortalGuideLoadBoundary onClose={() => setGuideOpen(false)}>
+          <Suspense fallback={<PortalGuideLoading onClose={() => setGuideOpen(false)} />}>
+            <WriterPortalGuide open={guideOpen} onClose={() => setGuideOpen(false)} />
+          </Suspense>
+        </PortalGuideLoadBoundary>
+      ) : null}
 
     </div>
   );
