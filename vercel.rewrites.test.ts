@@ -30,7 +30,7 @@ describe('Vercel affiliate routing', () => {
 });
 
 describe('Vercel static asset caching', () => {
-  it('caches only content-hashed Vite assets immutably in the browser', () => {
+  it('caches versioned static assets and self-hosted fonts, never live pages or APIs', () => {
     const config = JSON.parse(
       readFileSync(new URL('./vercel.json', import.meta.url), 'utf8')
     ) as { headers?: VercelHeaderRule[] };
@@ -42,6 +42,10 @@ describe('Vercel static asset caching', () => {
     );
 
     expect(cacheControlRules).toEqual([
+      {
+        source: '/fonts/(.*)',
+        value: 'public, max-age=31536000, immutable'
+      },
       {
         source: '/assets/(.*)',
         value: 'public, max-age=31536000, immutable'
