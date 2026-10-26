@@ -12,6 +12,7 @@ import {
 import { Article, AuthorProfile, Category, WriterNavTab, User, LibraryArticle, ContentBundle, PaymentTransaction, SubscriptionPlan } from './types.js';
 import { api, getStoredTokens } from './utils/api.js';
 import { applyFavicon } from './utils/favicon.js';
+import { responsiveImageUrl } from './utils/responsiveImage.js';
 import { resolveDirectWriterTab } from './utils/writerNavigation.js';
 
 import { Navbar, PublicViewType } from './components/Navbar.js';
@@ -935,7 +936,9 @@ export default function App() {
       ]);
       if (authorData) {
         setAuthor(authorData);
-        applyFavicon(authorData?.faviconUrl);
+        const originalFavicon = authorData.faviconUrl;
+        const deliveredFavicon = originalFavicon ? responsiveImageUrl(originalFavicon, 64) : originalFavicon;
+        applyFavicon(deliveredFavicon, deliveredFavicon !== originalFavicon ? 'image/webp' : undefined);
       }
       if (articlesData && articlesData.length > 0) {
         setArticles(articlesData);

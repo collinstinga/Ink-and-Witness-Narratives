@@ -3,6 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Start the same fresh initial request while the application downloads.
+         This is a one-use handoff, never a persistent publishing-data cache. -->
+    <script id="initial-public-bootstrap">
+      (function() {
+        if (location.pathname !== '/' || typeof fetch !== 'function' || typeof AbortController !== 'function') return;
+        try {
+          var controller = new AbortController();
+          var slot = { startedAt: Date.now() };
+          var timer;
+          function cleanup() {
+            clearTimeout(timer);
+            window.removeEventListener('pagehide', discard);
+          }
+          function discard() {
+            cleanup();
+            if (window.__IW_INITIAL_BOOTSTRAP__ === slot) delete window.__IW_INITIAL_BOOTSTRAP__;
+            controller.abort();
+          }
+          var request = fetch('/api/public/bootstrap', {
+            cache: 'no-store', credentials: 'include', signal: controller.signal
+          }).then(function(response) { return { response: response }; }, function() { return { response: null }; });
+          slot.take = function() {
+            if (window.__IW_INITIAL_BOOTSTRAP__ !== slot) return null;
+            delete window.__IW_INITIAL_BOOTSTRAP__;
+            cleanup();
+            return request;
+          };
+          slot.cancel = discard;
+          window.__IW_INITIAL_BOOTSTRAP__ = slot;
+          timer = setTimeout(discard, 15000);
+          window.addEventListener('pagehide', discard, { once: true });
+        } catch (_) { /* The normal application fetch remains the fallback. */ }
+      })();
+    </script>
     
     <!-- Sandbox & Dev WebSocket / Rejection Guard -->
     <script>

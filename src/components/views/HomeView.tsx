@@ -337,9 +337,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
   // pass shelf or hero when the writer's saved layout arrives. Reserve the
   // first viewport until this same fresh bootstrap supplies the real layout.
   // Subsequent refreshes/deep links keep the already-rendered page mounted.
+  // Distinct branch keys also prevent React from recycling the loading shell
+  // into the announcement banner and animating its old dimensions into place.
   if (!homepageInitialized) {
     return (
-      <div id="home-view" aria-busy="true" className="min-h-[100svh] px-6 pb-16 pt-32">
+      <div key="homepage-loading" id="home-view" aria-busy="true" className="min-h-[100svh] px-6 pb-16 pt-32">
         <div className="mx-auto max-w-4xl space-y-5" role="status">
           <p className="font-mono text-xs text-slate-400">Opening the literary library…</p>
           <div aria-hidden="true" className="h-10 w-2/3 rounded bg-slate-800/40" />
@@ -352,11 +354,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const firstVisibleSection = normalizedSections.find(section => section.isVisible)?.id;
 
   return (
-    <div id="home-view">
+    <div key="homepage-ready" id="home-view">
       {activeBanner && (
         <div
           id="home-announcement-banner"
-          className={`relative z-30 flex w-full items-center justify-center gap-3 border-b px-4 py-2.5 text-center text-xs font-medium transition-all ${
+          className={`relative z-30 flex w-full items-center justify-center gap-3 border-b px-4 py-2.5 text-center text-xs font-medium ${
             activeBanner.bgStyle === 'indigo'
               ? 'border-indigo-800 bg-indigo-950 text-indigo-200'
               : activeBanner.bgStyle === 'amber'

@@ -1,3 +1,4 @@
+import { discardEarlyPublicBootstrap, PUBLIC_BOOTSTRAP_PATH, takeEarlyPublicBootstrap } from './earlyPublicBootstrap.js';
 import { 
   Article,
   ArticleMutationResponse,
@@ -214,7 +215,13 @@ export async function safeFetchJson<T = any>(
     }
   };
   try {
-    res = await fetch(url, mergedOptions);
+    // Only the exact plain request used by getPublicBootstrap may adopt this
+    // credentialed response. Never reuse it for custom/anonymous requests.
+    const initialResponse = url === PUBLIC_BOOTSTRAP_PATH && options?.cache === 'no-store' &&
+      Object.keys(options).length === 1
+      ? takeEarlyPublicBootstrap()
+      : undefined;
+    res = await (initialResponse || fetch(url, mergedOptions));
   } catch (networkErr: any) {
     console.error("Network fetch failed for", url, networkErr);
     throw new Error("Unable to connect to the server. Please check your internet connection and try again.");
@@ -326,12 +333,13 @@ let publicBootstrapRequest: Promise<PublicBootstrapResponse> | null = null;
 
 function invalidatePublicBootstrap(): void {
   publicBootstrapRequest = null;
+  discardEarlyPublicBootstrap();
 }
 
 function getPublicBootstrap(): Promise<PublicBootstrapResponse> {
   if (!publicBootstrapRequest) {
     const request = safeFetchJson<PublicBootstrapResponse>(
-      '/api/public/bootstrap',
+      PUBLIC_BOOTSTRAP_PATH,
       { cache: 'no-store' },
       'The latest site content is temporarily unavailable.'
     );
