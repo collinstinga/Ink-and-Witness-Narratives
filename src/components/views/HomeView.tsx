@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowRight, Feather, Sparkles } from 'lucide-react';
 import { Article, AuthorProfile, Category, ContentBundle, ContentCollection, HomepageConfig, SubscriptionPlan } from '../../types.js';
 import { api } from '../../utils/api.js';
+import { responsiveImageUrl, responsiveImageSrcSet } from '../../utils/responsiveImage.js';
 import { normalizeHomepageSections, type HomepageSectionId } from '../../homepageSections.js';
 import { HomepageDiscovery } from '../HomepageDiscovery.js';
 import type { HomepageBundle } from '../HomepageBundles.js';
@@ -61,6 +62,7 @@ export const parseHomepageDeepLink = (
 };
 
 interface HomepageHeroProps {
+  priority: boolean;
   backgroundUrl: string;
   background: HomepageConfig['welcomeBackground'];
   overlayOpacity: number;
@@ -72,6 +74,7 @@ interface HomepageHeroProps {
 }
 
 const HomepageHero: React.FC<HomepageHeroProps> = ({
+  priority,
   backgroundUrl,
   background,
   overlayOpacity,
@@ -88,7 +91,14 @@ const HomepageHero: React.FC<HomepageHeroProps> = ({
     {backgroundUrl && (
       <div className="pointer-events-none absolute inset-0 z-0 h-full w-full select-none overflow-hidden">
         <img
-          src={backgroundUrl}
+          src={responsiveImageUrl(backgroundUrl, 1280)}
+          srcSet={responsiveImageSrcSet(backgroundUrl, [480, 640, 960, 1280, 1600, 1920])}
+          sizes="100vw"
+          width={1920}
+          height={1080}
+          loading={priority ? 'eager' : 'lazy'}
+          fetchPriority={priority ? 'high' : 'auto'}
+          decoding="async"
           alt="Ink & Witness Narratives"
           referrerPolicy="no-referrer"
           style={{
@@ -152,7 +162,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const [homepageCollections, setHomepageCollections] = useState<ContentCollection[] | null>(null);
   const [homepagePieces, setHomepagePieces] = useState<Article[] | null>(null);
   const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
+  const [newsletterConfig, setNewsletterConfig] = useState<Awaited<ReturnType<typeof api.getNewsletterConfig>> | null>(null);
   const [homepageLoaded, setHomepageLoaded] = useState(false);
+  const [homepageInitialized, setHomepageInitialized] = useState(false);
   const [requestedDeepLink, setRequestedDeepLink] = useState<HomepageDeepLink | null>(deepLink || null);
 
   useEffect(() => {
@@ -168,7 +180,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
     const fetchHomepage = async () => {
       const requestId = ++requestSequence;
       try {
-        const data = await api.getHomepageData();
+        const [data, freshNewsletterConfig] = await Promise.all([
+          api.getHomepageData(),
+          api.getNewsletterConfig(),
+        ]);
         let nextBundles = data.bundles || [];
         let nextCollections = data.collections || [];
         const destination = requestedDeepLink;
@@ -214,7 +229,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
           setHomepageCollections(nextCollections);
           setHomepagePieces(data.pieces || []);
           setSubscriptionPlans(data.subscriptionPlans || []);
+          setNewsletterConfig(freshNewsletterConfig || null);
           setHomepageLoaded(true);
+          setHomepageInitialized(true);
         }
       } catch (error) {
         if (!disposed && requestId === requestSequence) {
@@ -224,6 +241,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
           setHomepagePieces(null);
           setSubscriptionPlans([]);
           setHomepageLoaded(true);
+          setHomepageInitialized(true);
         }
       }
     };
@@ -315,6 +333,24 @@ export const HomeView: React.FC<HomeViewProps> = ({
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  // Do not paint the default section order and then move an entire newsletter,
+  // pass shelf or hero when the writer's saved layout arrives. Reserve the
+  // first viewport until this same fresh bootstrap supplies the real layout.
+  // Subsequent refreshes/deep links keep the already-rendered page mounted.
+  if (!homepageInitialized) {
+    return (
+      <div id="home-view" aria-busy="true" className="min-h-[100svh] px-6 pb-16 pt-32">
+        <div className="mx-auto max-w-4xl space-y-5" role="status">
+          <p className="font-mono text-xs text-slate-400">Opening the literary library…</p>
+          <div aria-hidden="true" className="h-10 w-2/3 rounded bg-slate-800/40" />
+          <div aria-hidden="true" className="h-32 rounded-2xl bg-slate-900/40" />
+        </div>
+      </div>
+    );
+  }
+
+  const firstVisibleSection = normalizedSections.find(section => section.isVisible)?.id;
+
   return (
     <div id="home-view">
       {activeBanner && (
@@ -358,6 +394,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
         onInitialDestinationHandled={onDeepLinkHandled}
         heroSection={(
           <HomepageHero
+            priority={firstVisibleSection === 'hero'}
             backgroundUrl={backgroundUrl}
             background={bgSettings}
             overlayOpacity={overlayOpacity}
@@ -370,6 +407,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
         )}
         subscriptionsSection={(
           <HomepageReaderPasses
+            prioritizeFirstCover={firstVisibleSection === 'subscriptions'}
             plans={subscriptionPlans}
             config={homepageConfig}
             onChoosePlan={onPurchaseSubscription}
@@ -378,7 +416,11 @@ export const HomeView: React.FC<HomeViewProps> = ({
           />
         )}
         newsletterSection={(
-          <ReaderCommunityHub config={homepageConfig} />
+          <ReaderCommunityHub
+            config={homepageConfig}
+            newsletterConfig={newsletterConfig}
+            categories={categories}
+          />
         )}
       />
     </div>

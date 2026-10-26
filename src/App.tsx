@@ -16,18 +16,21 @@ import { resolveDirectWriterTab } from './utils/writerNavigation.js';
 
 import { Navbar, PublicViewType } from './components/Navbar.js';
 import { HomeView, parseHomepageDeepLink, type HomepageDeepLink } from './components/views/HomeView.js';
-import { AllPiecesView } from './components/views/AllPiecesView.js';
-import { AboutAuthorView } from './components/views/AboutAuthorView.js';
-import { HowToPayView } from './components/views/HowToPayView.js';
-
-import { ArticleReaderModal } from './components/ArticleReaderModal.js';
-import { MpesaCheckoutModal } from './components/MpesaCheckoutModal.js';
-import { SubscriptionCheckoutModal } from './components/SubscriptionCheckoutModal.js';
-import { MyLibraryModal } from './components/MyLibraryModal.js';
-import { TipAuthorModal } from './components/TipAuthorModal.js';
-import { SupportModal } from './components/SupportModal.js';
-import { SignInModal } from './components/auth/SignInModal.js';
 import { initReferralTracking } from './utils/affiliateReferral.js';
+
+// Keep reading, payment and account code off the initial public-home path.
+// These modules mount only when requested; their existing server permissions
+// and payment verification remain unchanged.
+const AllPiecesView = React.lazy(() => import('./components/views/AllPiecesView.js').then(m => ({ default: m.AllPiecesView })));
+const AboutAuthorView = React.lazy(() => import('./components/views/AboutAuthorView.js').then(m => ({ default: m.AboutAuthorView })));
+const HowToPayView = React.lazy(() => import('./components/views/HowToPayView.js').then(m => ({ default: m.HowToPayView })));
+const ArticleReaderModal = React.lazy(() => import('./components/ArticleReaderModal.js').then(m => ({ default: m.ArticleReaderModal })));
+const MpesaCheckoutModal = React.lazy(() => import('./components/MpesaCheckoutModal.js').then(m => ({ default: m.MpesaCheckoutModal })));
+const SubscriptionCheckoutModal = React.lazy(() => import('./components/SubscriptionCheckoutModal.js').then(m => ({ default: m.SubscriptionCheckoutModal })));
+const MyLibraryModal = React.lazy(() => import('./components/MyLibraryModal.js').then(m => ({ default: m.MyLibraryModal })));
+const TipAuthorModal = React.lazy(() => import('./components/TipAuthorModal.js').then(m => ({ default: m.TipAuthorModal })));
+const SupportModal = React.lazy(() => import('./components/SupportModal.js').then(m => ({ default: m.SupportModal })));
+const SignInModal = React.lazy(() => import('./components/auth/SignInModal.js').then(m => ({ default: m.SignInModal })));
 
 const WriterDashboard = React.lazy(async () => {
   const module = await import('./components/writer/WriterDashboard.js');
@@ -39,7 +42,23 @@ const AffiliatePortal = React.lazy(async () => {
   return { default: module.AffiliatePortal };
 });
 
-function DeferredFeatureFallback({ label }: { label: string }) {
+function DeferredFeatureDismiss({ onDismiss }: { onDismiss?: () => void }) {
+  useEffect(() => {
+    if (!onDismiss) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onDismiss();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onDismiss]);
+  return onDismiss ? (
+    <button type="button" onClick={onDismiss} className="mt-4 rounded-lg border border-slate-600 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">
+      Close and return
+    </button>
+  ) : null;
+}
+
+function DeferredFeatureFallback({ label, onDismiss }: { label: string; onDismiss?: () => void }) {
   return (
     <div
       className="fixed inset-0 z-[120] grid place-items-center bg-[#080d17]/95 px-6 text-slate-100"
@@ -49,6 +68,7 @@ function DeferredFeatureFallback({ label }: { label: string }) {
       <div className="rounded-2xl border border-sky-500/30 bg-slate-950/90 px-6 py-5 text-center shadow-2xl">
         <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
         <p className="font-mono text-sm text-sky-200">Loading {label}…</p>
+        <DeferredFeatureDismiss onDismiss={onDismiss} />
       </div>
     </div>
   );
@@ -57,6 +77,7 @@ function DeferredFeatureFallback({ label }: { label: string }) {
 type DeferredFeatureBoundaryProps = {
   label: string;
   children: React.ReactNode;
+  onDismiss?: () => void;
 };
 
 class DeferredFeatureBoundary extends React.Component<
@@ -93,6 +114,7 @@ class DeferredFeatureBoundary extends React.Component<
             >
               Reload safely
             </button>
+            <DeferredFeatureDismiss onDismiss={this.props.onDismiss} />
           </div>
         </div>
       );
@@ -100,6 +122,16 @@ class DeferredFeatureBoundary extends React.Component<
 
     return this.props.children;
   }
+}
+
+function DeferredFeature({ label, children, onDismiss }: DeferredFeatureBoundaryProps) {
+  return (
+    <DeferredFeatureBoundary label={label} onDismiss={onDismiss}>
+      <React.Suspense fallback={<DeferredFeatureFallback label={label} onDismiss={onDismiss} />}>
+        {children}
+      </React.Suspense>
+    </DeferredFeatureBoundary>
+  );
 }
 
 // Primary Navigation & History State Interface
@@ -1103,6 +1135,7 @@ export default function App() {
         )}
 
         {currentView === 'all-pieces' && (
+          <DeferredFeature label="Explore Pieces" onDismiss={() => handleNavigateView('home')}>
           <AllPiecesView
             articles={articles}
             categories={categories}
@@ -1122,22 +1155,27 @@ export default function App() {
               navigate({ search: q }, 'replace');
             }}
           />
+          </DeferredFeature>
         )}
 
         {currentView === 'about' && (
+          <DeferredFeature label="About the Author" onDismiss={() => handleNavigateView('home')}>
           <AboutAuthorView
             author={author}
             onExplorePieces={() => handleNavigateView('all-pieces')}
             onSupportAuthor={() => handleOpenTip(null)}
           />
+          </DeferredFeature>
         )}
 
         {currentView === 'how-to-pay' && (
+          <DeferredFeature label="How to Read & Pay" onDismiss={() => handleNavigateView('home')}>
           <HowToPayView
             onExplorePieces={() => handleNavigateView('all-pieces')}
             onSupportAuthor={() => handleOpenTip(null)}
             onOpenSupport={handleOpenSupport}
           />
+          </DeferredFeature>
         )}
       </main>
 
@@ -1292,6 +1330,7 @@ export default function App() {
 
       {/* MODALS */}
       {/* 1. Article Reader Modal */}
+      {activeReaderArticle && <DeferredFeature label="the reader" onDismiss={handleCloseReader}>
       <ArticleReaderModal
         article={activeReaderArticle}
         isOpen={Boolean(activeReaderArticle)}
@@ -1325,8 +1364,10 @@ export default function App() {
           )
         }
       />
+      </DeferredFeature>}
 
       {/* 2. M-Pesa Checkout Modal */}
+      {activeCheckoutArticle && <DeferredFeature label="M-Pesa checkout" onDismiss={handleCloseCheckout}>
       <MpesaCheckoutModal
         article={activeCheckoutArticle}
         isOpen={Boolean(activeCheckoutArticle)}
@@ -1334,15 +1375,19 @@ export default function App() {
         onPaymentSuccess={handlePaymentSuccess}
         onOpenSupport={handleOpenSupport}
       />
+      </DeferredFeature>}
 
+      {activeSubscriptionPlan && <DeferredFeature label="Reader Pass checkout" onDismiss={() => setActiveSubscriptionPlan(null)}>
       <SubscriptionCheckoutModal
         plan={activeSubscriptionPlan}
         isOpen={Boolean(activeSubscriptionPlan)}
         onClose={() => setActiveSubscriptionPlan(null)}
         onPaymentSuccess={handleSubscriptionPaymentSuccess}
       />
+      </DeferredFeature>}
 
       {/* 3. My Library Modal */}
+      {isLibraryOpen && <DeferredFeature label="your library" onDismiss={handleCloseLibrary}>
       <MyLibraryModal
         isOpen={isLibraryOpen}
         onClose={handleCloseLibrary}
@@ -1357,8 +1402,10 @@ export default function App() {
           handleNavigateView('all-pieces');
         }}
       />
+      </DeferredFeature>}
 
       {/* 4. Tip Author Modal */}
+      {isTipOpen && <DeferredFeature label="Tip the Author" onDismiss={handleCloseTip}>
       <TipAuthorModal
         isOpen={isTipOpen}
         onClose={handleCloseTip}
@@ -1366,14 +1413,17 @@ export default function App() {
         author={author}
         authorPhone="0705275647"
       />
+      </DeferredFeature>}
 
       {/* 5. Reader Support & Help Desk Modal */}
+      {isSupportOpen && <DeferredFeature label="Reader Support" onDismiss={handleCloseSupport}>
       <SupportModal
         isOpen={isSupportOpen}
         onClose={handleCloseSupport}
         author={author}
         onUnlockedSuccess={handleSupportUnlocked}
       />
+      </DeferredFeature>}
 
       {/* 6. Secure Affiliate & Referral Sales Portal */}
       {isAffiliatePortalOpen && (
@@ -1390,6 +1440,14 @@ export default function App() {
       )}
 
       {/* 7. Unified Authentication Modal (Public /sign-in) */}
+      {isSignInOpen && <DeferredFeature label="sign in" onDismiss={() => {
+        setPendingBundleCheckoutArticle(null);
+        setPendingSubscriptionPlan(null);
+        setIsSignInOpen(false);
+        if (window.location.hash.includes('sign-in') || window.location.hash.includes('signin') || window.location.hash.includes('login')) {
+          navigate({ isSignInOpen: false }, 'replace');
+        }
+      }}>
       <SignInModal
         isOpen={isSignInOpen}
         onClose={() => {
@@ -1402,6 +1460,7 @@ export default function App() {
         }}
         onSuccess={handleAuthSuccess}
       />
+      </DeferredFeature>}
 
     </div>
   );

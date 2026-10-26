@@ -12,6 +12,7 @@ import {
 
 import type { Article, Category, ContentBundle, ContentCollection, HomepageConfig } from '../types.js';
 import { normalizeHomepageSections, type HomepageSectionId } from '../homepageSections.js';
+import { responsiveImageUrl, responsiveImageSrcSet } from '../utils/responsiveImage.js';
 import { HomepageBundles, type HomepageBundle } from './HomepageBundles.js';
 import { buildHomepageLibrarySections, HomepageLibraryGuide } from './HomepageLibraryGuide.js';
 
@@ -339,7 +340,11 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
                 </span>
                 {coverImage ? (
                   <img
-                    src={coverImage}
+                    src={responsiveImageUrl(coverImage, 640)}
+                    srcSet={responsiveImageSrcSet(coverImage, [320, 480, 640, 960])}
+                    sizes="(min-width: 1024px) 360px, (min-width: 640px) 46vw, 92vw"
+                    width={640}
+                    height={400}
                     alt=""
                     loading="lazy"
                     decoding="async"
@@ -403,7 +408,11 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
                   className="relative block aspect-[16/9] overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-400"
                 >
                   <img
-                    src={article.coverImage || FALLBACK_COVER}
+                    src={responsiveImageUrl(article.coverImage || FALLBACK_COVER, 640)}
+                    srcSet={responsiveImageSrcSet(article.coverImage || FALLBACK_COVER, [320, 480, 640, 960])}
+                    sizes="(min-width: 1024px) 360px, (min-width: 640px) 46vw, 92vw"
+                    width={640}
+                    height={360}
                     alt=""
                     loading="lazy"
                     decoding="async"
@@ -584,7 +593,9 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
                     className="grid grid-cols-[72px_1fr] gap-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-3 sm:grid-cols-[96px_1fr_auto] sm:items-center"
                   >
                     <img
-                      src={article.coverImage || FALLBACK_COVER}
+                      src={responsiveImageUrl(article.coverImage || FALLBACK_COVER, 320)}
+                      width={96}
+                      height={96}
                       alt=""
                       loading="lazy"
                       decoding="async"

@@ -17,6 +17,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { AuthorProfile, User } from '../types.js';
+import { responsiveImageUrl } from '../utils/responsiveImage.js';
 
 export type PublicViewType = 'home' | 'all-pieces' | 'about' | 'how-to-pay';
 
@@ -96,13 +97,19 @@ export const Navbar: React.FC<NavbarProps> = ({
           <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700/80 overflow-hidden flex items-center justify-center shadow-md group-hover:border-sky-500/50 transition-colors p-0.5">
             {author?.logoUrl ? (
               <img
-                src={author.logoUrl}
+                src={responsiveImageUrl(author.logoUrl, 128)}
+                width={40}
+                height={40}
+                decoding="async"
                 alt="Site Logo"
                 className="max-w-full max-h-full object-contain"
               />
             ) : author?.avatarUrl ? (
               <img
-                src={author.avatarUrl}
+                src={responsiveImageUrl(author.avatarUrl, 128)}
+                width={40}
+                height={40}
+                decoding="async"
                 alt={author.name || "Jake"}
                 className="w-full h-full object-cover"
               />

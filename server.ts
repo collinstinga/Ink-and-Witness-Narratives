@@ -140,6 +140,7 @@ import { verifyPassword, hashPassword, validatePasswordStrength } from "./src/se
 import { publicWriteValidators } from "./src/server/publicWriteSecurity.js";
 import { isAllowedPublicWriteOrigin } from "./src/server/publicWriteOrigin.js";
 import { ImageValidationError, validateImageDataUrl } from "./src/server/imageSecurity.js";
+import { createPersistentAssetHandler } from "./src/server/persistentAssetDelivery.js";
 import { hasUnsafeMpesaSecretUpdate } from "./src/server/mpesaSecretStorage.js";
 import { isManualAccessBearerLicense } from "./src/server/manualAccessSecurity.js";
 import {
@@ -1539,55 +1540,7 @@ export async function createApp() {
     next();
   });
 
-  const servePersistentAsset = async (req: Request, res: Response) => {
-    try {
-      const rawId = req.params.assetId || req.params.filename;
-      const validAssetId = /^[a-zA-Z0-9_-]{1,180}$/;
-      const validLegacyFilename = /^[a-zA-Z0-9_-]{1,170}\.(?:jpe?g|png|webp)$/i;
-      // Vercel's existing /uploads/:filename rewrite reaches this handler as
-      // /api/assets/:assetId. Recognize that exact safe filename grammar in
-      // either parameter; do not generally sanitize arbitrary identifiers.
-      const isLegacyFilename = Boolean(req.params.filename) || validLegacyFilename.test(rawId);
-      if (
-        (!isLegacyFilename && !validAssetId.test(rawId))
-        || (isLegacyFilename && !validLegacyFilename.test(rawId))
-      ) {
-        res.setHeader('Cache-Control', 'private, no-store, max-age=0');
-        return res.status(404).json({ error: 'Image not found.' });
-      }
-      const assetId = isLegacyFilename ? rawId.replace('.', '_') : rawId;
-      const asset = await store.getUploadedAsset(assetId);
-      if (!asset?.dataUrl) return res.status(404).json({ error: 'Image not found.' });
-      // Literary Circle draft artwork is stored beside existing uploaded
-      // images, but it must never inherit this public immutable delivery
-      // contract. Publishing a promotional resource explicitly changes the
-      // asset scope before an affiliate receives a public URL.
-      if (asset.accessScope === 'literary_circle_private') {
-        res.setHeader('Cache-Control', 'private, no-store, max-age=0');
-        res.setHeader('CDN-Cache-Control', 'no-store');
-        res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
-        return res.status(404).json({ error: 'Image not found.' });
-      }
-
-      const image = validateImageDataUrl(asset.dataUrl);
-      res.setHeader('Content-Type', image.mimeType);
-      res.setHeader('Content-Disposition', `inline; filename="${assetId}.${image.extension}"`);
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
-      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-      res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      res.setHeader('Content-Length', String(image.buffer.length));
-      return res.send(image.buffer);
-    } catch (err) {
-      if (err instanceof ImageValidationError) {
-        console.warn('[Assets] Rejected invalid stored image.');
-        return res.status(415).json({ error: 'Stored image is not an approved image type.' });
-      }
-      console.error('[Assets] Failed to serve persistent image:', err);
-      return res.status(503).json({ error: 'Image storage is temporarily unavailable.' });
-    }
-  };
+  const servePersistentAsset = createPersistentAssetHandler(assetId => store.getUploadedAsset(assetId));
 
   app.get('/api/assets/:assetId', servePersistentAsset);
   // Backward-compatible path for image URLs saved before cloud serving.

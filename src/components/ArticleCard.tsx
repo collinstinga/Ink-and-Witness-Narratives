@@ -9,6 +9,7 @@ import {
   Eye
 } from 'lucide-react';
 import { Article } from '../types.js';
+import { responsiveImageUrl, responsiveImageSrcSet } from '../utils/responsiveImage.js';
 
 interface ArticleCardProps {
   article: Article;
@@ -57,7 +58,13 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
       {/* Top Banner / Image */}
       <div className="relative h-44 w-full rounded-t-2xl overflow-hidden bg-slate-950">
         <img 
-          src={article.coverImage || "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=800&q=80"}
+          src={responsiveImageUrl(article.coverImage || "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=800&q=80", 640)}
+          srcSet={responsiveImageSrcSet(article.coverImage || '', [320, 480, 640, 960])}
+          sizes="(min-width: 1024px) 380px, (min-width: 640px) 46vw, 92vw"
+          width={640}
+          height={360}
+          loading="lazy"
+          decoding="async"
           alt={article.title}
           referrerPolicy="no-referrer"
           className="w-full h-full object-cover object-center opacity-65 group-hover:opacity-85 group-hover:scale-105 transition-all duration-500"

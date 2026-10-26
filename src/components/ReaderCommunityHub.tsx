@@ -1,14 +1,16 @@
 import React from 'react';
 import { ArrowUpRight, Mail, MessageCircle, Radio } from 'lucide-react';
 
-import type { HomepageConfig } from '../types.js';
-import { NewsletterSignup } from './NewsletterSignup.js';
+import type { Category, HomepageConfig } from '../types.js';
+import { NewsletterSignup, type NewsletterPublicConfig } from './NewsletterSignup.js';
 
 export interface ReaderCommunityHubProps {
   config?: HomepageConfig | null;
+  newsletterConfig?: NewsletterPublicConfig | null;
+  categories?: Category[];
 }
 
-export const ReaderCommunityHub: React.FC<ReaderCommunityHubProps> = ({ config }) => {
+export const ReaderCommunityHub: React.FC<ReaderCommunityHubProps> = ({ config, newsletterConfig, categories }) => {
   const emailEnabled = config?.communicationEmailEnabled !== false;
   const whatsappEnabled = config?.communicationWhatsappEnabled !== false;
   const channelUrl = config?.communicationWhatsappUrl
@@ -44,7 +46,11 @@ export const ReaderCommunityHub: React.FC<ReaderCommunityHubProps> = ({ config }
                 <Mail className="h-4 w-4" aria-hidden="true" />
                 Email Reader Letters
               </div>
-              <NewsletterSignup variant="compact" />
+              <NewsletterSignup
+                variant="compact"
+                initialConfig={newsletterConfig}
+                initialCategories={categories}
+              />
             </div>
           ) : null}
 

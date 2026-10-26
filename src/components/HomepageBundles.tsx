@@ -2,6 +2,7 @@ import React from 'react';
 import { Check, Eye, Layers3, LibraryBig, ShoppingBag, X } from 'lucide-react';
 
 import type { Article, ContentBundle, HomepageConfig } from '../types.js';
+import { responsiveImageUrl, responsiveImageSrcSet } from '../utils/responsiveImage.js';
 
 export type HomepageBundle = ContentBundle & {
   pieces: Article[];
@@ -102,7 +103,11 @@ export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
                   </span>
                   {coverImage ? (
                     <img
-                      src={coverImage}
+                      src={responsiveImageUrl(coverImage, 640)}
+                      srcSet={responsiveImageSrcSet(coverImage, [320, 480, 640, 960])}
+                      sizes="(min-width: 1024px) 230px, (min-width: 640px) 38vw, 92vw"
+                      width={640}
+                      height={480}
                       alt=""
                       loading="lazy"
                       decoding="async"
@@ -208,7 +213,10 @@ export const HomepageBundles: React.FC<HomepageBundlesProps> = ({
               {activeBundle.pieces.map((piece) => (
                 <article key={piece.id} className="grid grid-cols-[64px_1fr_auto] items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/65 p-3 sm:grid-cols-[88px_1fr_auto] sm:gap-4">
                   <img
-                    src={piece.coverImage || activeBundle.coverImage || ''}
+                    src={responsiveImageUrl(piece.coverImage || activeBundle.coverImage || '', 320)}
+                    width={88}
+                    height={88}
+                    decoding="async"
                     alt=""
                     loading="lazy"
                     className="h-16 w-16 rounded-xl bg-slate-900 object-cover sm:h-20 sm:w-20"

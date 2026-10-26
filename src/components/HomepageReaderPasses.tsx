@@ -2,6 +2,7 @@ import React from 'react';
 import { ArrowRight, BookOpen, CalendarDays, RefreshCw } from 'lucide-react';
 
 import type { HomepageConfig, SubscriptionPlan } from '../types.js';
+import { responsiveImageUrl, responsiveImageSrcSet } from '../utils/responsiveImage.js';
 
 const KES_FORMATTER = new Intl.NumberFormat('en-KE', { maximumFractionDigits: 0 });
 
@@ -12,6 +13,7 @@ function durationLabel(months: number): string {
 }
 
 export interface HomepageReaderPassesProps {
+  prioritizeFirstCover?: boolean;
   plans: SubscriptionPlan[];
   config?: HomepageConfig | null;
   onChoosePlan: (plan: SubscriptionPlan) => void;
@@ -28,6 +30,7 @@ export const resolveHomepageSubscriptionDeepLink = (
 };
 
 export const HomepageReaderPasses: React.FC<HomepageReaderPassesProps> = ({
+  prioritizeFirstCover = false,
   plans,
   config,
   onChoosePlan,
@@ -83,7 +86,7 @@ export const HomepageReaderPasses: React.FC<HomepageReaderPassesProps> = ({
         </header>
 
         <div className="mt-7 flex snap-x snap-mandatory gap-4 overflow-x-auto pb-3 md:grid md:grid-cols-2 md:overflow-visible xl:grid-cols-4">
-          {visiblePlans.map(plan => (
+          {visiblePlans.map((plan, index) => (
             <article
               key={plan.id}
               id={`reader-pass-${plan.id}`}
@@ -96,9 +99,14 @@ export const HomepageReaderPasses: React.FC<HomepageReaderPassesProps> = ({
                 </div>
                 {plan.coverImage ? (
                   <img
-                    src={plan.coverImage}
+                    src={responsiveImageUrl(plan.coverImage, 640)}
+                    srcSet={responsiveImageSrcSet(plan.coverImage, [320, 480, 640, 960])}
+                    sizes="(min-width: 1280px) 264px, (min-width: 768px) 45vw, (min-width: 640px) 46vw, 82vw"
+                    width={640}
+                    height={480}
                     alt={plan.coverImageAlt || ''}
-                    loading="lazy"
+                    loading={prioritizeFirstCover && index === 0 ? 'eager' : 'lazy'}
+                    fetchPriority={prioritizeFirstCover && index === 0 ? 'high' : 'auto'}
                     decoding="async"
                     style={{
                       objectPosition: `${plan.coverPosition?.x ?? 50}% ${plan.coverPosition?.y ?? 50}%`

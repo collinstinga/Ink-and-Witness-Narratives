@@ -4,18 +4,25 @@ import type { Category } from '../types.js';
 import { api } from '../utils/api.js';
 import { NewsletterSignupDisclosure } from './NewsletterSignupDisclosure.js';
 
+export type NewsletterPublicConfig = Awaited<ReturnType<typeof api.getNewsletterConfig>>;
+
 export interface NewsletterSignupProps {
   variant?: 'full' | 'compact';
   defaultExpanded?: boolean;
+  /** A known homepage snapshot avoids a second bootstrap and late disclosure insertion. */
+  initialConfig?: NewsletterPublicConfig | null;
+  initialCategories?: Category[];
 }
 
 export const NewsletterSignup: React.FC<NewsletterSignupProps> = ({
   variant = 'full',
   defaultExpanded = false,
+  initialConfig,
+  initialCategories,
 }) => {
-  const [enabled, setEnabled] = useState(false);
-  const [loadingConfig, setLoadingConfig] = useState(true);
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [enabled, setEnabled] = useState(initialConfig?.enabled === true);
+  const [loadingConfig, setLoadingConfig] = useState(initialConfig === undefined);
+  const [categories, setCategories] = useState<Category[]>(initialCategories || []);
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [selectedInterests, setSelectedInterests] = useState<string[]>([]);
@@ -25,8 +32,14 @@ export const NewsletterSignup: React.FC<NewsletterSignupProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState('');
+  const hasKnownConfig = initialConfig !== undefined;
+  const effectiveEnabled = hasKnownConfig ? initialConfig?.enabled === true : enabled;
+  const effectiveCategories = initialCategories ?? categories;
 
   useEffect(() => {
+    // Homepage callers already fetched this exact snapshot before rendering.
+    // Keep the existing fetch path for standalone signups, not a stale TTL cache.
+    if (initialConfig !== undefined) return;
     let active = true;
     Promise.all([
       api.getNewsletterConfig().catch(() => ({ enabled: false, consentVersion: '', doubleOptIn: true })),
@@ -38,11 +51,12 @@ export const NewsletterSignup: React.FC<NewsletterSignupProps> = ({
       setLoadingConfig(false);
     });
     return () => { active = false; };
-  }, []);
+  }, [initialConfig]);
 
   const visibleInterests = useMemo(
-    () => categories.slice().sort((a, b) => a.order - b.order).slice(0, 12),
-    [categories]
+    () => effectiveCategories.filter(category => category.isEnabled !== false)
+      .slice().sort((a, b) => a.order - b.order).slice(0, 12),
+    [effectiveCategories]
   );
 
   const toggleInterest = (name: string) => {
@@ -78,7 +92,7 @@ export const NewsletterSignup: React.FC<NewsletterSignupProps> = ({
     }
   };
 
-  if (loadingConfig || !enabled) return null;
+  if ((!hasKnownConfig && loadingConfig) || !effectiveEnabled) return null;
 
   const signupCard = (
     <div className="relative overflow-hidden rounded-3xl border border-sky-900/70 bg-gradient-to-br from-[#0f172a] via-[#0b1424] to-[#07101d] p-6 shadow-2xl sm:p-10">
