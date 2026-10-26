@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: public-mobile-performance
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   audit:

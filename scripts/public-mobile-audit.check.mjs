@@ -11,6 +11,8 @@ test('audit target is fixed, anonymous and read-only, without persisted browser 
   assert.ok(!args.some(arg => /extra-headers|cookies|user-data-dir|disable-storage-reset|save-assets/.test(arg)));
   for (const pattern of BLOCKED_REQUESTS) assert.ok(args.includes(`--blocked-url-patterns=${pattern}`));
   assert.ok(BLOCKED_REQUESTS.includes('*/api/analytics*'));
+  assert.ok(BLOCKED_REQUESTS.includes('*/api/mpesa/*'));
+  assert.ok(BLOCKED_REQUESTS.includes('*/api/newsletter/*'));
 });
 
 test('version fence accepts only a hashed first-party module, not arbitrary scripts', () => {
@@ -37,4 +39,14 @@ test('summary rejects runtime failures, redirects and missing metrics', () => {
   assert.equal(result.score, 91);
   assert.equal(result.lcpMs, 123);
   assert.equal(result.cls, 0.01);
+  const report = { requestedUrl: PUBLIC_HOME, finalDisplayedUrl: PUBLIC_HOME,
+    categories: { performance: { score: 0.91 } }, audits: { ...audits,
+      'network-requests': { details: { items: [{ url: `${PUBLIC_HOME}assets/index-version.js`, statusCode: 200,
+        rendererStartTime: 10, networkRequestTime: 11, networkEndTime: 20 }] } } } };
+  const fenced = summarizeReport(report, '/assets/index-version.js');
+  assert.equal(fenced.networkRequests[0].networkEndTime, 20);
+  assert.equal(fenced.networkRequests[0].rendererStartTime, 10);
+  assert.throws(() => summarizeReport(report, '/assets/index-other.js'));
+  report.audits['network-requests'].details.items[0].statusCode = 404;
+  assert.throws(() => summarizeReport(report, '/assets/index-version.js'));
 });

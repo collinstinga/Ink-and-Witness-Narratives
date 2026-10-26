@@ -11,6 +11,10 @@ export const BLOCKED_REQUESTS = Object.freeze([
   '*/api/analytics*',
   '*/api/affiliates/track*',
   '*/api/affiliate/track*',
+  '*/api/mpesa/*',
+  '*/api/payments/*',
+  '*/api/subscriptions/checkout*',
+  '*/api/newsletter/*',
 ]);
 
 export function lighthouseArgs(reportPath) {
@@ -37,16 +41,28 @@ function finiteMetric(report, id) {
   return value;
 }
 
-export function summarizeReport(report) {
+export function summarizeReport(report, expectedEntrypoint) {
   if (report.runtimeError) throw new Error(`Lighthouse failed: ${report.runtimeError.code}`);
   if (report.requestedUrl !== PUBLIC_HOME || report.finalDisplayedUrl !== PUBLIC_HOME) {
     throw new Error('Audit navigated away from the fixed public homepage.');
   }
   const score = report.categories?.performance?.score;
   if (!Number.isFinite(score)) throw new Error('Missing Lighthouse performance score.');
+  const requests = report.audits?.['network-requests']?.details?.items ?? [];
+  if (expectedEntrypoint) {
+    const modules = requests.filter(item => {
+      const url = new URL(item.url);
+      return url.origin === new URL(PUBLIC_HOME).origin && /^\/assets\/index-[\w-]+\.js$/.test(url.pathname);
+    });
+    if (modules.length !== 1 || new URL(modules[0].url).pathname !== expectedEntrypoint || modules[0].statusCode !== 200) {
+      throw new Error('Measured browser entrypoint does not match the fenced public version.');
+    }
+  }
   return {
     fetchedAt: report.fetchTime,
     lighthouseVersion: report.lighthouseVersion,
+    configuration: report.configSettings,
+    environment: report.environment,
     score: Math.round(score * 100),
     fcpMs: finiteMetric(report, 'first-contentful-paint'),
     lcpMs: finiteMetric(report, 'largest-contentful-paint'),
@@ -61,9 +77,10 @@ export function summarizeReport(report) {
       .map(([id, audit]) => ({ id, title: audit.title, displayValue: audit.displayValue,
         savingsMs: audit.details?.overallSavingsMs, savingsBytes: audit.details?.overallSavingsBytes,
         metricSavings: audit.metricSavings })),
-    networkRequests: (report.audits?.['network-requests']?.details?.items ?? [])
+    networkRequests: requests
       .map(item => ({ url: item.url, resourceType: item.resourceType, statusCode: item.statusCode,
-        startTime: item.startTime, endTime: item.endTime, transferSize: item.transferSize })),
+        rendererStartTime: item.rendererStartTime, networkRequestTime: item.networkRequestTime,
+        networkEndTime: item.networkEndTime, transferSize: item.transferSize })),
   };
 }
 
@@ -109,7 +126,7 @@ export async function main() {
   for (let index = 1; index <= 3; index += 1) {
     const reportPath = path.join(reportsDirectory, `mobile-${index}.json`);
     await runLighthouse(reportPath);
-    const summary = summarizeReport(JSON.parse(await readFile(reportPath, 'utf8')));
+    const summary = summarizeReport(JSON.parse(await readFile(reportPath, 'utf8')), entrypoint);
     if (await readEntrypoint() !== entrypoint) {
       throw new Error('Production changed during the audit; do not compare these measurements.');
     }
