@@ -43,7 +43,8 @@ function finiteMetric(report, id) {
 
 export function summarizeReport(report, expectedEntrypoint) {
   if (report.runtimeError) throw new Error(`Lighthouse failed: ${report.runtimeError.code}`);
-  if (report.requestedUrl !== PUBLIC_HOME || report.finalDisplayedUrl !== PUBLIC_HOME) {
+  // The existing SPA normalizes the homepage to #home after loading.
+  if (report.requestedUrl !== PUBLIC_HOME || ![PUBLIC_HOME, `${PUBLIC_HOME}#home`].includes(report.finalDisplayedUrl)) {
     throw new Error('Audit navigated away from the fixed public homepage.');
   }
   const score = report.categories?.performance?.score;

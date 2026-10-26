@@ -39,6 +39,9 @@ test('summary rejects runtime failures, redirects and missing metrics', () => {
   assert.equal(result.score, 91);
   assert.equal(result.lcpMs, 123);
   assert.equal(result.cls, 0.01);
+  assert.equal(summarizeReport({ requestedUrl: PUBLIC_HOME, finalDisplayedUrl: `${PUBLIC_HOME}#home`,
+    categories: { performance: { score: 0.91 } }, audits }).score, 91);
+  assert.throws(() => summarizeReport({ requestedUrl: PUBLIC_HOME, finalDisplayedUrl: `${PUBLIC_HOME}?token=example` }));
   const report = { requestedUrl: PUBLIC_HOME, finalDisplayedUrl: PUBLIC_HOME,
     categories: { performance: { score: 0.91 } }, audits: { ...audits,
       'network-requests': { details: { items: [{ url: `${PUBLIC_HOME}assets/index-version.js`, statusCode: 200,
