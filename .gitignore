@@ -19,3 +19,4 @@ uploads/
 .env*
 !.env.example
 .vercel
+performance-reports/
