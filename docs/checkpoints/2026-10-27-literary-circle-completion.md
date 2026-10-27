@@ -2,14 +2,27 @@
 
 ## Updated evidence (27 October 2026)
 
-This section supersedes the archived pre-integration plan below. Production is
-still `cc169678fbf2dd4200c473512a5e5c8668a0fba1`; do not claim this candidate
-has been released until its production deployment and custom domains are verified.
+This section supersedes the archived pre-integration plan below. Source
+`54c17f1b0ed8ce0c4f04938ae6454db8e0ea096b` passed exact-source CI40555319016
+(job122369715021):169 suites/2511 tests, semantic types, frontend/server build
+and genuine Chrome component checks at390/1280 with entirely synthetic API.
+Review-before-write, uncertain-response exact UUID/body replay, source+ledger
+refresh, unsaved draft, long-reference wrapping and no JS errors passed.
 
-Integrated candidate `405241b12b4b06aecaf5b0a5b0c166e6ea013d76` passed GitHub
-run 40474018040: 169 suites / 2,511 tests, all source types, frontend and server
-builds. New mobile layout/source-refresh/double-tap safeguards and portable
-synthetic browser QA are a subsequent revision and require fresh exact-source CI.
+Production deployment `dpl_2dC6RUVbx1fedP9bLXpUGi7yJHVP` was staged with
+`autoAssignCustomDomains:false`, checked, then explicitly promoted to both
+custom domains. Source/client `index-DLd59DGS.js` matched CI. Public bootstrap
+returned18current pieces,16paid, zero anonymous paid unlocks/full-text leaks.
+Writer financial API401, unauthenticated operator401, scheduler401,
+production staging-binding404; apex308to canonicalwww preserved. A safe final
+redeploy after temporary-operator cleanup remains necessary. Main will be
+fast-forwarded only after this documentation-only follow-up passes CI.
+
+Earlier candidate `405241b12b4b06aecaf5b0a5b0c166e6ea013d76` also passed GitHub
+run40474018040:169 suites/2511 tests, all source types and frontend/server builds.
+The final source54CI above additionally verifies the mobile layout, source
+refresh, double-tap safeguards and portable synthetic browser QA. Financial
+service/routes/store code is unchanged from the actual staging rehearsal.
 
 Completed implementation:
 
@@ -41,11 +54,28 @@ Preservation evidence:
   public bootstrap 200/17 pieces, anonymous financial 401, operator404,
   anonymous scheduler401. No protection changes.
 
-Remaining release gates: fresh browser/CI pass for the final UI safeguards;
-staged production and live-domain checks; one approved owner email to
-collinstinga@gmail.com with a real signed delivery receipt; cleanup and safe
-redeployment of the temporary operator. Future-only advanced analytics capture
-still requires protected production configuration and reviewed coverage marker.
+Operational gates still OPEN: the authentic owner email check returned403.
+An independent bounded read-only query found at least2accounts matching the
+owner email (query limit2) and no saved affiliate-notification settings document.
+This is NOT proof all matching records lack admin rights. No account was selected,
+merged, deleted, promoted or reset; existing writer authentication is preserved.
+No production test review, email attempt, receipt or live authorization exists.
+Use an actual unambiguous writer identity and save/review settings before delivery
+testing. Do not relax identity checks or invent a delivery receipt to finish.
+
+Create-only Production configuration added independent protected click and buyer
+keys for FUTURE events/verified settlements. No provider credentials were changed,
+decrypted or pulled. Historical records are not backfilled. A separately reviewed,
+create-only production coverage marker with authoritative time/future boundary
+is still needed before claiming complete durable traffic coverage. Staging-only
+activation tooling must remain staging-only. Legacy buyer/traffic coverage stays
+explicitly partial/null. Daily scheduler code is deployed but affiliate sending
+must remain off until authentic writer review and signed owner delivery succeed.
+
+Final release gates: remove the3owned temporary operator rows, set2owned modes
+off, deploy that safe runtime on main, verify exact source/aliases/paid locks,
+operator404, private401, scheduler401 and scoped runtime errors. No need to redo
+the unchanged backend staging financial rehearsal for this documentation revision.
 No historic backfill, real charge/refund, customer announcement, new commission
 structure approval or original-nine migration is authorized by these tests.
 
