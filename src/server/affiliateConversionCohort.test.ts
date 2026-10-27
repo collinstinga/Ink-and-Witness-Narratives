@@ -211,4 +211,3 @@ describe('bounded click cohort conversion aggregates', () => {
       .toMatchObject({ coverage: 'partial', reason: 'invalid_evidence', conversionRate: null });
   });
 });
-

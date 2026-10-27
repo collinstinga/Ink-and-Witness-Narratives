@@ -319,4 +319,3 @@ export function projectAffiliateConversionCohort(input: {
   return { ...result, coverage: 'complete', reason: events.size ? 'complete' : 'no_eligible_clicks',
     conversionRate: events.size ? Math.round(converted.size / events.size * 10_000) / 100 : null };
 }
-
