@@ -15,6 +15,9 @@ vi.mock('./affiliateNotificationEvents.js', () => ({ prepareCommittedAffiliateNo
 
 vi.mock('./db.js', () => ({
   getDb: firestore.getDb,
+  resolveFirestoreTargetConfig: () => ({ projectId: 'ink-and-witness-narratives', firestoreDatabaseId: '(default)' }),
+  getFirestoreClientTarget: (client: unknown) => client === firestore.getDb.mock.results.at(-1)?.value
+    ? { projectId: 'ink-and-witness-narratives', firestoreDatabaseId: '(default)' } : null,
   replaceFirestoreDoc: firestore.setDoc,
   setFirestoreDoc: firestore.setDoc,
   updateFirestoreDoc: firestore.updateDoc,
