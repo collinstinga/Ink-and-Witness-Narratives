@@ -284,6 +284,13 @@ describe('strict boundaries, safe reads and bounded accounting', () => {
     await expect(createAffiliateRefundAdjustment(context, request)).rejects.toThrow(/explicit/);
     expect(mock.runTransaction).not.toHaveBeenCalled();
   });
+  it('rejects a confirmation reference whose uppercase form exceeds the stored bound before any transaction', async () => {
+    const before = snapshot();
+    await expect(createAffiliateRefundAdjustment(context, refund({ confirmationReference: 'ß'.repeat(65) })))
+      .rejects.toMatchObject({ statusCode: 400, code: 'AFFILIATE_ADJUSTMENT_INVALID' });
+    expect(mock.runTransaction).not.toHaveBeenCalled();
+    expect(snapshot()).toEqual(before);
+  });
   it('checks actual bound SDK target and emulator state before any database access', async () => {
     mock.setTarget(null); await expect(createAffiliateRefundAdjustment(context, refund())).rejects.toMatchObject({ code: 'AFFILIATE_ADJUSTMENT_TARGET_MISMATCH' });
     mock.setTarget({ projectId: 'other-project', firestoreDatabaseId: '(default)' }); await expect(recordAffiliateDirectCost(context, cost())).rejects.toThrow(/reviewed database/);

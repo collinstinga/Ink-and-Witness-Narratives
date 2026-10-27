@@ -115,6 +115,9 @@ function common(body: unknown, fields: string[]): CommonRequest & Record<string,
   if (typeof body.idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,100}$/.test(body.idempotencyKey)) invalid('A fresh stable idempotency key is required.');
   if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0 || body.expectedRevision >= MAX_REVISION) invalid('An explicit current revision is required.');
   const confirmationReference = text(body.confirmationReference, 'External confirmation reference', 128).toUpperCase();
+  // Unicode case folding can expand a valid input (for example ß to SS).
+  // Validate the exact normalized value that will be persisted and replayed.
+  text(confirmationReference, 'External confirmation reference', 128);
   if (confirmationReference.length < 4) invalid('Enter the actual external confirmation reference.');
   return { ...body, confirmationReference } as CommonRequest & Record<string, any>;
 }

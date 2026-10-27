@@ -126,6 +126,8 @@ describe('server-verified prospective affiliate conversion evidence', () => {
       expect(buildCommittedAffiliateConversionEvidence({ ...input, clickEvent: input.event })).toBeDefined();
     }
   });
+});
+
 describe('bounded click cohort conversion aggregates', () => {
   it('counts converted click IDs, not sales, and only emits aggregate evidence with an as-of boundary', () => {
     const first = committed();

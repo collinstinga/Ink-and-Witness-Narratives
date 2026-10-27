@@ -26,6 +26,8 @@ export interface AffiliateConversionEvidenceV1 {
   attributionIssuedAt: string;
   attributionExpiresAt: string;
   proof: string;
+}
+
 export interface AffiliateConversionCohortAggregate {
   coverage: 'complete' | 'partial' | 'unavailable';
   reason: 'complete' | 'not_enabled' | 'invalid_range' | 'unsupported_filter' | 'incomplete_history'
