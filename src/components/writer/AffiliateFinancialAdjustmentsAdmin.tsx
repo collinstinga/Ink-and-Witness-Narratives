@@ -6,7 +6,7 @@ import type { AffiliateFinancialAdjustmentOverview, AffiliateSaleCommission,
 type Operation = 'refunds' | 'refund-corrections' | 'costs' | 'cost-corrections';
 type Prepared = { operation: Operation; request: AffiliateRefundAdjustmentRequest | AffiliateDirectCostRequest | AffiliateFinancialAdjustmentCorrectionRequest };
 const money = (value: number) => `KES ${value.toLocaleString('en-KE', { maximumFractionDigits: 2 })}`;
-const field = 'w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-100';
+const field = 'w-full min-w-0 max-w-full rounded-xl border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-100';
 
 export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }: {
   sales: AffiliateSaleCommission[]; onChanged: () => void;
@@ -26,6 +26,7 @@ export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }:
   const [message, setMessage] = useState('');
   const requestId = useRef(0);
   const ledgerRequestId = useRef(0);
+  const recording = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -40,8 +41,10 @@ export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }:
   }, []);
   const refresh = async () => {
     const generation = ++ledgerRequestId.current;
-    const result = await api.getAdminAffiliateFinancialAdjustments();
-    if (mounted.current && generation === ledgerRequestId.current) setOverview(result.overview);
+    const [result, sources] = await Promise.all([api.getAdminAffiliateFinancialAdjustments(), api.getAdminAffiliateCommissions()]);
+    if (mounted.current && generation === ledgerRequestId.current) {
+      setOverview(result.overview); setCommissionSources(sources.commissions);
+    }
   };
   const correction = operation.endsWith('corrections');
   const refund = operation.startsWith('refund');
@@ -77,7 +80,8 @@ export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }:
     finally { if (mounted.current) setBusy(false); }
   }
   async function record() {
-    if (!prepared || busy) return;
+    if (!prepared || busy || recording.current) return;
+    recording.current = true;
     setBusy(true); setError(''); setMessage('');
     try {
       const result = await api.recordAdminAffiliateFinancialAdjustment(prepared.operation, prepared.request);
@@ -90,7 +94,7 @@ export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }:
       if (mounted.current) setError(error instanceof Error ? error.message : 'Not confirmed. Refresh the ledger before retrying.');
       // Keep the EXACT request/key after an ambiguous response. A retry cannot
       // silently create a second compensation entry.
-    } finally { if (mounted.current) setBusy(false); }
+    } finally { recording.current = false; if (mounted.current) setBusy(false); }
   }
   return <section className="space-y-5 rounded-2xl border border-cyan-500/20 bg-slate-900/50 p-4 sm:p-6">
     <div><h3 className="font-serif text-xl text-slate-100">Financial corrections &amp; known costs</h3>
@@ -106,7 +110,7 @@ export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }:
       <p className="text-xs text-slate-400 sm:col-span-3">Authoritative ledger as of {new Date(overview.asOf).toLocaleString('en-KE')}. Costs are only those recorded here; these figures do not claim net profit.</p>
     </div>}
     <form onSubmit={review} className="space-y-4">
-      <fieldset disabled={busy || Boolean(prepared)} className="grid gap-4 sm:grid-cols-2">
+      <fieldset disabled={busy || Boolean(prepared)} className="grid min-w-0 gap-4 sm:grid-cols-2 [&>label]:min-w-0">
         <label className="space-y-1 text-sm">Operation<select value={operation} onChange={event => { setOperation(event.target.value as Operation); setTargetId(''); setConfirmed(false); }} className={field}>
           <option value="refunds">Record confirmed refund / chargeback</option><option value="refund-corrections">Correct a refund entry</option>
           <option value="costs">Record known direct cost</option><option value="cost-corrections">Correct a cost entry</option>
@@ -128,7 +132,7 @@ export default function AffiliateFinancialAdjustmentsAdmin({ sales, onChanged }:
       </fieldset>
       {!prepared && <button disabled={busy || !overview || !confirmed} className="rounded-xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{busy ? 'Checking current ledger…' : 'Review current revision'}</button>}
     </form>
-    {prepared && <div className="space-y-3 rounded-xl border border-amber-500/40 p-4 text-sm text-amber-100">
+    {prepared && <div className="min-w-0 break-words space-y-3 rounded-xl border border-amber-500/40 p-4 text-sm text-amber-100">
       <p>Reviewed revision {prepared.request.expectedRevision}. Reference: {prepared.request.confirmationReference}. {correction ? 'A separate correction will compensate the original entry once.' : `Amount: ${money(Number(amount))}.`}</p>
       <p>Source: {targetId}{selectedSale ? ` · purchase ${selectedSale.transactionId} · paid sale ${money(selectedSale.saleAmountKes)} · original commission ${money(selectedSale.commissionAmountKes)}` : ''}.</p>
       {refund && <p>The server derives the proportional commission clawback from verified payment and payout records, including previous refunds. It rechecks the wallet revision and payout reservations atomically; an inconsistent or stale request is rejected. Any resulting debt offsets future available earnings.</p>}

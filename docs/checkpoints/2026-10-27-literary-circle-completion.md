@@ -1,4 +1,55 @@
-# Literary Circle completion — pre-integration checkpoint
+# Literary Circle completion — verification checkpoint
+
+## Updated evidence (27 October 2026)
+
+This section supersedes the archived pre-integration plan below. Production is
+still `cc169678fbf2dd4200c473512a5e5c8668a0fba1`; do not claim this candidate
+has been released until its production deployment and custom domains are verified.
+
+Integrated candidate `405241b12b4b06aecaf5b0a5b0c166e6ea013d76` passed GitHub
+run 40474018040: 169 suites / 2,511 tests, all source types, frontend and server
+builds. New mobile layout/source-refresh/double-tap safeguards and portable
+synthetic browser QA are a subsequent revision and require fresh exact-source CI.
+
+Completed implementation:
+
+- Immutable externally confirmed refund/chargeback and known-cost corrections,
+  wallet revision/idempotency/race protection, adjusted payout eligibility,
+  retained original financial evidence and writer-only review controls.
+- Bound signed referral-click evidence to verified commissions, coherent
+  financial read-time reporting, protected and explicitly partial legacy
+  customer/cohort coverage. No invented historic unique visitors or customers.
+- Authenticated daily bounded notification scheduler, fixed-recipient temporary
+  owner test with authentic Google identity, signed review, delivery receipt and
+  consent gates. No general admin session, rates approval or live-send bypass.
+
+Preservation evidence:
+
+- Actual production remains Standard Firestore / Johannesburg / Spark.
+- Private schema-9 backup captured all 23 datasets, nine affiliate profiles,
+  12 commission records, one payout, 65 referral clicks and 99 audit entries.
+  Manifest SHA-256:
+  `eb03d1d3056be47be8f6e5f090e17e60819e64c84a301c2b23507c97a21b19d3`.
+- Actual isolated staging financial rehearsal passed at 08:35 UTC, fixture
+  prefix `fc_20261027_4d9e7e6f86e2`: revision race fencing, reservation baseline,
+  payout recheck, exact replay, debt, compensating corrections, integer-cent
+  costs, all pre-existing records and original nine profiles preserved.
+  Synthetic fixtures retained for audit. No production writes/provider calls.
+  This exercised the actual SDK service, not an authenticated HTTP writer save.
+- Protected preview `dpl_5gTw4SfUvxEBZtPpQfGkP7uEh4gU` is READY at source405:
+  actual isolated staging identity and four provider-off switches verified;
+  public bootstrap 200/17 pieces, anonymous financial 401, operator404,
+  anonymous scheduler401. No protection changes.
+
+Remaining release gates: fresh browser/CI pass for the final UI safeguards;
+staged production and live-domain checks; one approved owner email to
+collinstinga@gmail.com with a real signed delivery receipt; cleanup and safe
+redeployment of the temporary operator. Future-only advanced analytics capture
+still requires protected production configuration and reviewed coverage marker.
+No historic backfill, real charge/refund, customer announcement, new commission
+structure approval or original-nine migration is authorized by these tests.
+
+## Archived pre-integration plan (historical, not current runtime state)
 
 Date: 27 October 2026, Africa/Nairobi.
 

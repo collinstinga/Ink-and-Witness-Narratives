@@ -37,3 +37,13 @@ jobs:
         run: pnpm exec vitest run --pool=threads --maxWorkers=1 --testTimeout=30000 --reporter=dot --silent
       - name: Build frontend and server
         run: pnpm run build
+      - name: Verify financial controls on mobile and desktop with synthetic API only
+        timeout-minutes: 4
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
+        run: |
+          npm install --prefix "$PLAYWRIGHT_TEST_RUNTIME" --no-audit --no-fund --ignore-scripts --no-package-lock playwright@1.62.1
+          export CHROME_PATH="$(command -v google-chrome)"
+          test -x "$CHROME_PATH"
+          node scripts/qa/financial-controls.cjs
