@@ -7,6 +7,7 @@ import { INITIAL_SEED_TOPICS } from '../data/seedTopics.js';
 import { normalizeHomepageSections } from '../homepageSections.js';
 import { affiliateStore } from './affiliateStore.js';
 import { consumeAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
+import { normalizeAffiliateConversionSourceClick } from './affiliateConversionCohort.js';
 import { hashPassword, generateSecureToken } from './auth.js';
 import {
   ImageValidationError,
@@ -194,6 +195,9 @@ export type MpesaCallbackIntent = {
   affiliateAttributionClaimId?: string;
   affiliateAttributionAt?: string;
   affiliateAttributionExpiresAt?: string;
+  sourceClickEventId?: string;
+  sourceClickKeySha256?: string;
+  sourceClickAt?: string;
   userId?: string;
   userEmail?: string;
   shortcodeUsed: string;
@@ -865,6 +869,8 @@ function normalizeMpesaCallbackIntent(value: unknown): MpesaCallbackIntent | und
   if (intent.affiliateAttributionVersion !== undefined && intent.affiliateAttributionVersion !== 2) {
     return undefined;
   }
+  const hasSourceClick = intent.sourceClickEventId !== undefined || intent.sourceClickKeySha256 !== undefined || intent.sourceClickAt !== undefined;
+  if (hasSourceClick && (intent.affiliateAttributionVersion !== 2 || !normalizeAffiliateConversionSourceClick(intent))) return undefined;
   if (intent.affiliateAttributionClaimId !== undefined && (
     typeof intent.affiliateAttributionClaimId !== 'string' ||
     !/^[a-f0-9]{64}$/.test(intent.affiliateAttributionClaimId)
@@ -942,6 +948,9 @@ function mpesaIntentsMatch(left: MpesaCallbackIntent, right: MpesaCallbackIntent
     left.affiliateAttributionClaimId === right.affiliateAttributionClaimId &&
     left.affiliateAttributionAt === right.affiliateAttributionAt &&
     left.affiliateAttributionExpiresAt === right.affiliateAttributionExpiresAt &&
+    left.sourceClickEventId === right.sourceClickEventId &&
+    left.sourceClickKeySha256 === right.sourceClickKeySha256 &&
+    left.sourceClickAt === right.sourceClickAt &&
     left.userId === right.userId &&
     left.userEmail === right.userEmail &&
     left.shortcodeUsed === right.shortcodeUsed &&
@@ -986,6 +995,9 @@ function transactionFromMpesaIntent(
     affiliateAttributionClaimId: intent.affiliateAttributionClaimId,
     affiliateAttributionAt: intent.affiliateAttributionAt,
     affiliateAttributionExpiresAt: intent.affiliateAttributionExpiresAt,
+    sourceClickEventId: intent.sourceClickEventId,
+    sourceClickKeySha256: intent.sourceClickKeySha256,
+    sourceClickAt: intent.sourceClickAt,
     shortcodeUsed: intent.shortcodeUsed,
     paymentCapabilityHash: intent.paymentCapabilityHash,
     callbackCapabilityHash: intent.callbackCapabilityHash,
@@ -1002,6 +1014,9 @@ function stripAffiliateAttribution(transaction: PaymentTransaction): PaymentTran
     affiliateAttributionClaimId: _affiliateAttributionClaimId,
     affiliateAttributionAt: _affiliateAttributionAt,
     affiliateAttributionExpiresAt: _affiliateAttributionExpiresAt,
+    sourceClickEventId: _sourceClickEventId,
+    sourceClickKeySha256: _sourceClickKeySha256,
+    sourceClickAt: _sourceClickAt,
     saleChannel: _saleChannel,
     ...directTransaction
   } = transaction;
@@ -1039,6 +1054,9 @@ async function consumeTransactionAffiliateAttribution(
   if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) {
     return stripAffiliateAttribution(transaction);
   }
+  const hasSourceClick = transaction.sourceClickEventId !== undefined || transaction.sourceClickKeySha256 !== undefined || transaction.sourceClickAt !== undefined;
+  const sourceClick = normalizeAffiliateConversionSourceClick(transaction);
+  if (hasSourceClick && !sourceClick) return stripAffiliateAttribution(transaction);
 
   const consumed = await consumeAffiliateAttributionClaimInTransaction(
     firestoreTransaction,
@@ -1051,7 +1069,8 @@ async function consumeTransactionAffiliateAttribution(
       campaignCode: transaction.campaignCode,
       channel: transaction.paymentMethod,
       issuedAt,
-      expiresAt
+      expiresAt,
+      ...(sourceClick || {}),
     }
   );
   return consumed ? transaction : stripAffiliateAttribution(transaction);

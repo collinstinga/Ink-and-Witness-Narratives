@@ -10,7 +10,7 @@ vi.mock('./literary-circle-release-plan-files.js', async importOriginal => ({
   ...await importOriginal<typeof import('./literary-circle-release-plan-files.js')>(),
   assertOfflineBackupPath: (value: string) => value,
 }));
-import { canonicalJson, sha256Hex } from './literary-circle-migration-lib.js';
+import { AFFILIATE_BACKUP_SCHEMA_VERSION, canonicalJson, sha256Hex } from './literary-circle-migration-lib.js';
 import {
   buildLiteraryCircleReleasePlan, foundingCohortDigest, readReleaseReviewEvidence,
   RELEASE_REHEARSAL_CHECKS, RELEASE_BACKUP_MAX_AGE_MS, RELEASE_EVIDENCE_MAX_AGE_MS,
@@ -25,15 +25,15 @@ const privateSentinel = 'PRIVATE_CONTACT_CREDENTIAL_PROVIDER_DETAILS';
 function fixture(): VerifiedAffiliateBackup {
   return {
     directory: '/private/backup',
-    manifest: { schemaVersion: 8, backupId: 'test-backup', createdAt: new Date(now - 60_000).toISOString(),
+    manifest: { schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION, backupId: 'test-backup', createdAt: new Date(now - 60_000).toISOString(),
       projectId: target.projectId, databaseId: target.databaseId, contentSha256: backupSha, datasets: [] },
     payloads: new Map([
-      ['affiliates', { schemaVersion: 8, key: 'affiliates', collection: 'affiliates', scope: 'all_documents',
+      ['affiliates', { schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION, key: 'affiliates', collection: 'affiliates', scope: 'all_documents',
         documents: Array.from({ length: 9 }, (_, index) => ({ id: `original_${index}`, data: {
           id: `original_${index}`, email: `private-${index}@example.test`, affiliateCode: `ORIGINAL${index}`,
           status: 'active', passwordHash: privateSentinel, totalCommissionEarnedKes: 100 + index,
         } })) }],
-      ['affiliate_site_configs', { schemaVersion: 8, key: 'affiliate_site_configs', collection: 'site_configs', scope: 'explicit_documents',
+      ['affiliate_site_configs', { schemaVersion: AFFILIATE_BACKUP_SCHEMA_VERSION, key: 'affiliate_site_configs', collection: 'site_configs', scope: 'explicit_documents',
         documents: [{ id: 'affiliate_settings', data: { defaultCommissionRate: 15, minPayoutThresholdKes: 1000 } },
           { id: 'affiliate_literary_circle', data: { enabled: false, commissionPolicy: { status: 'draft', version: 1 } } }] }],
     ]),

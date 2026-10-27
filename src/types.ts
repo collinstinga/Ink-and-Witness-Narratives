@@ -1,3 +1,13 @@
+import type { AffiliateAnalyticsCompletionFields } from './server/affiliateAnalytics.js';
+
+export type AffiliateFinancialAdjustmentOverview = import('./server/affiliateFinancialAdjustments.js').AffiliateFinancialAdjustmentOverview;
+export type AffiliateFinancialAdjustmentResult = import('./server/affiliateFinancialAdjustments.js').AffiliateFinancialAdjustmentResult;
+export type AffiliateRefundAdjustmentRequest = import('./server/affiliateFinancialAdjustments.js').AffiliateRefundAdjustmentRequest;
+export type AffiliateDirectCostRequest = import('./server/affiliateFinancialAdjustments.js').AffiliateDirectCostRequest;
+export type AffiliateFinancialAdjustmentCorrectionRequest = import('./server/affiliateFinancialAdjustments.js').AffiliateFinancialAdjustmentCorrectionRequest;
+export type AffiliateAdjustmentWalletSummary = import('./server/affiliateFinancialAdjustments.js').AffiliateAdjustmentWalletSummary;
+export type AffiliateDirectCostSummary = import('./server/affiliateFinancialAdjustments.js').AffiliateDirectCostSummary;
+
 export type ArticleStatus = 'draft' | 'published' | 'scheduled';
 
 export interface Category {
@@ -953,6 +963,10 @@ export interface PaymentTransaction {
   affiliateAttributionClaimId?: string;
   affiliateAttributionAt?: string;
   affiliateAttributionExpiresAt?: string;
+  /** Server-only durable source binding. Never expose in payment status responses. */
+  sourceClickEventId?: string;
+  sourceClickKeySha256?: string;
+  sourceClickAt?: string;
   shortcodeUsed?: string;
   paymentCapabilityHash?: string;
   callbackCapabilityHash?: string;
@@ -1582,7 +1596,10 @@ export interface AffiliateAccount {
   sessionVersion?: string;
 }
 
-export type AffiliatePublicProfile = Omit<AffiliateAccount, 'passwordHash' | 'sessionVersion'>;
+export type AffiliatePublicProfile = Omit<AffiliateAccount, 'passwordHash' | 'sessionVersion'> & {
+  walletAdjustmentKes?: number;
+  adjustmentDebtKes?: number;
+};
 export type AffiliateDashboardData = AffiliateDashboardStats;
 
 export interface AffiliateSession {
@@ -1655,6 +1672,8 @@ export interface AffiliateSaleCommission {
   literaryCirclePolicyVersion?: number;
   literaryCircleTierTransition?: LiteraryCircleTierTransition;
   affiliateBuyerAnalytics?: AffiliateBuyerAnalyticsEvidence;
+  /** Private server-only click/claim/settlement proof; omitted from browser responses. */
+  affiliateConversionEvidence?: import('./server/affiliateConversionCohort.js').AffiliateConversionEvidenceV1;
   walletLedgerVersion?: 1;
   walletRevision?: number;
   payoutPaidKes?: number;
@@ -1762,6 +1781,11 @@ export interface AffiliatePublicStats {
 }
 
 export interface AffiliateDashboardStats {
+  financialAdjustments?: {
+    revision: number; walletAdjustmentKes: number; adjustmentDebtKes: number;
+    refundAmountKes: number; adjustmentCount: number;
+    negativeBalancePolicy: 'offset_future_available_balance'; asOf?: string;
+  };
   affiliate: AffiliatePublicProfile;
   clicks: number;
   uniqueVisitors: number;
@@ -1852,7 +1876,7 @@ export interface AffiliateAnalyticsFilters {
 }
 
 /** Aggregate-only writer analytics. This response intentionally contains no reader identifiers. */
-export interface AffiliateAnalyticsReport {
+export interface AffiliateAnalyticsReport extends AffiliateAnalyticsCompletionFields {
   generatedAt: string;
   window: AffiliateAnalyticsWindow;
   filters: AffiliateAnalyticsFilters;
@@ -1945,6 +1969,9 @@ export interface AffiliateAnalyticsReport {
 }
 
 export interface AdminAffiliatesSummary {
+  walletAdjustmentKes?: number;
+  adjustmentDebtKes?: number;
+  financialAdjustmentsAsOf?: string;
   totalAffiliates: number;
   activeAffiliates: number;
   suspendedAffiliates: number;
@@ -1975,7 +2002,7 @@ export interface AdminAffiliatesSummary {
     salesCount: number;
     revenueKes: number;
     commissionEarnedKes: number;
-    conversionRate: number;
+    conversionRate: number | null;
   }[];
 }
 

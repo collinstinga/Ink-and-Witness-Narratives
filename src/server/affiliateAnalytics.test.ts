@@ -239,6 +239,7 @@ describe('affiliate analytics aggregate report', () => {
         'pass-b': buyerB,
         'pass-b-duplicate': buyerB,
       },
+      buyerHistoryComplete: true,
       clickEvents: clicks,
       clickHistoryCompleteForWindow: true,
       startDate: '2026-10-01',
@@ -263,7 +264,7 @@ describe('affiliate analytics aggregate report', () => {
       withoutLifetimeVerifiedSales: 0,
       withVerifiedSalesInWindow: 2,
     });
-    expect(report.buyerMetrics).toEqual({
+    expect(report.buyerMetrics).toMatchObject({
       coverage: 'complete',
       identifiedSales: 3,
       unidentifiedSales: 0,
@@ -278,7 +279,7 @@ describe('affiliate analytics aggregate report', () => {
       clicks: 3,
       knownUniqueVisitors: 2,
       clicksWithoutVisitorKey: 0,
-      conversionRate: 100,
+      conversionRate: null,
     });
     expect(report.integrity).toEqual({
       invalidRecordsExcluded: 1,
@@ -317,6 +318,7 @@ describe('affiliate analytics aggregate report', () => {
         'first-other': buyer,
         'later-selected': buyer,
       },
+      buyerHistoryComplete: true,
       startDate: '2026-10-01',
       endDate: '2026-10-31',
       filters: { affiliateId: 'affiliate-1' },
@@ -379,6 +381,48 @@ describe('affiliate analytics aggregate report', () => {
       repeatPurchases: null,
       repeatPayingReaders: null,
     });
+  });
+
+  it('requires explicit complete history before claiming first or repeat acquisition and withholds simultaneous first purchases', () => {
+    const key = deriveAffiliateBuyerAnalyticsKey({ readerId: 'reader-a' }, TEST_SECRET)!;
+    const first = commission('first', '2026-10-02T08:00:00.000Z');
+    const next = commission('next', '2026-10-03T08:00:00.000Z');
+    const base = { affiliates: [], commissions: [first, next], buyerKeysByCommissionId: { first: key, next: key },
+      startDate: '2026-10-01', endDate: '2026-10-31' };
+    expect(buildAffiliateAnalyticsReport(base).buyerMetrics).toMatchObject({
+      uniquePayingReaders: 1, newAffiliateAcquiredReaders: null, repeatPurchases: null });
+    expect(buildAffiliateAnalyticsReport({ ...base, buyerHistoryComplete: true }).buyerMetrics).toMatchObject({
+      newAffiliateAcquiredReaders: 1, repeatPurchases: 1 });
+    next.createdAt = first.createdAt;
+    expect(buildAffiliateAnalyticsReport({ ...base, buyerHistoryComplete: true, buyerHistoryReason: 'complete' }).buyerMetrics)
+      .toMatchObject({ newAffiliateAcquiredReaders: null, repeatPurchases: null, reason: 'incomplete_history' });
+  });
+
+  it('joins refunds and known costs to scoped authoritative transactions at one server cutoff only', () => {
+    const asOf = '2026-11-01T00:00:00.000Z';
+    const source = commission('selected', '2026-10-02T08:00:00.000Z');
+    const financialAdjustments = { asOf, currency: 'KES' as const, recordedRefundAmountKes: 999,
+      refundedPurchaseKes: 999, commissionClawbackKes: 999, entries: [],
+      walletDeltas: [], purchaseAdjustments: [
+        { transactionId: source.transactionId, refundedPurchaseKes: 20, commissionClawbackKes: 3 },
+        { transactionId: 'unselected', refundedPurchaseKes: 900, commissionClawbackKes: 100 },
+      ], directCosts: [{ transactionId: source.transactionId, knownDirectCostsKes: 5 },
+        { transactionId: 'unselected', knownDirectCostsKes: 900 }],
+      costCoverage: 'known_recorded_costs_only' as const, directCostScope: 'all_recorded_transactions' as const,
+      providerOperationPerformed: false as const, accessPermissionsChanged: false as const,
+      netProfitClaimed: false as const };
+    const input = { affiliates: [], commissions: [source], startDate: '2026-10-01', endDate: '2026-10-31',
+      financialObservedThrough: asOf, financialHistoryComplete: true, financialAdjustments };
+    const report = buildAffiliateAnalyticsReport(input);
+    expect(report.financialCoverage).toMatchObject({ coverage: 'complete', asOf });
+    expect(report.totals.retainedRevenueKes).toBe(85);
+    expect(report.financialAdjustments).toMatchObject({ coverage: 'recorded_adjustments', refundedSalesKes: 20,
+      commissionClawbackKes: 3, knownDirectCostsKes: 5, retainedAfterRefundsKes: 68, netAfterKnownCostsKes: 63,
+      netProfitClaimed: false });
+    expect(JSON.stringify(report)).not.toContain('transaction-selected');
+    expect(buildAffiliateAnalyticsReport({ ...input, financialAdjustments: { ...financialAdjustments,
+      asOf: '2026-11-01T00:00:01.000Z' } }).financialAdjustments).toMatchObject({ coverage: 'unavailable', netAfterKnownCostsKes: null });
+    expect(buildAffiliateAnalyticsReport({ ...input, financialObservedThrough: undefined }).financialCoverage?.coverage).toBe('unavailable');
   });
 
   it('keeps financial aggregates available when the durable click query fails closed', () => {

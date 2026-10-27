@@ -223,6 +223,8 @@ describe('affiliate durable click transaction', () => {
     expect(results.map(result => result.clickRecorded).sort()).toEqual([false, true]);
     expect(results.map(result => result.deduplicated).sort()).toEqual([false, true]);
     expect(results.every(result => result.valid && result.durable)).toBe(true);
+    expect(results[0].sourceClick).toEqual(results[1].sourceClick);
+    expect(results[0].sourceClick?.sourceClickAt).toBe(new Date(NOW).toISOString());
 
     const [eventId, event] = events[0];
     expect(eventId).toMatch(/^affiliate_clicks\/aclk2_[a-f0-9]{64}$/);
@@ -256,6 +258,20 @@ describe('affiliate durable click transaction', () => {
 
     expect([...firestore.documents.keys()].filter(key => key.startsWith('affiliate_clicks/'))).toHaveLength(2);
     expect(firestore.committedWrites.filter(write => write.collection === 'affiliates')).toHaveLength(2);
+  });
+
+  it('reuses actual persisted click time on dedupe and rejects conflicting stored sources', async () => {
+    const register = () => affiliateStore.registerClick('PARTNER_7', 'piece_source', undefined,
+      undefined, undefined, undefined, { durableMode: 'required', visitorKey: VISITOR_KEY });
+    const first = await register();
+    firestore.serverReadTimeMs = NOW + 60_000;
+    const duplicate = await register();
+    expect(duplicate.sourceClick).toEqual(first.sourceClick);
+    const path = `affiliate_clicks/${first.sourceClick!.sourceClickEventId}`;
+    const stored = firestore.documents.get(path)!;
+    firestore.documents.set(path, { ...stored, affiliateId: 'someone_else' });
+    await expect(register()).rejects.toBeInstanceOf(AffiliateClickLedgerUnavailableError);
+    expect(firestore.committedWrites.filter(item => item.collection === 'affiliates')).toHaveLength(1);
   });
 
   it('publishes neither the event nor counters when the transaction commit fails', async () => {

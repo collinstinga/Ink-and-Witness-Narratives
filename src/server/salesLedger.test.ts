@@ -138,6 +138,9 @@ describe('sales ledger privacy projections', () => {
       paymentCapabilityHash: 'payment-secret-hash',
       callbackCapabilityHash: 'callback-secret-hash',
       affiliateAttributionClaimId: 'c'.repeat(64),
+      sourceClickEventId: `aclk2_${'d'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`,
+      sourceClickAt: '2026-09-05T00:00:00.000Z',
       downloadToken: 'bearer-reader-token',
       affiliateCode: 'PARTNER1'
     }));
@@ -146,6 +149,9 @@ describe('sales ledger privacy projections', () => {
     expect(safe).not.toHaveProperty('paymentCapabilityHash');
     expect(safe).not.toHaveProperty('callbackCapabilityHash');
     expect(safe).not.toHaveProperty('affiliateAttributionClaimId');
+    expect(safe).not.toHaveProperty('sourceClickEventId');
+    expect(safe).not.toHaveProperty('sourceClickKeySha256');
+    expect(safe).not.toHaveProperty('sourceClickAt');
     expect(safe).not.toHaveProperty('downloadToken');
   });
 

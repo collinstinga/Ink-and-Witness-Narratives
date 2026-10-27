@@ -66,13 +66,19 @@ describe('payment capabilities', () => {
       createdAt: '2026-09-05T00:00:00.000Z',
       paymentCapabilityHash: 'a'.repeat(64),
       callbackCapabilityHash: 'b'.repeat(64),
-      affiliateAttributionClaimId: 'c'.repeat(64)
+      affiliateAttributionClaimId: 'c'.repeat(64),
+      sourceClickEventId: `aclk2_${'d'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`,
+      sourceClickAt: '2026-09-05T00:00:00.000Z',
     } as const;
 
     const redacted = redactPaymentTransaction(transaction);
     expect(redacted).not.toHaveProperty('paymentCapabilityHash');
     expect(redacted).not.toHaveProperty('callbackCapabilityHash');
     expect(redacted).not.toHaveProperty('affiliateAttributionClaimId');
+    expect(redacted).not.toHaveProperty('sourceClickEventId');
+    expect(redacted).not.toHaveProperty('sourceClickKeySha256');
+    expect(redacted).not.toHaveProperty('sourceClickAt');
     expect(transaction.paymentCapabilityHash).toBe('a'.repeat(64));
     expect(transaction.affiliateAttributionClaimId).toBe('c'.repeat(64));
   });

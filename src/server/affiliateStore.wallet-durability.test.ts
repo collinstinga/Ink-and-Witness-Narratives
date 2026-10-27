@@ -68,6 +68,8 @@ const mock = vi.hoisted(() => {
 vi.mock('fs', () => ({ default: { existsSync: () => false, mkdirSync: vi.fn(), readFileSync: vi.fn(), writeFileSync: vi.fn(), renameSync: vi.fn() } }));
 vi.mock('./db.js', () => ({
   getDb: () => mock.db,
+  resolveFirestoreTargetConfig: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }),
+  getFirestoreClientTarget: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }),
   getFirestoreDoc: async (collection: string, id: string) => structuredClone(mock.documents.get(`${collection}/${id}`) || null),
   getAllFirestoreDocs: async (collection: string) => [...mock.documents.entries()].filter(([key]) => key.startsWith(`${collection}/`)).map(([, value]) => structuredClone(value)),
   setFirestoreDoc: mock.setDoc, replaceFirestoreDoc: mock.setDoc, updateFirestoreDoc: mock.setDoc, deleteFirestoreDoc: vi.fn(),

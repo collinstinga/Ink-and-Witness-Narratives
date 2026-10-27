@@ -104,7 +104,10 @@ describe('M-Pesa initiation durability', () => {
       affiliateAttributionVersion: 2,
       affiliateAttributionClaimId: 'c'.repeat(64),
       affiliateAttributionAt: issuedAt,
-      affiliateAttributionExpiresAt: expiresAt
+      affiliateAttributionExpiresAt: expiresAt,
+      sourceClickEventId: `aclk2_${'d'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`,
+      sourceClickAt: issuedAt,
     });
 
     expect(storeMocks.saveMpesaCallbackIntent).toHaveBeenCalledWith(expect.objectContaining({
@@ -113,7 +116,10 @@ describe('M-Pesa initiation durability', () => {
       affiliateAttributionVersion: 2,
       affiliateAttributionClaimId: 'c'.repeat(64),
       affiliateAttributionAt: issuedAt,
-      affiliateAttributionExpiresAt: expiresAt
+      affiliateAttributionExpiresAt: expiresAt,
+      sourceClickEventId: `aclk2_${'d'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`,
+      sourceClickAt: issuedAt,
     }));
   });
 

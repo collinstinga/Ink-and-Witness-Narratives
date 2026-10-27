@@ -8,7 +8,8 @@ import {
   updateFirestoreDoc,
   getFirestoreDoc,
   deleteFirestoreDoc,
-  getAllFirestoreDocs
+  getAllFirestoreDocs,
+  resolveFirestoreTargetConfig
 } from './db.js';
 import {
   AffiliateAccount,
@@ -39,6 +40,14 @@ import {
   readAffiliateFinancialSnapshot,
   type AffiliateFinancialSnapshot,
 } from './affiliateFinancialRead.js';
+import {
+  readAffiliateAdjustmentWallet,
+  readAffiliateRefundQualificationEvidence,
+  projectAffiliateAdjustedAvailableBalance,
+  type AffiliateAdjustmentWalletSummary,
+  type AffiliateFinancialAdjustmentContext,
+  type AffiliateFinancialAdjustmentOverview,
+} from './affiliateFinancialAdjustments.js';
 import {
   readDurableAffiliateClickWindow,
   type DurableAffiliateClickWindowResult,
@@ -71,7 +80,9 @@ import {
   withoutAffiliateBuyerAnalytics,
 } from './affiliateBuyerAnalytics.js';
 import { resolveOrderId, toAffiliateSaleCommission } from './salesLedger.js';
-import { verifyConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
+import { readConsumedAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
+import { buildCommittedAffiliateConversionEvidence, normalizeAffiliateConversionSourceClick,
+  projectAffiliateConversionCohort } from './affiliateConversionCohort.js';
 import {
   AFFILIATE_SESSION_MAX_AGE_MS,
   AFFILIATE_SESSION_STORAGE_VERSION,
@@ -132,6 +143,25 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_ATTRIBUTION_DAYS = 90;
 export const MAX_WALLET_PAYOUT_COMMISSIONS = 400;
 const ACTIVE_WALLET_PAYOUT_STATUSES = ['PENDING', 'APPROVED', 'PROCESSING'] as const;
+
+function financialAdjustmentContext(db = getDb()): AffiliateFinancialAdjustmentContext {
+  const pins = resolveFirestoreTargetConfig();
+  return { db, expectedProjectId: pins.projectId, expectedDatabaseId: pins.firestoreDatabaseId, actor: 'Server financial read' };
+}
+
+function refundQualifiedCommissions(commissions: AffiliateSaleCommission[], adjustments?: AffiliateFinancialAdjustmentOverview) {
+  if (!adjustments) return commissions;
+  const refunded = new Map(adjustments.purchaseAdjustments.map(row => [row.transactionId, Math.round(row.refundedPurchaseKes * 100)]));
+  return commissions.filter(commission => {
+    const amount = refunded.get(commission.transactionId) || 0;
+    return amount === 0 || amount < Math.round(commission.saleAmountKes * 100);
+  });
+}
+
+function adjustmentWalletFor(snapshot: AffiliateFinancialSnapshot | undefined, affiliateId: string): AffiliateAdjustmentWalletSummary {
+  return snapshot?.adjustmentWallets?.[affiliateId] || { revision: 0, walletDeltaKes: 0, refundAmountKes: 0,
+    adjustmentCount: 0, negativeBalancePolicy: 'offset_future_available_balance' };
+}
 
 export class AffiliateWalletValidationError extends Error {
   constructor(message: string) { super(message); this.name = 'AffiliateWalletValidationError'; }
@@ -564,7 +594,7 @@ function sanitizeAuditValue(value: any): any {
 
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !/(password|secret|token|sessionVersion|affiliateBuyerAnalytics)/i.test(key))
+      .filter(([key]) => !/(password|secret|token|sessionVersion|affiliateBuyerAnalytics|affiliateConversionEvidence|sourceClick)/i.test(key))
       .map(([key, nestedValue]) => [key, sanitizeAuditValue(nestedValue)])
   );
 }
@@ -1927,6 +1957,8 @@ export const affiliateStore = {
     clickRecorded?: boolean;
     deduplicated?: boolean;
     durable?: boolean;
+    /** Internal redirect-cookie binding only; never serialize in an API response. */
+    sourceClick?: { sourceClickEventId: string; sourceClickKeySha256: string; sourceClickAt: string };
   }> {
     const cleanCode = String(code || '').trim().toUpperCase();
     if (!cleanCode) {
@@ -2083,6 +2115,22 @@ export const affiliateStore = {
           durableEventReference = db.collection('affiliate_clicks').doc(candidateEvent.id);
           const durableEventSnapshot = await firestoreTransaction.get(durableEventReference) as any;
           durableEventExists = durableEventSnapshot.exists === true;
+          if (durableMode === 'required' && durableEventExists) {
+            const storedEvent = normalizeDurableAffiliateClickEventV2(durableEventSnapshot.data());
+            if (!storedEvent || durableEventSnapshot.id !== candidateEvent.id || storedEvent.id !== candidateEvent.id
+              || storedEvent.keyFingerprint !== candidateEvent.keyFingerprint
+              || storedEvent.affiliateId !== candidateEvent.affiliateId || storedEvent.affiliateCode !== candidateEvent.affiliateCode
+              || storedEvent.visitorKey !== candidateEvent.visitorKey || storedEvent.articleId !== candidateEvent.articleId
+              || storedEvent.campaignCode !== candidateEvent.campaignCode
+              || storedEvent.dedupeWindowStartedAt !== candidateEvent.dedupeWindowStartedAt
+              || Date.parse(storedEvent.timestamp) > authoritativeNowMs
+              || createDurableAffiliateClickDedupeIdentity({ affiliateCode: storedEvent.affiliateCode,
+                articleId: storedEvent.articleId, campaignCode: storedEvent.campaignCode, visitorKey: storedEvent.visitorKey!,
+                occurredAtMs: Date.parse(storedEvent.timestamp), signingSecret: dedicatedSecret })?.documentId !== storedEvent.id) {
+              throw new AffiliateClickLedgerUnavailableError();
+            }
+            durableEvent = storedEvent;
+          }
         } else if (durableMode === 'required') {
           throw new AffiliateClickLedgerUnavailableError();
         }
@@ -2123,7 +2171,7 @@ export const affiliateStore = {
         valid: true,
         duplicate,
         durable: Boolean(durableEvent),
-        durableEvent: duplicate ? undefined : durableEvent,
+        durableEvent,
         affiliateId: freshAffiliate.id,
         freshAffiliate: duplicate
           ? freshAffiliate
@@ -2177,6 +2225,10 @@ export const affiliateStore = {
         clickRecorded: false,
         deduplicated: true,
         durable: persisted.durable,
+        ...(durableMode === 'required' && persisted.durableEvent ? { sourceClick: {
+          sourceClickEventId: persisted.durableEvent.id, sourceClickKeySha256: persisted.durableEvent.keyFingerprint,
+          sourceClickAt: persisted.durableEvent.timestamp,
+        } } : {}),
       };
     }
 
@@ -2216,6 +2268,10 @@ export const affiliateStore = {
       clickRecorded: true,
       deduplicated: false,
       durable: persisted.durable,
+      ...(durableMode === 'required' && persisted.durableEvent ? { sourceClick: {
+        sourceClickEventId: persisted.durableEvent.id, sourceClickKeySha256: persisted.durableEvent.keyFingerprint,
+        sourceClickAt: persisted.durableEvent.timestamp,
+      } } : {}),
     };
   },
 
@@ -2275,6 +2331,8 @@ export const affiliateStore = {
       campaignCode.trim().toUpperCase() !== (canonicalCampaignCode || '').toUpperCase()
     ) return null;
     if (!['CONFIRMED', 'SUCCESS', 'PAID'].includes(tx.status)) return null;
+    const hasSourceClick = tx.sourceClickEventId !== undefined || tx.sourceClickKeySha256 !== undefined || tx.sourceClickAt !== undefined;
+    if (hasSourceClick && (tx.affiliateAttributionVersion !== 2 || !normalizeAffiliateConversionSourceClick(tx))) return null;
     if (!transactionHasValidAffiliateAttribution(tx)) return null;
     const saleAmountKes = Number(tx.amount);
     if (!Number.isFinite(saleAmountKes) || saleAmountKes <= 0 || saleAmountKes > 1_000_000) return null;
@@ -2307,10 +2365,13 @@ export const affiliateStore = {
         };
       }
 
+      let conversionClaim: Record<string, unknown> | null = null;
+      let conversionClick: unknown;
+      const conversionSource = normalizeAffiliateConversionSourceClick(tx);
       if (tx.affiliateAttributionVersion === 2) {
         const issuedAt = Date.parse(tx.affiliateAttributionAt || '');
         const expiresAt = Date.parse(tx.affiliateAttributionExpiresAt || '');
-        const claimIsValid = await verifyConsumedAffiliateAttributionClaimInTransaction(
+        conversionClaim = await readConsumedAffiliateAttributionClaimInTransaction(
           firestoreTransaction,
           db,
           tx.affiliateAttributionClaimId || '',
@@ -2321,10 +2382,11 @@ export const affiliateStore = {
             campaignCode: tx.campaignCode,
             channel: tx.paymentMethod === 'bank' ? 'bank' : 'mpesa',
             issuedAt,
-            expiresAt
+            expiresAt,
+            ...(conversionSource || {}),
           }
         );
-        if (!claimIsValid) {
+        if (!conversionClaim) {
           return {
             created: false,
             commission: null,
@@ -2333,6 +2395,17 @@ export const affiliateStore = {
             freshCampaign: undefined,
             freshSettings: undefined
           };
+        }
+        // New signed-session sources only. Historical/replayed commissions are
+        // returned above and never enriched or modified by an analytics read.
+        if (conversionSource && String(process.env.AFFILIATE_CLICK_LEDGER_MODE || '').trim().toLowerCase() === 'required'
+          && typeof process.env.AFFILIATE_CLICK_ANALYTICS_SECRET === 'string'
+          && process.env.AFFILIATE_CLICK_ANALYTICS_SECRET.trim().length >= 32) {
+          const sourceSnapshot = await firestoreTransaction.get(db.collection('affiliate_clicks').doc(conversionSource.sourceClickEventId));
+          const sourceValue = sourceSnapshot.exists ? sourceSnapshot.data() : undefined;
+          if (sourceSnapshot.id === conversionSource.sourceClickEventId && sourceValue?.id === sourceSnapshot.id) {
+            conversionClick = sourceValue;
+          }
         }
       }
 
@@ -2507,7 +2580,23 @@ export const affiliateStore = {
         db, transaction: firestoreTransaction, affiliate: freshAffiliate, transactionAt, initialize: automaticTierRate,
       }) : undefined;
       let periodPurchase = false;
+      let fullyRefundedPeriodMembers = new Set<string>();
       if (tierPeriod) {
+        const refundEvidence = await readAffiliateRefundQualificationEvidence(financialAdjustmentContext(db), firestoreTransaction, freshAffiliate.id, transactionAt);
+        const periodMemberIds = new Set(tierPeriod.period.members.map(member => member.id));
+        for (const adjustment of refundEvidence) {
+          if (adjustment.refundedPurchaseKes === 0 || !periodMemberIds.has(adjustment.commissionId)) continue;
+          const sourceSnapshot = await firestoreTransaction.get(db.collection('affiliate_commissions').doc(adjustment.commissionId));
+          const source = sourceSnapshot.data() as AffiliateSaleCommission | undefined;
+          if (!sourceSnapshot.exists || !source || source.affiliateId !== freshAffiliate.id
+            || typeof source.saleAmountKes !== 'number' || !Number.isFinite(source.saleAmountKes)
+            || source.saleAmountKes <= 0 || adjustment.refundedPurchaseKes > source.saleAmountKes) {
+            throw new Error('Monthly affiliate refund qualification evidence needs writer review.');
+          }
+          if (Math.round(adjustment.refundedPurchaseKes * 100) === Math.round(source.saleAmountKes * 100)) {
+            fullyRefundedPeriodMembers.add(adjustment.commissionId);
+          }
+        }
         periodPurchase = await validateAffiliateTierPeriodPayment({ db, transaction: firestoreTransaction, affiliate: freshAffiliate, paymentType: tx.type,
           commission: { id: commissionId, affiliateId: freshAffiliate.id, affiliateCode: freshAffiliate.affiliateCode,
             checkoutRequestId: tx.checkoutRequestId, transactionId: tx.id, articleId: tx.articleId,
@@ -2518,14 +2607,18 @@ export const affiliateStore = {
           } as AffiliateSaleCommission,
         });
         const effectiveFrom = transactionLiteraryCircleSettings.qualificationEffectiveFrom;
-        const before = countAffiliateTierPeriodSales(tierPeriod.period, effectiveFrom, transactionAt);
+        // Keep the immutable period and milestone history intact. A temporary
+        // projection affects only this sale's prospective rate qualification.
+        const qualificationPeriod = { ...tierPeriod.period,
+          members: tierPeriod.period.members.filter(member => !fullyRefundedPeriodMembers.has(member.id)) };
+        const before = countAffiliateTierPeriodSales(qualificationPeriod, effectiveFrom, transactionAt);
         monthlyVerifiedSales = before + (periodPurchase && (!effectiveFrom || transactionAt >= effectiveFrom) ? 1 : 0);
         const fromTier = resolveLiteraryCircleTier(transactionLiteraryCircleSettings, before);
         const toTier = resolveLiteraryCircleTier(transactionLiteraryCircleSettings, monthlyVerifiedSales);
         const milestoneKey = `${transactionLiteraryCircleSettings.commissionPolicy.version}:${toTier.id}`;
         if (automaticTierRate && periodPurchase && fromTier.id !== toTier.id
           && !tierPeriod.period.awardedMilestones.includes(milestoneKey)) {
-          const prior = tierPeriod.period.members.filter(member => member.createdAt <= transactionAt
+          const prior = qualificationPeriod.members.filter(member => member.createdAt <= transactionAt
             && (!effectiveFrom || member.createdAt >= effectiveFrom));
           // Notifications retain their independent <=100 backing-row proof.
           // A larger exact counter still prices correctly without an email.
@@ -2613,6 +2706,13 @@ export const affiliateStore = {
         commission, transaction: tx, runtime: buyerAnalyticsRuntime,
       });
       if (buyerEvidence) commission.affiliateBuyerAnalytics = buyerEvidence;
+      if (conversionClaim && conversionClick) {
+        const conversionEvidence = buildCommittedAffiliateConversionEvidence({
+          commission, transaction: tx, clickEvent: conversionClick, claimValue: conversionClaim,
+          claimDocumentId: tx.affiliateAttributionClaimId || '', secret: process.env.AFFILIATE_CLICK_ANALYTICS_SECRET,
+        });
+        if (conversionEvidence) Object.assign(commission, { affiliateConversionEvidence: conversionEvidence });
+      }
       if (tierPeriod && periodPurchase) {
         firestoreTransaction.set(tierPeriod.ref, appendAffiliateTierPeriodSale(tierPeriod, commission), { merge: false });
       }
@@ -2844,7 +2944,9 @@ export const affiliateStore = {
       if (!settingsSnapshot.exists) walletReview('Durable payout settings are unavailable; no payout was reserved.');
       const threshold = walletMoney(settingsSnapshot.data()?.minPayoutThresholdKes);
       if (threshold < 1) walletReview('The durable payout threshold must be reviewed.');
-      const available = walletMoney(affiliate.balanceAvailableKes);
+      const originalAvailable = walletMoney(affiliate.balanceAvailableKes);
+      const adjustmentWallet = await readAffiliateAdjustmentWallet(financialAdjustmentContext(db), affiliateId, transaction);
+      const { availableBalanceKes: available } = projectAffiliateAdjustedAvailableBalance(originalAvailable, adjustmentWallet);
       const amount = requestedAmountKes === undefined ? available : requestedAmountKes;
       if (!Number.isSafeInteger(amount) || amount <= 0) throw new AffiliateWalletValidationError('Payout amount must be a whole Kenyan-shilling amount greater than zero.');
       if (amount < threshold) throw new AffiliateWalletValidationError(`Payout amount must be at least the configured minimum of KES ${threshold.toLocaleString()}.`);
@@ -2884,7 +2986,9 @@ export const affiliateStore = {
         walletLedgerVersion: 1, walletRevision: 1,
       };
       const patch: Partial<AffiliateAccount> = { walletLedgerVersion: 1, walletRevision: walletNextRevision(affiliate.walletRevision),
-        balanceAvailableKes: available - amount, balanceReservedKes: amount, activePayoutId: payoutId };
+        // The overlay stays additive. Deduct this reservation from the original
+        // accounting baseline or the next read would apply the clawback twice.
+        balanceAvailableKes: originalAvailable - amount, balanceReservedKes: amount, activePayoutId: payoutId };
       const audit = walletAudit(`Affiliate (${affiliate.name})`, 'payout_requested', 'payout', payoutId, null,
         { affiliateId, amountKes: amount, commissionIds: payout.commissionIds, status: payout.status });
       for (const commission of commissions) transaction.set(db.collection('affiliate_commissions').doc(commission.id), commission, { merge: false });
@@ -2944,6 +3048,12 @@ export const affiliateStore = {
       const affiliate = readWalletAccount(affiliateSnapshot.data() as AffiliateAccount | undefined, payout.affiliateId);
       if (affiliate.walletLedgerVersion !== 1 || affiliate.activePayoutId !== payoutId
         || walletMoney(affiliate.balanceReservedKes, true) !== total) walletReview('Wallet and payout reservations do not match; writer reconciliation is required.');
+      const adjustmentWallet = await readAffiliateAdjustmentWallet(financialAdjustmentContext(db), affiliate.id, transaction);
+      if (action === 'approve' || action === 'mark_paid') {
+        const effective = projectAffiliateAdjustedAvailableBalance(
+          walletMoney(affiliate.balanceAvailableKes) + walletMoney(affiliate.balanceReservedKes, true), adjustmentWallet);
+        if (effective.availableBalanceKes < total) walletReview('Confirmed financial adjustments reduce the available funds below this payout. Cancel the reservation and review the adjusted balance before paying.');
+      }
       const commissions = commissionSnapshots.map((row, index) => {
         const allocation = payout.allocations![index];
         const commission = readWalletCommission(row.data() as AffiliateSaleCommission | undefined, allocation.commissionId, affiliate.id);
@@ -3228,7 +3338,8 @@ export const affiliateStore = {
 
   // STRICTLY PRIVATE AFFILIATE DASHBOARD
   async getAffiliateDashboardFresh(affiliateId: string, publishedPieceIds: readonly string[] = []): Promise<AffiliateDashboardStats | null> {
-    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), affiliateId,
+    const db = getDb();
+    const snapshot = await readAffiliateFinancialSnapshot({ db, affiliateId, adjustmentsContext: financialAdjustmentContext(db),
       isOutdated: financialSnapshotIsOutdated });
     return snapshot ? this.getAffiliateDashboard(affiliateId, snapshot, publishedPieceIds) : null;
   },
@@ -3248,6 +3359,9 @@ export const affiliateStore = {
     const activeCampaigns = (snapshot?.campaigns || cachedCampaigns).filter(c => c.isActive);
 
     const totals = affiliateFinancialTotals(sales);
+    const qualifiedCommissions = refundQualifiedCommissions(totals.verified, snapshot?.financialAdjustments);
+    const adjustmentWallet = adjustmentWalletFor(snapshot, affiliate.id);
+    const effectiveWallet = projectAffiliateAdjustedAvailableBalance(walletMoney(affiliate.balanceAvailableKes, true), adjustmentWallet);
     const dashboardAt = new Date().toISOString();
     const dashboardPolicy = resolveLiteraryCircleSettingsForTransaction(
       circleSettings,
@@ -3260,7 +3374,7 @@ export const affiliateStore = {
       undefined,
       dashboardPolicy,
       countVerifiedSalesForPeriod(
-        totals.verified,
+        qualifiedCommissions,
         literaryCirclePeriodKey(dashboardAt),
         dashboardPolicy.qualificationEffectiveFrom
       ),
@@ -3269,8 +3383,15 @@ export const affiliateStore = {
 
     const safeAffiliate = {
       ...sanitizeAffiliateForResponse(affiliate),
-      commissionRate: activeRate
+      commissionRate: activeRate,
+      balanceAvailableKes: effectiveWallet.availableBalanceKes,
+      walletAdjustmentKes: effectiveWallet.walletAdjustmentKes,
+      adjustmentDebtKes: effectiveWallet.adjustmentDebtKes,
     };
+    const originalCircle = buildLiteraryCircleDashboardSummary({ affiliate, commissions: totals.verified,
+      settings: circleSettings, publishedPieceIds, now: dashboardAt });
+    const qualifiedCircle = buildLiteraryCircleDashboardSummary({ affiliate, commissions: qualifiedCommissions,
+      settings: circleSettings, publishedPieceIds, now: dashboardAt });
 
     return {
       affiliate: safeAffiliate,
@@ -3283,7 +3404,10 @@ export const affiliateStore = {
       commissionPendingKes: totals.pendingKes,
       commissionApprovedKes: totals.approvedKes,
       commissionPaidKes: totals.paidKes,
-      availableBalanceKes: affiliate.balanceAvailableKes || 0,
+      availableBalanceKes: effectiveWallet.availableBalanceKes,
+      financialAdjustments: { revision: adjustmentWallet.revision, ...effectiveWallet,
+        refundAmountKes: adjustmentWallet.refundAmountKes, adjustmentCount: adjustmentWallet.adjustmentCount,
+        negativeBalancePolicy: adjustmentWallet.negativeBalancePolicy, ...(snapshot?.observedThrough ? { asOf: snapshot.observedThrough } : {}) },
       minPayoutThresholdKes: settings.minPayoutThresholdKes || 1000,
       sales,
       payouts,
@@ -3294,19 +3418,20 @@ export const affiliateStore = {
         attributionDays: affiliate.attributionDays || settings.defaultAttributionDays || 30,
         minPayoutThresholdKes: settings.minPayoutThresholdKes || 1000
       },
-      literaryCircle: buildLiteraryCircleDashboardSummary({
-        affiliate,
-        // Never pass the global ledger into an affiliate-facing summary.
-        commissions: totals.verified,
-        settings: circleSettings,
-        publishedPieceIds
-      })
+      literaryCircle: { ...originalCircle, currentTier: qualifiedCircle.currentTier, nextTier: qualifiedCircle.nextTier,
+        monthlyVerifiedSales: qualifiedCircle.monthlyVerifiedSales, salesToNextTier: qualifiedCircle.salesToNextTier,
+        progressToNextTierPercent: qualifiedCircle.progressToNextTierPercent,
+        performancePeriods: originalCircle.performancePeriods?.map(period => {
+          const qualification = qualifiedCircle.performancePeriods?.find(row => row.periodKey === period.periodKey);
+          return period.isCurrent && qualification ? { ...period, qualifyingSales: qualification.qualifyingSales, qualifiedTier: qualification.qualifiedTier } : period;
+        }) }
     };
   },
 
   // ADMIN OVERVIEW & CONTROL CENTER
   async getAdminAffiliatesSummaryFresh(): Promise<AdminAffiliatesSummary> {
-    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), isOutdated: financialSnapshotIsOutdated });
+    const db = getDb();
+    const snapshot = await readAffiliateFinancialSnapshot({ db, adjustmentsContext: financialAdjustmentContext(db), isOutdated: financialSnapshotIsOutdated });
     if (!snapshot) throw new Error('Current affiliate records are unavailable.');
     return this.getAdminAffiliatesSummary(snapshot);
   },
@@ -3319,6 +3444,10 @@ export const affiliateStore = {
     const defaultRate = settings.defaultCommissionRate || 15;
     const affiliates = (snapshot?.affiliates || cachedAffiliates).map(a => ({
       ...sanitizeAffiliateForResponse(a),
+      ...(() => {
+        const wallet = projectAffiliateAdjustedAvailableBalance(walletMoney(a.balanceAvailableKes, true), adjustmentWalletFor(snapshot, a.id));
+        return { balanceAvailableKes: wallet.availableBalanceKes, walletAdjustmentKes: wallet.walletAdjustmentKes, adjustmentDebtKes: wallet.adjustmentDebtKes };
+      })(),
       commissionRate: (a.customCommissionRate !== null && a.customCommissionRate !== undefined && a.customCommissionRate > 0)
         ? a.customCommissionRate
         : defaultRate
@@ -3353,8 +3482,6 @@ export const affiliateStore = {
         const sales = totals.verified.filter(c => c.affiliateId === a.id);
         const revenue = sales.reduce((sum, s) => sum + s.saleAmountKes, 0);
         const earned = sales.reduce((sum, s) => sum + s.commissionAmountKes, 0);
-        const clicks = a.totalClicks || 0;
-        const conversionRate = clicks > 0 ? Number(((sales.length / clicks) * 100).toFixed(1)) : 0;
         return {
           id: a.id,
           name: a.name,
@@ -3362,7 +3489,7 @@ export const affiliateStore = {
           salesCount: sales.length,
           revenueKes: revenue,
           commissionEarnedKes: earned,
-          conversionRate
+          conversionRate: null
         };
       })
       .sort((a, b) => b.revenueKes - a.revenueKes)
@@ -3375,12 +3502,16 @@ export const affiliateStore = {
       ...(affiliate.literaryCircle?.tier.source === 'manual'
         ? { manuallyAssignedTierId: affiliate.literaryCircle.tier.id }
         : {}),
-      periods: buildLiteraryCirclePerformancePeriods({
-        commissions: totals.verified.filter(commission => commission.affiliateId === affiliate.id),
-        settings: circleSettings,
-        now: performanceNow,
-        periodCount: 6,
-      }),
+      periods: (() => {
+        const commissions = totals.verified.filter(commission => commission.affiliateId === affiliate.id);
+        const periods = buildLiteraryCirclePerformancePeriods({ commissions, settings: circleSettings, now: performanceNow, periodCount: 6 });
+        const qualified = buildLiteraryCirclePerformancePeriods({ commissions: refundQualifiedCommissions(commissions, snapshot?.financialAdjustments),
+          settings: circleSettings, now: performanceNow, periodCount: 6 });
+        return periods.map(period => {
+          const qualification = qualified.find(row => row.periodKey === period.periodKey);
+          return period.isCurrent && qualification ? { ...period, qualifyingSales: qualification.qualifyingSales, qualifiedTier: qualification.qualifiedTier } : period;
+        });
+      })(),
     }));
 
     return {
@@ -3396,6 +3527,9 @@ export const affiliateStore = {
       approvedCommissionsKes,
       paidCommissionsKes,
       outstandingBalanceKes,
+      walletAdjustmentKes: affiliates.reduce((sum, affiliate) => sum + affiliate.walletAdjustmentKes, 0),
+      adjustmentDebtKes: affiliates.reduce((sum, affiliate) => sum + affiliate.adjustmentDebtKes, 0),
+      ...(snapshot?.observedThrough ? { financialAdjustmentsAsOf: snapshot.observedThrough } : {}),
       affiliates,
       recentSales: [...commissions].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)).slice(0, 50).map(withoutAffiliateBuyerAnalytics),
       payouts: snapshot?.payouts || cachedPayouts,
@@ -3414,7 +3548,8 @@ export const affiliateStore = {
   async getAdminAffiliateAnalyticsFresh(options: {
     startDate?: string; endDate?: string; filters?: AffiliateAnalyticsFilters; now?: Date;
   } = {}): Promise<AffiliateAnalyticsReport> {
-    const snapshot = await readAffiliateFinancialSnapshot({ db: getDb(), isOutdated: financialSnapshotIsOutdated });
+    const db = getDb();
+    const snapshot = await readAffiliateFinancialSnapshot({ db, adjustmentsContext: financialAdjustmentContext(db), isOutdated: financialSnapshotIsOutdated });
     if (!snapshot) throw new Error('Current affiliate records are unavailable.');
     return this.getAdminAffiliateAnalytics(options, snapshot);
   },
@@ -3487,6 +3622,24 @@ export const affiliateStore = {
     return buildAffiliateAnalyticsReport({
       affiliates: financialSnapshot?.affiliates || cachedAffiliates,
       commissions: analyticsCommissions,
+      financialObservedThrough: financialSnapshot?.observedThrough,
+      financialHistoryComplete: Boolean(financialSnapshot?.observedThrough),
+      financialAdjustments: financialSnapshot?.financialAdjustments,
+      conversionCohort: projectAffiliateConversionCohort({
+        events: durableClicks.events,
+        commissions: analyticsCommissions,
+        secret: runtimeMode === 'required' && dedicatedSecretPresent ? process.env.AFFILIATE_CLICK_ANALYTICS_SECRET : undefined,
+        rangeStartsAt: window.startsAt,
+        rangeEndsAt: window.endsAt,
+        clickObservedThrough: durableClicks.queriedThrough,
+        salesObservedThrough: financialSnapshot?.observedThrough,
+        completeFrom: durableClicks.activation?.completeFrom,
+        clickHistoryComplete: durableClicks.source === 'durable'
+          && durableClicks.coverage?.eventCoverage === 'complete'
+          && durableClicks.coverage?.uniqueVisitorCoverage === 'complete',
+        financialHistoryComplete: Boolean(financialSnapshot?.observedThrough),
+        filters: options.filters,
+      }),
       ...(!buyerReadReason && buyerProjection.keysByCommissionId
         ? { buyerKeysByCommissionId: buyerProjection.keysByCommissionId } : {}),
       buyerHistoryComplete: !buyerReadReason && buyerProjection.historyComplete,

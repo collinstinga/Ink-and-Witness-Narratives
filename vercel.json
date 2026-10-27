@@ -7,6 +7,7 @@
     }
   },
   "regions": ["cpt1"],
+  "crons": [{ "path": "/api/internal/affiliate-notifications/run", "schedule": "0 6 * * *" }],
   "functions": {
     "api/social-preview.ts": {
       "includeFiles": "dist/index.html"

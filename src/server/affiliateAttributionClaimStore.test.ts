@@ -149,6 +149,18 @@ describe('AffiliateAttributionClaimStore', () => {
     expect(() => getAffiliateAttributionClaimDocumentId('../unsafe')).toThrow(TypeError);
   });
 
+  it('persists the signed click source and requires it unchanged when consuming and verifying', async () => {
+    const source = { sourceClickEventId: `aclk2_${'a'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`, sourceClickAt: new Date(NOW - 1_000).toISOString() };
+    await store.claim({ ...ATTRIBUTION, ...source }, OPTIONS);
+    expect(fake.documents.get(CLAIM_PATH)).toMatchObject(source);
+    await expect(consume()).resolves.toBe(false);
+    await expect(consume({ ...BINDING, ...source })).resolves.toBe(true);
+    await expect(verify({ ...BINDING, ...source })).resolves.toBe(true);
+    await expect(verify({ ...BINDING, ...source, sourceClickEventId: `aclk2_${'b'.repeat(64)}` })).resolves.toBe(false);
+    await expect(verify()).resolves.toBe(false);
+  });
+
   it('allows exactly one atomic claim when the same attribution is replayed concurrently', async () => {
     const results = await Promise.all([
       store.claim(ATTRIBUTION, OPTIONS),

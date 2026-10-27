@@ -15,6 +15,7 @@ import type {
   Article,
 } from '../../types.js';
 import { api } from '../../utils/api.js';
+import type { AffiliateAnalyticsCompletedReport } from '../../server/affiliateAnalytics.js';
 
 type AnalyticsQuery = AffiliateAnalyticsFilters & {
   startDate?: string;
@@ -27,7 +28,7 @@ interface LiteraryCircleAnalyticsAdminProps {
 }
 
 interface AffiliateAnalyticsReportViewProps {
-  report: AffiliateAnalyticsReport;
+  report: AffiliateAnalyticsCompletedReport;
 }
 
 const DAY_MS = 86_400_000;
@@ -78,9 +79,7 @@ function buyerCoverageText(metrics: AffiliateAnalyticsReport['buyerMetrics']): s
 
 function trafficCoverageText(report: AffiliateAnalyticsReport): string {
   if (report.referralTraffic.coverage === 'complete') {
-    return report.referralTraffic.conversionRate === null
-      ? 'Complete click history for this range; conversion remains withheld until purchases can be matched to a bounded click cohort.'
-      : 'Complete click history for this range; conversion can be calculated.';
+    return 'Complete click history for this range; conversion remains withheld here. Only purchases matched to a bounded click cohort establish the separate cohort rate.';
   }
   if (report.referralTraffic.reason === 'unsupported_filter') {
     return 'Click attribution does not support every selected filter, so conversion is withheld.';
@@ -109,7 +108,8 @@ function AnalyticsMetric({ label, value, hint }: { label: string; value: string;
 export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsReportViewProps) {
   const buyerMetricsAvailable = report.buyerMetrics.coverage !== 'unavailable';
   const clicksAvailable = report.referralTraffic.clicks !== null;
-  const conversionAvailable = report.referralTraffic.conversionRate !== null;
+  const cohort = report.conversionCohort;
+  const adjustments = report.financialAdjustments;
 
   return (
     <div className="space-y-5">
@@ -120,7 +120,12 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
             {report.window.startDate} to {report.window.endDate} · {report.window.days} days
           </p>
         </div>
-        <p className="text-xs text-slate-500">Africa/Nairobi · generated {new Date(report.generatedAt).toLocaleString('en-KE')}</p>
+        <div className="text-xs text-slate-500">
+          <p>Africa/Nairobi · generated {new Date(report.generatedAt).toLocaleString('en-KE')}</p>
+          <p className="mt-1">{report.financialCoverage?.coverage === 'complete' && report.financialCoverage.asOf
+            ? `Financial records observed through ${new Date(report.financialCoverage.asOf).toLocaleString('en-KE')}`
+            : 'Financial read cutoff unavailable; a complete observation time is not claimed.'}</p>
+        </div>
       </div>
 
       <section aria-labelledby="affiliate-analytics-totals-heading" className="space-y-3">
@@ -129,8 +134,24 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
           <AnalyticsMetric label="Verified sales" value={report.totals.verifiedSales.toLocaleString()} hint={`${report.totals.pieceSales} pieces · ${report.totals.bundleSales} bundles · ${report.totals.subscriptionSales} subscriptions`} />
           <AnalyticsMetric label="Gross sales" value={formatKes(report.totals.grossSalesKes)} hint="Verified affiliate-attributed payments only" />
           <AnalyticsMetric label="Commission recorded" value={formatKes(report.totals.commissionsRecordedKes)} hint={`${formatKes(report.totals.commissionsPaidKes)} already marked paid`} />
-          <AnalyticsMetric label="Retained revenue" value={formatKes(report.totals.retainedRevenueKes)} hint="Gross sales less recorded affiliate commission" />
+          <AnalyticsMetric label="Retained revenue" value={formatKes(report.totals.retainedRevenueKes)} hint="Gross sales less recorded commission, before refunds and costs" />
         </div>
+      </section>
+
+      <section aria-labelledby="affiliate-analytics-adjustments-heading" className="space-y-3">
+        <h3 id="affiliate-analytics-adjustments-heading" className="font-serif text-lg font-semibold text-white">Refunds and recorded costs</h3>
+        {adjustments?.coverage === 'recorded_adjustments' ? (
+          <>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <AnalyticsMetric label="Refunded sales" value={formatKes(adjustments.refundedSalesKes || 0)} hint="Recorded refunds matched to selected purchases" />
+              <AnalyticsMetric label="Commission clawbacks" value={formatKes(adjustments.commissionClawbackKes || 0)} hint="Recorded refund-related commission recovery" />
+              <AnalyticsMetric label="Known direct costs" value={formatKes(adjustments.knownDirectCostsKes || 0)} hint="Only recorded costs matched to selected transactions" />
+              <AnalyticsMetric label="Net after known costs" value={formatKes(adjustments.netAfterKnownCostsKes || 0)} hint="Retained less refunds and known costs, plus clawbacks" />
+            </div>
+            <p className="text-xs leading-relaxed text-slate-400">Known recorded costs only. This is not total net profit: unrecorded operating costs, taxes and other expenses are not assumed to be zero. Original sale and commission history is preserved.</p>
+            {adjustments.unmatchedSelectedSales > 0 ? <p className="text-xs text-amber-200">{adjustments.unmatchedSelectedSales} selected sales lack an authoritative transaction link; their adjustments cannot be matched.</p> : null}
+          </>
+        ) : <p className="text-xs leading-relaxed text-slate-400">Refund and cost evidence could not be verified at the same financial cutoff. Net after known costs is unavailable.</p>}
       </section>
 
       <section aria-labelledby="affiliate-analytics-coverage-heading" className="grid gap-3 lg:grid-cols-2">
@@ -144,10 +165,13 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
           {buyerMetricsAvailable ? (
             <dl className="mt-3 grid grid-cols-2 gap-3 text-xs">
               <div><dt className="text-slate-500">Unique readers</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.uniquePayingReaders ?? '—'}</dd></div>
-              <div><dt className="text-slate-500">Repeat purchases</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.repeatPurchases ?? '—'}</dd></div>
+              <div><dt className="text-slate-500">New affiliate-acquired readers</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.newAffiliateAcquiredReaders ?? 'Unavailable'}</dd></div>
+              <div><dt className="text-slate-500">Repeat affiliate purchases</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.repeatPurchases ?? 'Unavailable'}</dd></div>
+              <div><dt className="text-slate-500">Repeat paying readers</dt><dd className="mt-1 text-slate-200">{report.buyerMetrics.repeatPayingReaders ?? 'Unavailable'}</dd></div>
             </dl>
           ) : null}
           <p className="mt-2 text-xs leading-relaxed text-slate-400">{buyerCoverageText(report.buyerMetrics)}</p>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">Acquisition means the first verified affiliate-attributed purchase in complete identity-covered history. It does not establish a reader’s first purchase across the whole platform. First and repeat metrics remain unavailable when earlier evidence is incomplete.</p>
         </div>
 
         <div className="rounded-2xl border border-sky-400/20 bg-sky-950/10 p-4">
@@ -157,7 +181,7 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
           </div>
           <dl className="mt-3 grid grid-cols-2 gap-3 text-xs">
             <div><dt className="text-slate-500">Known clicks</dt><dd className="mt-1 text-slate-200">{clicksAvailable ? report.referralTraffic.clicks?.toLocaleString() : 'Unavailable'}</dd></div>
-            <div><dt className="text-slate-500">Conversion</dt><dd className="mt-1 text-slate-200">{conversionAvailable ? `${(report.referralTraffic.conversionRate || 0).toFixed(1)}%` : 'Withheld'}</dd></div>
+            <div><dt className="text-slate-500">Traffic-only conversion</dt><dd className="mt-1 text-slate-200">Withheld</dd></div>
           </dl>
           <p className="mt-3 text-xs leading-relaxed text-slate-400">{trafficCoverageText(report)}</p>
           {report.referralTraffic.coverage !== 'unavailable'
@@ -168,6 +192,23 @@ export function AffiliateAnalyticsReportView({ report }: AffiliateAnalyticsRepor
           )}
         </div>
       </section>
+
+      {cohort ? (
+        <section aria-labelledby="affiliate-conversion-cohort-heading" className="rounded-2xl border border-sky-400/20 bg-sky-950/10 p-4">
+          <h3 id="affiliate-conversion-cohort-heading" className="font-serif text-lg font-semibold text-white">Verified click cohort</h3>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">Each eligible referral visit counts once, even when it leads to several purchases. Click origin and purchased offer can differ, so offer filters withhold this rate.</p>
+          <dl className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-3">
+            <div><dt className="text-slate-500">Eligible visits</dt><dd className="mt-1 text-slate-200">{cohort.eligibleClicks ?? 'Unavailable'}</dd></div>
+            <div><dt className="text-slate-500">Verified converted visits</dt><dd className="mt-1 text-slate-200">{cohort.convertedClicks ?? 'Unavailable'}</dd></div>
+            <div><dt className="text-slate-500">Cohort conversion</dt><dd className="mt-1 text-slate-200">{cohort.coverage === 'complete' && cohort.conversionRate !== null ? `${cohort.conversionRate.toFixed(1)}%` : 'Withheld'}</dd></div>
+          </dl>
+          <p className="mt-3 text-xs leading-relaxed text-slate-400">{cohort.coverage === 'complete'
+            ? 'Verified purchases matched the selected referral visits through the stated cutoff. Later payments may change this cohort’s conversion.'
+            : 'A conversion rate requires complete verified visit and payment evidence. Missing, legacy or incompatible history keeps it withheld; available counts are lower bounds.'}</p>
+          {cohort.asOf ? <p className="mt-2 text-xs text-slate-500">Cohort purchases observed through {new Date(cohort.asOf).toLocaleString('en-KE')}.</p> : null}
+          <p className="mt-2 text-xs text-slate-500">{cohort.unmatchedLegacySales} unmatched legacy sales and {cohort.invalidEvidenceSales} unverifiable sale records through the purchase cutoff. Historical evidence is not fabricated.</p>
+        </section>
+      ) : null}
 
       <section aria-labelledby="affiliate-analytics-accounts-heading" className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
         <div className="flex items-center gap-2">
@@ -302,7 +343,7 @@ export default function LiteraryCircleAnalyticsAdmin({ affiliates, articles }: L
           <div>
             <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-cyan-300">Literary Circle analytics</p>
             <h2 id="literary-circle-analytics-heading" className="mt-1 font-serif text-2xl font-semibold text-white">Verified growth, without exposing readers</h2>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-400">Reports use the already-loaded affiliate and commission ledgers. Coverage labels show where retained click history or privacy-safe buyer analysis is incomplete.</p>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-400">Reports read current, bounded affiliate and financial records. Coverage labels distinguish verified history from partial traffic or buyer evidence; missing evidence is never presented as zero readers.</p>
           </div>
         </div>
       </header>

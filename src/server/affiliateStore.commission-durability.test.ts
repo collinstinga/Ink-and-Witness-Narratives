@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDurableAffiliateClickDedupeIdentity, deriveAffiliateClickAnalyticsKeyFingerprint } from './affiliateClickLedger.js';
 
 type FakeRef = { collectionName: string; id: string; key: string };
 type FakeQuery = { kind: 'query'; collectionName: string; filters: Array<[string, string, unknown]>; limitCount: number };
@@ -148,6 +149,8 @@ vi.mock('firebase-admin/firestore', () => ({
 
 vi.mock('./db.js', () => ({
   getDb: vi.fn(() => firestoreMock.db),
+  resolveFirestoreTargetConfig: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }),
+  getFirestoreClientTarget: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }),
   getFirestoreDoc: vi.fn(async (collectionName: string, id: string) =>
     structuredClone(firestoreMock.documents.get(`${collectionName}/${id}`) ?? null)
   ),
@@ -440,6 +443,48 @@ describe('affiliate commission durability', () => {
     expect((await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode))?.literaryCircleTierTransition).toBeUndefined();
   });
 
+  function seedRefundEvidence(commission: any, refundedKes: number, suffix = '1', correction = false) {
+    const id = `afa1_${suffix.repeat(64)}`;
+    firestoreMock.documents.set(`affiliate_financial_adjustments/${id}`, { schemaVersion: 1, id,
+      kind: correction ? 'refund_correction' : 'refund', requestSha256: 'a'.repeat(64), sourceSha256: 'b'.repeat(64),
+      transactionId: commission.transactionId, checkoutRequestId: commission.checkoutRequestId, affiliateId: affiliate.id, commissionId: commission.id,
+      currency: 'KES', amountMinor: refundedKes * 100, walletDeltaKes: -Math.round(commission.commissionAmountKes * refundedKes / commission.saleAmountKes),
+      reason: 'refund', confirmationMethod: 'writer_confirmed', confirmationReference: 'PRIVATE-REFUND-PROOF',
+      createdAt: now, createdBy: 'Writer', summaryRevision: correction ? 2 : 1,
+      ...(correction ? { supersedesEntryId: `afa1_${'1'.repeat(64)}` } : {}) });
+  }
+
+  it.each([250, 500])('uses net purchase eligibility prospectively after a KES %s recorded refund without editing history', async refundedKes => {
+    await automaticTierPolicy();
+    const first = await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
+    const original = structuredClone(firestoreMock.documents.get(`affiliate_commissions/${first!.id}`));
+    seedRefundEvidence(first, refundedKes);
+    const second = await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode);
+    expect(second?.commissionRate).toBe(refundedKes === 500 ? 15 : 20);
+    expect(firestoreMock.documents.get(`affiliate_commissions/${first!.id}`)).toEqual(original);
+    const period = [...firestoreMock.documents].find(([key]) => key.startsWith('affiliate_tier_periods/'))![1];
+    expect(period.members).toHaveLength(2);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`).literaryCircle.foundingMember).toBe(true);
+    if (refundedKes === 500) {
+      seedRefundEvidence(first, -500, '2', true);
+      expect((await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode))?.commissionRate).toBe(20);
+      expect(firestoreMock.documents.get(`affiliate_commissions/${first!.id}`)).toEqual(original);
+    }
+  });
+
+  it('retains an awarded milestone after a later immutable refund and does not announce it twice', async () => {
+    await automaticTierPolicy();
+    const first = await affiliateStore.recordAffiliateSale(tierSale(1), affiliate.affiliateCode);
+    const second = await affiliateStore.recordAffiliateSale(tierSale(2), affiliate.affiliateCode);
+    const original = structuredClone(firestoreMock.documents.get(`affiliate_commissions/${second!.id}`));
+    seedRefundEvidence(first, 500);
+    expect((await affiliateStore.recordAffiliateSale(tierSale(3), affiliate.affiliateCode))?.literaryCircleTierTransition).toBeUndefined();
+    const period = [...firestoreMock.documents].find(([key]) => key.startsWith('affiliate_tier_periods/'))![1];
+    expect(period.awardedMilestones).toContain('8:literary-ambassador');
+    expect(period.members).toHaveLength(3);
+    expect(firestoreMock.documents.get(`affiliate_commissions/${second!.id}`)).toEqual(original);
+  });
+
   it('initializes qualification from this Nairobi month only and stops querying commission history after bootstrap', async () => {
     await automaticTierPolicy();
     for (let index = 0; index < 500; index++) {
@@ -577,6 +622,73 @@ describe('affiliate commission durability', () => {
       totalSalesCount: 1,
       totalCommissionEarnedKes: 100
     });
+  });
+
+  it('commits private conversion evidence with the verified sale and preserves it on callback replay', async () => {
+    const secret = 'commission-conversion-test-secret-with-more-than-32-characters';
+    vi.stubEnv('AFFILIATE_CLICK_LEDGER_MODE', 'required');
+    vi.stubEnv('AFFILIATE_CLICK_ANALYTICS_SECRET', secret);
+    const base = confirmedV2AffiliateTransaction();
+    const visitorKey = `acv1_${'A'.repeat(43)}`;
+    const clickedAt = new Date(v2IssuedAt - 1_000).toISOString();
+    const identity = createDurableAffiliateClickDedupeIdentity({ affiliateCode: affiliate.affiliateCode,
+      articleId: base.articleId, campaignCode: campaign.code, visitorKey,
+      occurredAtMs: Date.parse(clickedAt), signingSecret: secret })!;
+    const source = { sourceClickEventId: identity.documentId,
+      sourceClickKeySha256: deriveAffiliateClickAnalyticsKeyFingerprint(secret)!, sourceClickAt: clickedAt };
+    const transaction = { ...base, ...source };
+    const event = { schemaVersion: 2, id: identity.documentId, keyFingerprint: source.sourceClickKeySha256,
+      affiliateId: affiliate.id, affiliateCode: affiliate.affiliateCode, articleId: base.articleId,
+      campaignCode: campaign.code.toLowerCase(), visitorKey, timestamp: clickedAt,
+      dedupeWindowStartedAt: identity.dedupeWindowStartedAt };
+    firestoreMock.documents.set(`affiliate_clicks/${event.id}`, event);
+    firestoreMock.documents.set(`affiliate_attribution_claims/${v2ClaimId}`,
+      consumedV2Claim({ ...source, originArticleId: base.articleId }));
+    const first = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code);
+    expect(first?.affiliateConversionEvidence).toMatchObject({ schemaVersion: 1, clickEventId: event.id });
+    expect(firestoreMock.documents.get(`affiliate_commissions/${first!.id}`).affiliateConversionEvidence)
+      .toEqual(first?.affiliateConversionEvidence);
+    expect(affiliateStore.getCommissions()[0]).not.toHaveProperty('affiliateConversionEvidence');
+    expect(affiliateStore.getAdminAffiliatesSummary().recentSales[0]).not.toHaveProperty('affiliateConversionEvidence');
+    expect(JSON.stringify(affiliateStore.getAuditLogs())).not.toContain('affiliateConversionEvidence');
+    firestoreMock.documents.delete(`affiliate_clicks/${event.id}`);
+    vi.stubEnv('AFFILIATE_CLICK_ANALYTICS_SECRET', `${secret}-rotated`);
+    expect(await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code)).toEqual(first);
+    expect(firestoreMock.documents.get(`affiliates/${affiliate.id}`).totalSalesCount).toBe(1);
+  });
+
+  it('preserves valid commission settlement without inventing conversion evidence when the bound click is absent', async () => {
+    vi.stubEnv('AFFILIATE_CLICK_LEDGER_MODE', 'required');
+    vi.stubEnv('AFFILIATE_CLICK_ANALYTICS_SECRET', 'commission-conversion-missing-click-test-secret-32-characters');
+    const source = { sourceClickEventId: `aclk2_${'a'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`, sourceClickAt: new Date(v2IssuedAt - 1_000).toISOString() };
+    const transaction = { ...confirmedV2AffiliateTransaction(), ...source };
+    firestoreMock.documents.set(`affiliate_attribution_claims/${v2ClaimId}`, consumedV2Claim(source));
+    const commission = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code);
+    expect(commission).not.toBeNull();
+    expect(commission).not.toHaveProperty('affiliateConversionEvidence');
+  });
+
+  it('keeps coherent financial coverage separate from missing buyer and click-cohort evidence', async () => {
+    const transaction = confirmedAffiliateTransaction();
+    const commission = await affiliateStore.recordAffiliateSale(transaction, affiliate.affiliateCode, campaign.code);
+    const asOf = '2026-09-10T00:00:00.000Z';
+    const snapshot = { affiliates: [affiliate], commissions: [commission!], payouts: [], campaigns: [campaign],
+      settings: affiliateStore.getSettings(), auditLogs: [], observedThrough: asOf,
+      financialAdjustments: { currency: 'KES' as const, asOf, recordedRefundAmountKes: 50,
+        refundedPurchaseKes: 50, commissionClawbackKes: 10, walletDeltas: [],
+        purchaseAdjustments: [{ transactionId: transaction.id, refundedPurchaseKes: 50, commissionClawbackKes: 10 }],
+        directCosts: [{ transactionId: transaction.id, knownDirectCostsKes: 5 }], entries: [],
+        costCoverage: 'known_recorded_costs_only' as const, directCostScope: 'all_recorded_transactions' as const,
+        netProfitClaimed: false as const, providerOperationPerformed: false as const, accessPermissionsChanged: false as const } };
+    const report = await affiliateStore.getAdminAffiliateAnalytics({ startDate: '2026-09-01', endDate: '2026-09-09' }, snapshot as never);
+    expect(report.financialCoverage).toMatchObject({ coverage: 'complete', asOf });
+    expect(report.financialAdjustments).toMatchObject({ coverage: 'recorded_adjustments', refundedSalesKes: 50,
+      commissionClawbackKes: 10, knownDirectCostsKes: 5, netAfterKnownCostsKes: 355, netProfitClaimed: false });
+    expect(report.buyerMetrics).toMatchObject({ coverage: 'unavailable', uniquePayingReaders: null,
+      newAffiliateAcquiredReaders: null, repeatPurchases: null });
+    expect(report.conversionCohort).toMatchObject({ coverage: 'unavailable', eligibleClicks: null, conversionRate: null });
+    expect(report.referralTraffic.conversionRate).toBeNull();
   });
 
   it.each([

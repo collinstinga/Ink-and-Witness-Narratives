@@ -1135,6 +1135,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                       <p className="text-[10px] text-slate-500 font-mono mt-0.5">
                         {data?.uniqueVisitors || 0} estimated unique visitors
                       </p>
+                      <p className="text-[10px] text-slate-500 font-mono mt-1">Visit estimates do not establish a verified conversion rate.</p>
                     </div>
 
                     {/* Sales Count */}

@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { normalizeAffiliateConversionSourceClick, type AffiliateConversionSourceClick } from './affiliateConversionCohort.js';
+import { AFFILIATE_CLICK_DEDUPE_WINDOW_MS } from './affiliateClickLedger.js';
 
 export const AFFILIATE_ATTRIBUTION_COOKIE_NAME = 'iw_affiliate_attribution';
 export const AFFILIATE_ATTRIBUTION_DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -11,7 +13,7 @@ const MAX_TOKEN_LENGTH = 1024;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
 const DEVELOPMENT_SIGNING_SECRET = crypto.randomBytes(32).toString('hex');
 
-export interface AffiliateAttribution {
+export interface AffiliateAttribution extends Partial<AffiliateConversionSourceClick> {
   ref: string;
   campaign?: string;
   articleId?: string;
@@ -28,6 +30,9 @@ type AttributionPayload = {
   r: string;
   c?: string;
   a?: string;
+  e?: string;
+  k?: string;
+  t?: string;
   j: string;
   iat: number;
   exp: number;
@@ -59,7 +64,11 @@ function normalize(value: AffiliateAttribution): AffiliateAttribution | null {
   if (campaign && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(campaign)) return null;
   const articleId = typeof value.articleId === 'string' ? value.articleId.trim() : '';
   if (articleId && (articleId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(articleId))) return null;
-  return { ref, campaign: campaign || undefined, articleId: articleId || undefined };
+  const hasSource = ['sourceClickEventId', 'sourceClickKeySha256', 'sourceClickAt']
+    .some(key => value[key as keyof AffiliateAttribution] !== undefined);
+  const source = normalizeAffiliateConversionSourceClick(value);
+  if (hasSource && !source) return null;
+  return { ref, campaign: campaign || undefined, articleId: articleId || undefined, ...(source || {}) };
 }
 
 function signature(payload: string, secret: string): string {
@@ -78,6 +87,9 @@ export function createAffiliateAttributionCookieValue(
     r: normalized.ref,
     c: normalized.campaign,
     a: normalized.articleId,
+    e: normalized.sourceClickEventId,
+    k: normalized.sourceClickKeySha256,
+    t: normalized.sourceClickAt,
     j: options.attributionId || crypto.randomBytes(18).toString('base64url'),
     iat: options.now ?? Date.now(),
     exp: 0
@@ -117,7 +129,8 @@ export function verifyAffiliateAttributionCookie(
   } catch {
     return null;
   }
-  const normalized = normalize({ ref: payload.r, campaign: payload.c, articleId: payload.a });
+  const normalized = normalize({ ref: payload.r, campaign: payload.c, articleId: payload.a,
+    sourceClickEventId: payload.e, sourceClickKeySha256: payload.k, sourceClickAt: payload.t });
   const now = options.now ?? Date.now();
   if (
     !normalized ||
@@ -130,6 +143,8 @@ export function verifyAffiliateAttributionCookie(
     payload.exp <= payload.iat ||
     payload.exp - payload.iat > AFFILIATE_ATTRIBUTION_MAX_AGE_MS ||
     now > payload.exp ||
+    (normalized?.sourceClickAt !== undefined && (Date.parse(normalized.sourceClickAt) > payload.iat + MAX_CLOCK_SKEW_MS
+      || payload.iat - Date.parse(normalized.sourceClickAt) > AFFILIATE_CLICK_DEDUPE_WINDOW_MS + MAX_CLOCK_SKEW_MS)) ||
     (!options.allowCrossArticle && normalized.articleId && normalized.articleId !== articleId)
   ) return null;
   return { ...normalized, attributionId: payload.j, issuedAt: payload.iat, expiresAt: payload.exp };

@@ -64,6 +64,9 @@ export function redactPaymentTransaction(transaction: PaymentTransaction): Payme
     paymentCapabilityHash: _paymentCapabilityHash,
     callbackCapabilityHash: _callbackCapabilityHash,
     affiliateAttributionClaimId: _affiliateAttributionClaimId,
+    sourceClickEventId: _sourceClickEventId,
+    sourceClickKeySha256: _sourceClickKeySha256,
+    sourceClickAt: _sourceClickAt,
     ...safeTransaction
   } = transaction;
   return safeTransaction;

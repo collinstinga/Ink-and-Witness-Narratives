@@ -12,6 +12,8 @@ import type {
 import { isVerifiedAffiliateCommission, literaryCirclePeriodKey } from './literaryCircle.js';
 import { isSettledTransactionStatus, recordedAffiliateCommissionPaidKes } from './salesLedger.js';
 import type { DurableAffiliateClickCoverageAssessment } from './affiliateClickLedger.js';
+import type { AffiliateConversionCohortAggregate } from './affiliateConversionCohort.js';
+import type { AffiliateFinancialAdjustmentOverview } from './affiliateFinancialAdjustments.js';
 
 const DAY_MS = 86_400_000;
 const NAIROBI_TIME_ZONE = 'Africa/Nairobi';
@@ -34,6 +36,35 @@ export interface AffiliateBuyerKeyProjection {
   matchedCount: number;
   unmatchedCount: number;
   ambiguousCount: number;
+}
+
+/** Public aggregates only. The projection inputs remain private to the server. */
+export interface AffiliateAnalyticsCompletionFields {
+  financialCoverage?: {
+    coverage: 'complete' | 'unavailable';
+    source: 'firestore_snapshot' | 'unverified';
+    reason: 'complete' | 'missing_server_time';
+    asOf?: string;
+  };
+  conversionCohort?: AffiliateConversionCohortAggregate;
+  financialAdjustments?: {
+    coverage: 'recorded_adjustments' | 'unavailable';
+    asOf?: string;
+    refundedSalesKes: number | null;
+    commissionClawbackKes: number | null;
+    knownDirectCostsKes: number | null;
+    retainedAfterRefundsKes: number | null;
+    netAfterKnownCostsKes: number | null;
+    costCoverage: 'known_recorded_costs_only';
+    netProfitClaimed: false;
+    unmatchedSelectedSales: number;
+  };
+}
+
+export type AffiliateAnalyticsCompletedReport = AffiliateAnalyticsReport & AffiliateAnalyticsCompletionFields;
+
+function canonicalTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
 function nairobiDay(value: Date): string {
@@ -374,11 +405,16 @@ export function buildAffiliateAnalyticsReport(options: {
   clickHistoryCompleteForWindow?: boolean;
   clickCoverageAssessment?: DurableAffiliateClickCoverageAssessment;
   clickHistoryQueriedThrough?: string;
+  conversionCohort?: AffiliateConversionCohortAggregate;
+  /** A complete bounded read-only Firestore snapshot, never the application clock. */
+  financialObservedThrough?: string;
+  financialHistoryComplete?: boolean;
+  financialAdjustments?: AffiliateFinancialAdjustmentOverview;
   startDate?: string;
   endDate?: string;
   now?: Date;
   filters?: AffiliateAnalyticsFilters;
-}): AffiliateAnalyticsReport {
+}): AffiliateAnalyticsCompletedReport {
   const now = options.now && Number.isFinite(options.now.getTime()) ? options.now : new Date();
   const generatedAt = now.toISOString();
   const window = resolveAffiliateAnalyticsWindow({
@@ -399,7 +435,8 @@ export function buildAffiliateAnalyticsReport(options: {
       invalidRecordsExcluded += 1;
       continue;
     }
-    if (createdAt < startsAtMs || createdAt > endsAtMs) continue;
+    if (createdAt < startsAtMs || createdAt > endsAtMs
+      || (canonicalTimestamp(options.financialObservedThrough) && createdAt > Date.parse(options.financialObservedThrough))) continue;
     if (!isVerifiedAffiliateCommission(commission)) {
       unverifiedRecordsExcluded += 1;
       continue;
@@ -413,7 +450,10 @@ export function buildAffiliateAnalyticsReport(options: {
 
   const canonicalWindow = selectCanonicalCommissions(eligibleInWindow);
   const selected = canonicalWindow.commissions.filter(commission => matchesFilters(commission, filters));
-  const lifetimeCanonical = verifiedCanonicalAffiliateCommissions(options.commissions);
+  const lifetimeCanonical = verifiedCanonicalAffiliateCommissions(options.commissions).filter(commission => (
+    !canonicalTimestamp(options.financialObservedThrough)
+    || Date.parse(commission.createdAt) <= Date.parse(options.financialObservedThrough)
+  ));
   const affiliatesWithLifetimeSales = new Set(lifetimeCanonical.map(commission => commission.affiliateId));
   const affiliatesWithWindowSales = new Set(selected.map(commission => commission.affiliateId));
 
@@ -453,6 +493,7 @@ export function buildAffiliateAnalyticsReport(options: {
     return typeof key === 'string' && BUYER_KEY_PATTERN.test(key) ? [{ commission, key }] : [];
   });
   const earliestAffiliatePurchase = new Map<string, { createdAt: number; commissionId: string }>();
+  const ambiguousFirstPurchases = new Set<string>();
   for (const commission of lifetimeCanonical) {
     const key = buyerKeys[commission.id];
     const createdAt = Date.parse(commission.createdAt);
@@ -460,6 +501,9 @@ export function buildAffiliateAnalyticsReport(options: {
     const current = earliestAffiliatePurchase.get(key);
     if (!current || createdAt < current.createdAt) {
       earliestAffiliatePurchase.set(key, { createdAt, commissionId: commission.id });
+      ambiguousFirstPurchases.delete(key);
+    } else if (createdAt === current.createdAt && commission.id !== current.commissionId) {
+      ambiguousFirstPurchases.add(key);
     }
   }
   const uniqueIdentities = new Set(selectedIdentities.map(item => item.key));
@@ -483,7 +527,8 @@ export function buildAffiliateAnalyticsReport(options: {
       : selectedIdentities.length > 0
         ? 'partial' as const
         : 'unavailable' as const;
-  const buyerHistoryComplete = options.buyerHistoryComplete !== false
+  const buyerHistoryComplete = options.buyerHistoryComplete === true
+    && ambiguousFirstPurchases.size === 0
     && lifetimeCanonical.every(commission => BUYER_KEY_PATTERN.test(buyerKeys[commission.id] || ''));
 
   let referralTraffic: AffiliateAnalyticsReport['referralTraffic'];
@@ -565,11 +610,9 @@ export function buildAffiliateAnalyticsReport(options: {
       clicks: clicks.length,
       knownUniqueVisitors: visitorKeys.size,
       clicksWithoutVisitorKey: withoutVisitorKey,
-      conversionRate: complete
-        && !options.clickCoverageAssessment
-        && clicks.length > 0
-        ? Math.round((selected.length / clicks.length) * 10_000) / 100
-        : null,
+      // A visit can lead to several purchases or settle outside the visit window.
+      // Only the separately verified click cohort can establish conversion.
+      conversionRate: null,
     };
   }
 
@@ -622,6 +665,22 @@ export function buildAffiliateAnalyticsReport(options: {
     offerGroups.set(key, offer);
   }
 
+  const financialComplete = options.financialHistoryComplete === true
+    && canonicalTimestamp(options.financialObservedThrough);
+  const adjustments = options.financialAdjustments;
+  const selectedTransactionIds = new Set(selected.map(item => safeIdentifier(item.transactionId)).filter(Boolean));
+  const unmatchedSelectedSales = selected.filter(item => !safeIdentifier(item.transactionId)).length;
+  // Join only authoritative transaction identities of canonical selected sales.
+  // Never use global adjustment totals for a filtered/windowed report.
+  const selectedRefunds = adjustments?.purchaseAdjustments.filter(item => selectedTransactionIds.has(item.transactionId)) || [];
+  const selectedCosts = adjustments?.directCosts.filter(item => selectedTransactionIds.has(item.transactionId)) || [];
+  const adjustmentCutoffVerified = financialComplete && adjustments && canonicalTimestamp(adjustments.asOf)
+    && adjustments.asOf === options.financialObservedThrough && adjustments.directCostScope === 'all_recorded_transactions';
+  const refunds = roundKes(selectedRefunds.reduce((sum, item) => sum + safeMoney(item.refundedPurchaseKes), 0));
+  const clawbacks = roundKes(selectedRefunds.reduce((sum, item) => sum + safeMoney(item.commissionClawbackKes), 0));
+  const knownCosts = roundKes(selectedCosts.reduce((sum, item) => sum + safeMoney(item.knownDirectCostsKes), 0));
+  const adjustedRetained = roundKes(totals.retainedRevenueKes - refunds + clawbacks);
+
   return {
     generatedAt,
     window,
@@ -636,11 +695,30 @@ export function buildAffiliateAnalyticsReport(options: {
       withVerifiedSalesInWindow: options.affiliates.filter(affiliate => affiliatesWithWindowSales.has(affiliate.id)).length,
     },
     totals,
+    financialCoverage: {
+      coverage: financialComplete ? 'complete' : 'unavailable',
+      source: financialComplete ? 'firestore_snapshot' : 'unverified',
+      reason: financialComplete ? 'complete' : 'missing_server_time',
+      ...(financialComplete ? { asOf: options.financialObservedThrough } : {}),
+    },
+    financialAdjustments: {
+      coverage: adjustmentCutoffVerified ? 'recorded_adjustments' : 'unavailable',
+      ...(adjustmentCutoffVerified ? { asOf: adjustments.asOf } : {}),
+      refundedSalesKes: adjustmentCutoffVerified ? refunds : null,
+      commissionClawbackKes: adjustmentCutoffVerified ? clawbacks : null,
+      knownDirectCostsKes: adjustmentCutoffVerified ? knownCosts : null,
+      retainedAfterRefundsKes: adjustmentCutoffVerified ? adjustedRetained : null,
+      netAfterKnownCostsKes: adjustmentCutoffVerified ? roundKes(adjustedRetained - knownCosts) : null,
+      costCoverage: 'known_recorded_costs_only',
+      netProfitClaimed: false,
+      unmatchedSelectedSales,
+    },
     buyerMetrics: {
       coverage: buyerCoverage,
       ...(options.buyerHistoryComplete !== undefined ? {
         historyCoverage: buyerHistoryComplete ? 'complete' as const : buyerCoverage === 'unavailable' ? 'unavailable' as const : 'partial' as const,
-        reason: options.buyerHistoryReason || (buyerHistoryComplete ? 'complete' as const : 'incomplete_history' as const),
+        reason: options.buyerHistoryReason && options.buyerHistoryReason !== 'complete'
+          ? options.buyerHistoryReason : buyerHistoryComplete ? 'complete' as const : 'incomplete_history' as const,
       } : {}),
       identifiedSales: selectedIdentities.length,
       unidentifiedSales: selected.length - selectedIdentities.length,
@@ -650,6 +728,20 @@ export function buildAffiliateAnalyticsReport(options: {
       repeatPayingReaders: buyerCoverage === 'unavailable' || !buyerHistoryComplete ? null : new Set(repeatSales.map(item => item.key)).size,
     },
     referralTraffic,
+    ...(options.conversionCohort ? {
+      conversionCohort: {
+        coverage: options.conversionCohort.coverage,
+        reason: options.conversionCohort.reason,
+        windowStartsAt: options.conversionCohort.windowStartsAt,
+        windowEndsAt: options.conversionCohort.windowEndsAt,
+        ...(options.conversionCohort.asOf ? { asOf: options.conversionCohort.asOf } : {}),
+        eligibleClicks: options.conversionCohort.eligibleClicks,
+        convertedClicks: options.conversionCohort.convertedClicks,
+        conversionRate: options.conversionCohort.conversionRate,
+        unmatchedLegacySales: options.conversionCohort.unmatchedLegacySales,
+        invalidEvidenceSales: options.conversionCohort.invalidEvidenceSales,
+      },
+    } : {}),
     monthly,
     topAffiliates: [...affiliateGroups.values()]
       .sort((left, right) => right.grossSalesKes - left.grossSalesKes

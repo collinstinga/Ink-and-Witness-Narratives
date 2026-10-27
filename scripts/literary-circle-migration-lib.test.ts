@@ -304,7 +304,7 @@ describe('Literary Circle migration safety helpers', () => {
       ['site_configs/affiliate_notification_delivery', { mode: 'staging_test', settingsRevision: 5, allowedRecipients: ['test@example.test'] }],
     ]);
     const payloads = await captureAffiliateDatasets(fakeFirestore(records));
-    expect(AFFILIATE_BACKUP_SCHEMA_VERSION).toBe(8);
+    expect(AFFILIATE_BACKUP_SCHEMA_VERSION).toBe(9);
     expect(payloads.get('affiliate_notification_deliveries')?.documents).toEqual([
       { id: 'nld_example', data: records.get('affiliate_notification_deliveries/nld_example') },
       { id: 'suppression_example', data: records.get('affiliate_notification_deliveries/suppression_example') },
@@ -341,6 +341,24 @@ describe('Literary Circle migration safety helpers', () => {
     expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT }))
       .toThrow(/Unsupported affiliate backup schema version/);
   });
+
+  it.each(['affiliate_financial_adjustments', 'affiliate_financial_adjustment_summaries', 'affiliate_financial_adjustment_claims'])(
+    'round-trips exact private financial evidence and refuses missing live coverage: %s', async collection => {
+      const record = { schemaVersion: 1, kind: 'refund', amountMinor: 12_501, walletDeltaKes: -25,
+        confirmationReference: 'PRIVATE-PROOF', sourceSha256: 'preserve-source', revision: 4 };
+      const captured = await captureAffiliateDatasets(fakeFirestore(new Map([[`${collection}/original-entry`, record]])));
+      expect(captured.get(collection)?.documents).toEqual([{ id: 'original-entry', data: record }]);
+      const payloads = completePayloadSet(); payloads.set(collection, captured.get(collection)!);
+      const target = { projectId: 'literary-circle-test', databaseId: '(default)' };
+      const written = writeAffiliateBackup({ payloads, target }); cleanupDirectories.push(written.directory);
+      const verified = verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT });
+      expect(verified.payloads.get(collection)?.documents).toEqual([{ id: 'original-entry', data: record }]);
+      const drift = new Map(payloads);
+      drift.set(collection, buildDatasetPayload(AFFILIATE_BACKUP_DATASETS.find(item => item.key === collection)!, []));
+      expect(() => assertLiveStateMatchesBackup(verified, drift)).toThrow(collection);
+      fs.writeFileSync(written.manifestPath, JSON.stringify({ ...written.manifest, schemaVersion: 8 }));
+      expect(() => verifyAffiliateBackup(written.manifestPath, { target, expectedAffiliates: FOUNDING_AFFILIATE_COUNT })).toThrow(/Unsupported affiliate backup schema version/);
+    });
 
   it('captures and exactly verifies monthly tier qualification evidence and rejects schema 7', async () => {
     const record = { schemaVersion: 1, affiliateId: 'affiliate-1', periodKey: '2026-10', revision: 2,

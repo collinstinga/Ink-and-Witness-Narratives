@@ -16,6 +16,8 @@ const firestore = vi.hoisted(() => ({
 
 vi.mock('./db.js', () => ({
   getDb: firestore.getDb,
+  resolveFirestoreTargetConfig: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }),
+  getFirestoreClientTarget: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }),
   replaceFirestoreDoc: firestore.replaceDoc,
   setFirestoreDoc: firestore.setDoc,
   updateFirestoreDoc: firestore.updateDoc,

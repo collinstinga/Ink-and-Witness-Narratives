@@ -12,7 +12,8 @@ export const MAX_AFFILIATE_BUYER_KEYS = 3;
 
 /** Strip private evidence from writer ledgers too; only aggregate analytics may consume it. */
 export function withoutAffiliateBuyerAnalytics(commission: AffiliateSaleCommission): AffiliateSaleCommission {
-  const { affiliateBuyerAnalytics: _privateEvidence, ...safeCommission } = commission;
+  const { affiliateBuyerAnalytics: _privateEvidence, affiliateConversionEvidence: _conversion,
+    ...safeCommission } = commission as AffiliateSaleCommission & { affiliateConversionEvidence?: unknown };
   return safeCommission;
 }
 

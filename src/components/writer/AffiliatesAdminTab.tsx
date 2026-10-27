@@ -60,13 +60,14 @@ import { resolveAffiliateSettingsDraft } from './affiliateSettingsDraft.js';
 
 const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
 const LiteraryCircleAnalyticsAdmin = React.lazy(() => import('./LiteraryCircleAnalyticsAdmin.js'));
+const AffiliateFinancialAdjustmentsAdmin = React.lazy(() => import('./AffiliateFinancialAdjustmentsAdmin.js'));
 const AffiliateCampaignEditor = React.lazy(() => import('./AffiliateCampaignEditor.js').then(module => ({ default: module.AffiliateCampaignEditor })));
 
 interface AffiliatesAdminTabProps {
   articles: Article[];
 }
 
-type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'analytics' | 'resources' | 'notifications' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
+type AdminSubTab = 'overview' | 'affiliates' | 'circle' | 'analytics' | 'financials' | 'resources' | 'notifications' | 'commissions' | 'payouts' | 'campaigns' | 'settings' | 'audit';
 
 function hasWriterApproval(affiliate: AffiliateAccount): boolean {
   return typeof affiliate.approvedAt === 'string'
@@ -777,6 +778,11 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
           <span>Circle Analytics</span>
         </button>
 
+        <button type="button" onClick={() => setActiveSubTab('financials')}
+          className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap ${activeSubTab === 'financials' ? 'bg-amber-950 text-amber-200 border border-amber-700' : 'text-slate-400 hover:text-slate-200'}`}>
+          <History aria-hidden="true" className="w-3.5 h-3.5" /><span>Financial Corrections</span>
+        </button>
+
         <button
           onClick={() => setActiveSubTab('resources')}
           className={`px-3.5 py-2 rounded-xl font-mono text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
@@ -1234,6 +1240,12 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 affiliates={summary?.affiliates || []}
                 articles={articles}
               />
+            </React.Suspense>
+          )}
+
+          {activeSubTab === 'financials' && (
+            <React.Suspense fallback={<p role="status" className="p-5 text-sm text-slate-300">Opening financial ledger…</p>}>
+              <AffiliateFinancialAdjustmentsAdmin sales={summary?.recentSales || []} onChanged={() => { void loadSummary(true); }} />
             </React.Suspense>
           )}
 

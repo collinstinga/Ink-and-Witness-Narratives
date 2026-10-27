@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import type { Firestore, Transaction } from 'firebase-admin/firestore';
 import type { VerifiedAffiliateAttribution } from './affiliateAttributionSecurity.js';
 import { getDb } from './db.js';
+import { normalizeAffiliateConversionSourceClick, type AffiliateConversionSourceClick } from './affiliateConversionCohort.js';
 
 const CLAIM_COLLECTION = 'affiliate_attribution_claims';
 const CLAIM_STORAGE_VERSION = 1;
@@ -19,7 +20,7 @@ export type AffiliateAttributionClaimOptions = {
   channel: string;
 };
 
-export type AffiliateAttributionClaimBinding = {
+export type AffiliateAttributionClaimBinding = Partial<AffiliateConversionSourceClick> & {
   checkoutRequestId: string;
   checkoutArticleId: string;
   affiliateCode: string;
@@ -29,7 +30,7 @@ export type AffiliateAttributionClaimBinding = {
   expiresAt: number;
 };
 
-type AffiliateAttributionClaimRecord = {
+type AffiliateAttributionClaimRecord = Partial<AffiliateConversionSourceClick> & {
   version: 1;
   status: 'claimed' | 'consumed';
   affiliateCode: string;
@@ -90,8 +91,16 @@ function normalizeAttribution(attribution: VerifiedAffiliateAttribution): Verifi
     ...(campaign ? { campaign } : {}),
     ...(articleId ? { articleId } : {}),
     issuedAt: attribution.issuedAt,
-    expiresAt: attribution.expiresAt
+    expiresAt: attribution.expiresAt,
+    ...normalizedSource(attribution),
   };
+}
+
+function normalizedSource(value: Partial<AffiliateConversionSourceClick>): Partial<AffiliateConversionSourceClick> {
+  const hasSource = value.sourceClickEventId !== undefined || value.sourceClickKeySha256 !== undefined || value.sourceClickAt !== undefined;
+  const source = normalizeAffiliateConversionSourceClick(value);
+  if (hasSource && !source) throw new TypeError('A complete verified affiliate click source is required.');
+  return source || {};
 }
 
 function normalizeOptions(options: AffiliateAttributionClaimOptions): AffiliateAttributionClaimOptions {
@@ -161,7 +170,8 @@ function normalizeBinding(binding: AffiliateAttributionClaimBinding): AffiliateA
     ...(campaignCode ? { campaignCode } : {}),
     channel,
     issuedAt: binding.issuedAt,
-    expiresAt: binding.expiresAt
+    expiresAt: binding.expiresAt,
+    ...normalizedSource(binding),
   };
 }
 
@@ -186,7 +196,10 @@ function claimMetadataMatchesBinding(
     value.checkoutArticleId === binding.checkoutArticleId &&
     value.channel === binding.channel &&
     value.issuedAt === binding.issuedAt &&
-    value.expiresAt === binding.expiresAt;
+    value.expiresAt === binding.expiresAt &&
+    value.sourceClickEventId === binding.sourceClickEventId &&
+    value.sourceClickKeySha256 === binding.sourceClickKeySha256 &&
+    value.sourceClickAt === binding.sourceClickAt;
 }
 
 function consumedClaimMatchesBinding(
@@ -244,19 +257,29 @@ export async function verifyConsumedAffiliateAttributionClaimInTransaction(
   claimDocumentId: string,
   expected: AffiliateAttributionClaimBinding
 ): Promise<boolean> {
+  return Boolean(await readConsumedAffiliateAttributionClaimInTransaction(transaction, db, claimDocumentId, expected));
+}
+
+/** The already verified private record is reused for same-transaction conversion enrichment. */
+export async function readConsumedAffiliateAttributionClaimInTransaction(
+  transaction: Transaction,
+  db: Firestore,
+  claimDocumentId: string,
+  expected: AffiliateAttributionClaimBinding,
+): Promise<Record<string, unknown> | null> {
   const normalizedClaimDocumentId = requireClaimDocumentId(claimDocumentId);
   const normalizedExpected = normalizeBinding(expected);
   const claimRef = db.collection(CLAIM_COLLECTION).doc(normalizedClaimDocumentId);
   const snapshot = await transaction.get(claimRef);
-  if (!snapshot.exists) return false;
+  if (!snapshot.exists) return null;
 
   const value = snapshot.data();
-  return Boolean(
+  return (
     value &&
     typeof value === 'object' &&
     !Array.isArray(value) &&
     consumedClaimMatchesBinding(value, normalizedExpected)
-  );
+  ) ? value : null;
 }
 
 export class AffiliateAttributionClaimStore {
@@ -292,6 +315,7 @@ export class AffiliateAttributionClaimStore {
         channel: normalizedOptions.channel,
         issuedAt: normalizedAttribution.issuedAt,
         expiresAt: normalizedAttribution.expiresAt,
+        ...normalizedSource(normalizedAttribution),
         claimedAt: Date.now()
       };
       transaction.create(claimRef, record);

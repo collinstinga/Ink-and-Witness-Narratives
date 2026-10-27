@@ -327,13 +327,16 @@ describe('M-Pesa request locks and intent attachment', () => {
     const issuedAt = Date.now() - 1_000;
     const expiresAt = Date.now() + 60 * 60 * 1000;
     const claimId = 'f'.repeat(64);
+    const source = { sourceClickEventId: `aclk2_${'a'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`, sourceClickAt: new Date(issuedAt - 1_000).toISOString() };
     const prepared = intent('a', 'b', {
       affiliateCode: 'affiliate1',
       campaignCode: 'launch',
       affiliateAttributionVersion: 2,
       affiliateAttributionClaimId: claimId,
       affiliateAttributionAt: new Date(issuedAt).toISOString(),
-      affiliateAttributionExpiresAt: new Date(expiresAt).toISOString()
+      affiliateAttributionExpiresAt: new Date(expiresAt).toISOString(),
+      ...source,
     });
     firestoreMock.documents.set(`affiliate_attribution_claims/${claimId}`, {
       version: 1,
@@ -344,7 +347,8 @@ describe('M-Pesa request locks and intent attachment', () => {
       channel: 'mpesa',
       issuedAt,
       expiresAt,
-      claimedAt: Date.now()
+      claimedAt: Date.now(),
+      ...source,
     });
     await store.saveMpesaCallbackIntent(prepared);
 
@@ -358,7 +362,8 @@ describe('M-Pesa request locks and intent attachment', () => {
       affiliateCode: 'affiliate1',
       campaignCode: 'launch',
       affiliateAttributionVersion: 2,
-      affiliateAttributionClaimId: claimId
+      affiliateAttributionClaimId: claimId,
+      ...source,
     });
     expect(firestoreMock.documents.get(`affiliate_attribution_claims/${claimId}`)).toMatchObject({
       status: 'consumed',
@@ -366,6 +371,22 @@ describe('M-Pesa request locks and intent attachment', () => {
       consumedAt: expect.any(Number)
     });
     expect(firestoreMock.documents.get('transactions/ws_CO_bound_123456')).toEqual(result);
+  });
+
+  it('rejects partial click sources and refuses attachment after source tampering in one durable intent mirror', async () => {
+    await expect(store.saveMpesaCallbackIntent(intent('a', 'b', { sourceClickEventId: `aclk2_${'a'.repeat(64)}` })))
+      .rejects.toThrow('secure payment intent is invalid');
+    const issuedAt = Date.now() - 1_000;
+    const prepared = intent('c', 'd', { affiliateCode: 'affiliate1', affiliateAttributionVersion: 2,
+      affiliateAttributionClaimId: 'f'.repeat(64), affiliateAttributionAt: new Date(issuedAt).toISOString(),
+      affiliateAttributionExpiresAt: new Date(issuedAt + 60 * 60_000).toISOString(),
+      sourceClickEventId: `aclk2_${'a'.repeat(64)}`, sourceClickKeySha256: `ack1_${'A'.repeat(43)}`,
+      sourceClickAt: new Date(issuedAt - 1_000).toISOString() });
+    await store.saveMpesaCallbackIntent(prepared);
+    const mirror = `mpesa_payment_intents/${prepared.paymentCapabilityHash}`;
+    firestoreMock.documents.set(mirror, { ...firestoreMock.documents.get(mirror), sourceClickEventId: `aclk2_${'b'.repeat(64)}` });
+    await expect(store.attachMpesaCallbackIntent(prepared.callbackCapabilityHash, 'ws_CO_source_123', 'merchant_source_123')).resolves.toBeUndefined();
+    expect(firestoreMock.documents.has('transactions/ws_CO_source_123')).toBe(false);
   });
 
   it('keeps the customer checkout but strips commission fields when a v2 claim cannot be proven', async () => {

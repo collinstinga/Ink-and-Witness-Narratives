@@ -9,6 +9,22 @@ const SECRET = 'affiliate-attribution-test-secret-that-is-long-enough';
 const NOW = 1_800_000_000_000;
 
 describe('signed affiliate payment attribution', () => {
+  it('authenticates a complete prospective click source and rejects partial, stale or altered source metadata', () => {
+    const source = { sourceClickEventId: `aclk2_${'a'.repeat(64)}`,
+      sourceClickKeySha256: `ack1_${'A'.repeat(43)}`, sourceClickAt: new Date(NOW - 1_000).toISOString() };
+    const token = createAffiliateAttributionCookieValue({ ref: 'partner_7', ...source }, { now: NOW, signingSecret: SECRET })!;
+    expect(verifyAffiliateAttributionCookie(token, 'piece_42', { now: NOW, signingSecret: SECRET })).toMatchObject(source);
+    expect(createAffiliateAttributionCookieValue({ ref: 'partner_7', sourceClickEventId: source.sourceClickEventId },
+      { now: NOW, signingSecret: SECRET })).toBeNull();
+    const stale = createAffiliateAttributionCookieValue({ ref: 'partner_7', ...source,
+      sourceClickAt: new Date(NOW - 31 * 60_000).toISOString() }, { now: NOW, signingSecret: SECRET });
+    expect(verifyAffiliateAttributionCookie(stale, 'piece_42', { now: NOW, signingSecret: SECRET })).toBeNull();
+    const parts = token.split('.');
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    payload.e = `aclk2_${'b'.repeat(64)}`;
+    const altered = `${parts[0]}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${parts[2]}`;
+    expect(verifyAffiliateAttributionCookie(altered, 'piece_42', { now: NOW, signingSecret: SECRET })).toBeNull();
+  });
   it('returns a verified normalized attribution for its intended piece', () => {
     const token = createAffiliateAttributionCookieValue(
       { ref: 'Partner_7', campaign: 'Launch_2026', articleId: 'piece_42' },

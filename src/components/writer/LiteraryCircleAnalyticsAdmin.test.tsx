@@ -101,7 +101,7 @@ describe('LiteraryCircleAnalyticsAdmin report view', () => {
     expect(markup).not.toContain('abk1_');
   });
 
-  it('renders complete conversion as a percentage without multiplying it twice', () => {
+  it('renders only verified cohort conversion as a percentage without multiplying it twice', () => {
     const source = reportFixture();
     const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{
       ...source,
@@ -122,11 +122,41 @@ describe('LiteraryCircleAnalyticsAdmin report view', () => {
         repeatPurchases: 1,
         repeatPayingReaders: 1,
       },
+      conversionCohort: { coverage: 'complete', reason: 'complete', windowStartsAt: source.window.startsAt,
+        windowEndsAt: source.window.endsAt, asOf: '2026-10-21T00:00:00.000Z',
+        eligibleClicks: 30, convertedClicks: 3, conversionRate: 10, unmatchedLegacySales: 0, invalidEvidenceSales: 0 },
     }} />);
 
     expect(markup).toContain('10.0%');
     expect(markup).not.toContain('1000.0%');
     expect(markup).toContain('Complete pseudonymous coverage');
+    expect(markup).toContain('New affiliate-acquired readers');
+    expect(markup).toContain('first purchase across the whole platform');
+  });
+
+  it('withholds a traffic-only ratio even when a legacy report supplies a number', () => {
+    const source = reportFixture();
+    const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{ ...source,
+      referralTraffic: { ...source.referralTraffic, coverage: 'complete', conversionRate: 123 },
+    }} />);
+    expect(markup).not.toContain('123.0%');
+    expect(markup).toContain('Traffic-only conversion');
+    expect(markup).toContain('Withheld');
+  });
+
+  it('states authoritative financial coverage and cost limits without presenting known-cost net as profit', () => {
+    const markup = renderToStaticMarkup(<AffiliateAnalyticsReportView report={{ ...reportFixture(),
+      financialCoverage: { coverage: 'complete', source: 'firestore_snapshot', reason: 'complete',
+        asOf: '2026-10-20T09:00:00.000Z' },
+      financialAdjustments: { coverage: 'recorded_adjustments', refundedSalesKes: 100,
+        commissionClawbackKes: 15, knownDirectCostsKes: 30, retainedAfterRefundsKes: 2040,
+        netAfterKnownCostsKes: 2010, costCoverage: 'known_recorded_costs_only', netProfitClaimed: false,
+        unmatchedSelectedSales: 0 },
+    }} />);
+    expect(markup).toContain('Financial records observed through');
+    expect(markup).toContain('Net after known costs');
+    expect(markup).toContain('not total net profit');
+    expect(markup).toContain('unrecorded operating costs');
   });
 
   it('explains the actual buyer coverage reason without calling every unavailable report disabled', () => {

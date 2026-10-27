@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { AffiliateSaleCommission } from '../types.js';
 import {
@@ -5,11 +6,16 @@ import {
   affiliateFinancialTotals, readAffiliateFinancialSnapshot,
 } from './affiliateFinancialRead.js';
 
-function fakeDatabase(seed: Record<string, Record<string, any>>) {
+vi.mock('./db.js', () => ({ getFirestoreClientTarget: () => ({ projectId: 'ink-witness-staging-20261024', firestoreDatabaseId: '(default)' }) }));
+
+function fakeDatabase(seed: Record<string, Record<string, any>>, options: { missingReadTime?: boolean; inconsistentReadTime?: boolean } = {}) {
   const records = new Map(Object.entries(seed));
   const reads: Array<{ path: string; where?: string; limit?: number }> = [];
   const transactionOptions: any[] = [];
   const writes = vi.fn();
+  const time = (path: string) => options.missingReadTime ? {} : { readTime: {
+    toMillis: () => Date.parse(options.inconsistentReadTime && path === 'affiliate_commissions' ? '2026-10-27T08:00:01.000Z' : '2026-10-27T08:00:00.000Z'),
+  } };
   const collection = (path: string, where?: [string, unknown], limit?: number): any => ({
     path, whereClause: where, readLimit: limit,
     doc: (id: string) => ({ path: `${path}/${id}`, isDocument: true, id }),
@@ -31,9 +37,9 @@ function fakeDatabase(seed: Record<string, Record<string, any>>) {
           reads.push({ path: reference.path, where: reference.whereClause?.[0], limit: reference.readLimit });
           if (reference.isDocument) {
             const data = snapshot.get(reference.path);
-            return { exists: data !== undefined, id: reference.id, data: () => data };
+            return { exists: data !== undefined, id: reference.id, data: () => data, ...time(reference.path) };
           }
-          return { docs: [...snapshot].filter(([path, value]) => path.startsWith(`${reference.path}/`)
+          return { ...time(reference.path), docs: [...snapshot].filter(([path, value]) => path.startsWith(`${reference.path}/`)
             && (!reference.whereClause || value[reference.whereClause[0]] === reference.whereClause[1]))
             .slice(0, reference.readLimit).map(([path, value]) => ({ id: path.split('/').at(-1), data: () => value })) };
         },
@@ -55,6 +61,29 @@ const baseSeed = {
 };
 
 describe('authoritative affiliate financial reads', () => {
+  it('reads immutable overlays inside the same snapshot and never exposes raw evidence', async () => {
+    const affiliateId = 'own';
+    const walletId = `affiliate_${crypto.createHash('sha256').update(JSON.stringify(affiliateId)).digest('hex')}`;
+    const fake = fakeDatabase({ ...baseSeed, [`affiliate_financial_adjustment_summaries/${walletId}`]: {
+      schemaVersion: 1, kind: 'affiliate', affiliateId, revision: 1, walletDeltaKes: -200, refundedMinor: 100_000, adjustmentCount: 1,
+    } });
+    const result = await readAffiliateFinancialSnapshot({ db: fake.db, affiliateId,
+      adjustmentsContext: { db: fake.db, expectedProjectId: 'ink-witness-staging-20261024', expectedDatabaseId: '(default)', actor: 'Authenticated server read' } });
+    expect(result).toMatchObject({ observedThrough: '2026-10-27T08:00:00.000Z',
+      adjustmentWallets: { own: { walletDeltaKes: -200, revision: 1 } },
+      financialAdjustments: { asOf: '2026-10-27T08:00:00.000Z', directCostScope: 'unavailable_for_affiliate_filter' } });
+    expect(fake.transactionOptions).toEqual([{ readOnly: true }]);
+    expect(fake.writes).not.toHaveBeenCalled();
+  });
+
+  it('withholds provenance on missing metadata and rejects inconsistent snapshot times', async () => {
+    const missing = fakeDatabase(baseSeed, { missingReadTime: true });
+    expect((await readAffiliateFinancialSnapshot({ db: missing.db }))?.observedThrough).toBeUndefined();
+    const inconsistent = fakeDatabase(baseSeed, { inconsistentReadTime: true });
+    await expect(readAffiliateFinancialSnapshot({ db: inconsistent.db })).rejects.toThrow(/one authoritative snapshot/);
+    await expect(readAffiliateFinancialSnapshot({ db: missing.db, adjustmentsContext: { db: missing.db,
+      expectedProjectId: 'ink-witness-staging-20261024', expectedDatabaseId: '(default)', actor: 'Server read' } })).rejects.toThrow(/no cached balances/);
+  });
   it('uses a read-only consistent snapshot and scoped queries for the affiliate dashboard', async () => {
     const fake = fakeDatabase(baseSeed);
     const result = await readAffiliateFinancialSnapshot({ db: fake.db, affiliateId: 'own' });

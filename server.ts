@@ -96,6 +96,9 @@ import { getAffiliateNotificationRuntimeStatus, runAffiliateNotificationJob } fr
 import { reconcileAffiliateNotificationWebhook } from "./src/server/affiliateNotificationDelivery.js";
 import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntimeRequest } from "./src/server/affiliateNotificationRuntimeRequest.js";
 import { affiliateNotificationWebhookModeEnabled, registerAffiliateNotificationRolloutRoutes } from "./src/server/affiliateNotificationRolloutRoutes.js";
+import { registerAffiliateNotificationScheduledRoutes } from "./src/server/affiliateNotificationScheduledRoutes.js";
+import { registerAffiliateFinancialAdjustmentRoutes } from "./src/server/affiliateFinancialAdjustmentRoutes.js";
+import { registerAffiliateNotificationOwnerOperatorRoutes } from "./src/server/affiliateNotificationOwnerOperatorRoutes.js";
 import { AffiliateNotificationEligibilityOverflowError, readAffiliateNotificationEligibility } from "./src/server/affiliateNotificationEligibilityRead.js";
 import { isStagingVerificationBindingEnabled, readStagingVerificationBinding } from "./src/server/stagingVerificationBinding.js";
 import {
@@ -2526,7 +2529,8 @@ export async function createApp() {
       const attribution = {
         ref: canonicalAffiliateCode,
         articleId: trackingTarget,
-        campaign: canonicalCampaignCode
+        campaign: canonicalCampaignCode,
+        ...clickResult.sourceClick,
       };
       if (visitor.replacementCookie && visitor.replacementMaxAgeMs) {
         setAffiliateClickVisitorCookie(
@@ -2755,6 +2759,9 @@ export async function createApp() {
           affiliateCode: trustedAttribution?.ref,
           campaignCode: trustedAttribution?.campaign,
           affiliateAttributionVersion: trustedAttribution ? 2 : undefined,
+          sourceClickEventId: trustedAttribution?.sourceClickEventId,
+          sourceClickKeySha256: trustedAttribution?.sourceClickKeySha256,
+          sourceClickAt: trustedAttribution?.sourceClickAt,
           affiliateAttributionClaimId: trustedAttribution
             ? getAffiliateAttributionClaimDocumentId(trustedAttribution.attributionId)
             : undefined,
@@ -2944,6 +2951,9 @@ export async function createApp() {
         affiliateCode: trustedAttribution?.ref,
         campaignCode: trustedAttribution?.campaign,
         affiliateAttributionVersion: trustedAttribution ? 2 : undefined,
+        sourceClickEventId: trustedAttribution?.sourceClickEventId,
+        sourceClickKeySha256: trustedAttribution?.sourceClickKeySha256,
+        sourceClickAt: trustedAttribution?.sourceClickAt,
         affiliateAttributionClaimId: trustedAttribution
           ? getAffiliateAttributionClaimDocumentId(trustedAttribution.attributionId)
           : undefined,
@@ -3079,6 +3089,9 @@ export async function createApp() {
         affiliateCode: trustedAttribution?.ref,
         campaignCode: trustedAttribution?.campaign,
         affiliateAttributionVersion: trustedAttribution ? 2 : undefined,
+        sourceClickEventId: trustedAttribution?.sourceClickEventId,
+        sourceClickKeySha256: trustedAttribution?.sourceClickKeySha256,
+        sourceClickAt: trustedAttribution?.sourceClickAt,
         affiliateAttributionClaimId: trustedAttribution
           ? getAffiliateAttributionClaimDocumentId(trustedAttribution.attributionId)
           : undefined,
@@ -6223,7 +6236,8 @@ ${currentDraft || prompt}
         const attributionSet = setVerifiedAffiliateAttribution(res, {
           ref: result.affiliate.affiliateCode || ref,
           articleId,
-          campaign: result.campaign?.code
+          campaign: result.campaign?.code,
+          ...result.sourceClick,
         }, result.attributionMaxAgeMs);
         if (!attributionSet) {
           return res.status(503).json({
@@ -7056,6 +7070,17 @@ ${currentDraft || prompt}
   registerAffiliateNotificationRolloutRoutes(app, {
     requireAdminAuth, noStore: noStoreNotificationRuntime,
     rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
+  });
+
+  registerAffiliateFinancialAdjustmentRoutes(app, {
+    requireAdminAuth, noStore: noStoreNotificationRuntime,
+    rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
+  });
+  registerAffiliateNotificationScheduledRoutes(app, {
+    noStore: noStoreNotificationRuntime, rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
+  });
+  registerAffiliateNotificationOwnerOperatorRoutes(app, {
+    noStore: noStoreNotificationRuntime, rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
   });
 
   app.get('/api/admin/affiliates/notifications/runtime', noStoreNotificationRuntime, requireAdminAuth,

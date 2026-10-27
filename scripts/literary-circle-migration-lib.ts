@@ -4,7 +4,7 @@ import path from 'path';
 import type { AffiliateAccount, AffiliateLiteraryCircleMembership } from '../src/types.js';
 import { getDb, resolveFirestoreTargetConfig } from '../src/server/db.js';
 
-export const AFFILIATE_BACKUP_SCHEMA_VERSION = 8 as const;
+export const AFFILIATE_BACKUP_SCHEMA_VERSION = 9 as const;
 export const LITERARY_CIRCLE_MIGRATION_ID = 'literary-circle-founding-affiliates-v1';
 export const FOUNDING_AFFILIATE_COUNT = 9;
 export const KNOWN_PRODUCTION_FIREBASE_PROJECT_IDS = [
@@ -109,6 +109,28 @@ export const AFFILIATE_BACKUP_DATASETS: readonly BackupDatasetDefinition[] = [
     key: 'affiliate_tier_periods',
     collection: 'affiliate_tier_periods',
     fileName: 'affiliate_tier_periods.json',
+    scope: 'all_documents',
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: 'affiliate_financial_adjustments',
+    collection: 'affiliate_financial_adjustments',
+    fileName: 'affiliate_financial_adjustments.json',
+    scope: 'all_documents',
+    sumFields: { amountMinor: ['amountMinor'], walletDeltaKes: ['walletDeltaKes'] }
+  },
+  {
+    key: 'affiliate_financial_adjustment_summaries',
+    collection: 'affiliate_financial_adjustment_summaries',
+    fileName: 'affiliate_financial_adjustment_summaries.json',
+    scope: 'all_documents',
+    // These contain different summary kinds. Never sum them together.
+    sumFields: EMPTY_SUM_FIELDS
+  },
+  {
+    key: 'affiliate_financial_adjustment_claims',
+    collection: 'affiliate_financial_adjustment_claims',
+    fileName: 'affiliate_financial_adjustment_claims.json',
     scope: 'all_documents',
     sumFields: EMPTY_SUM_FIELDS
   },

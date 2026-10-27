@@ -322,6 +322,9 @@ export interface InitiateStkPushParams {
   affiliateAttributionClaimId?: string;
   affiliateAttributionAt?: string;
   affiliateAttributionExpiresAt?: string;
+  sourceClickEventId?: string;
+  sourceClickKeySha256?: string;
+  sourceClickAt?: string;
   userId?: string;
   userEmail?: string;
   originUrl?: string;
@@ -374,6 +377,9 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     affiliateAttributionClaimId,
     affiliateAttributionAt,
     affiliateAttributionExpiresAt,
+    sourceClickEventId,
+    sourceClickKeySha256,
+    sourceClickAt,
     userId,
     userEmail,
     originUrl
@@ -498,6 +504,9 @@ export async function initiateStkPush(params: InitiateStkPushParams): Promise<St
     affiliateAttributionClaimId: affiliateAttributionClaimId || undefined,
     affiliateAttributionAt: affiliateAttributionAt || undefined,
     affiliateAttributionExpiresAt: affiliateAttributionExpiresAt || undefined,
+    sourceClickEventId,
+    sourceClickKeySha256,
+    sourceClickAt,
     userId: userId || undefined,
     userEmail: userEmail || undefined,
     shortcodeUsed: businessShortCode,

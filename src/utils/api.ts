@@ -24,6 +24,13 @@ import {
   AdminAffiliatesSummary,
   AffiliateAnalyticsFilters,
   AffiliateAnalyticsReport,
+  AffiliateFinancialAdjustmentOverview,
+  AffiliateFinancialAdjustmentResult,
+  AffiliateRefundAdjustmentRequest,
+  AffiliateDirectCostRequest,
+  AffiliateFinancialAdjustmentCorrectionRequest,
+  AffiliateAdjustmentWalletSummary,
+  AffiliateDirectCostSummary,
   ReaderLicense,
   UserLibraryResponse,
   HomepageConfig,
@@ -2892,6 +2899,32 @@ export const api = {
     );
   },
 
+  async getAdminAffiliateFinancialAdjustments(options: { signal?: AbortSignal } = {}): Promise<{
+    success: true; overview: AffiliateFinancialAdjustmentOverview;
+  }> {
+    return safeFetchJson('/api/admin/affiliates/financial-adjustments', {
+      cache: 'no-store', signal: options.signal, headers: { 'x-admin-token': getWriterToken() || '' },
+    }, 'Failed to load financial adjustment history.');
+  },
+
+  async getAdminAffiliateAdjustmentRevision(kind: 'wallet' | 'costs', id: string): Promise<{
+    success: true; summary: AffiliateAdjustmentWalletSummary | AffiliateDirectCostSummary;
+  }> {
+    return safeFetchJson(`/api/admin/affiliates/financial-adjustments/${kind}/${encodeURIComponent(id)}`, {
+      cache: 'no-store', headers: { 'x-admin-token': getWriterToken() || '' },
+    }, 'Failed to read the current financial revision.');
+  },
+
+  async recordAdminAffiliateFinancialAdjustment(
+    kind: 'refunds' | 'refund-corrections' | 'costs' | 'cost-corrections',
+    request: AffiliateRefundAdjustmentRequest | AffiliateDirectCostRequest | AffiliateFinancialAdjustmentCorrectionRequest,
+  ): Promise<{ success: true; result: AffiliateFinancialAdjustmentResult }> {
+    return safeFetchJson(`/api/admin/affiliates/financial-adjustments/${kind}`, {
+      method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify(request),
+    }, 'Recording was not confirmed. Check the ledger before retrying the exact request.');
+  },
+
   async getAdminAffiliateNotificationRollout(options: { signal?: AbortSignal } = {}): Promise<{
     success: true; rollout: ProductionAffiliateNotificationRolloutStatus;
   }> {
@@ -3182,7 +3215,7 @@ export const api = {
     );
   },
 
-  async getAdminAffiliateCommissions(filter?: { affiliateId?: string; status?: string }): Promise<{ commissions: AffiliateSaleCommission[] }> {
+  async getAdminAffiliateCommissions(filter?: { affiliateId?: string; status?: string; signal?: AbortSignal }): Promise<{ commissions: AffiliateSaleCommission[] }> {
     const activeToken = getWriterToken();
     const params = new URLSearchParams();
     if (filter?.affiliateId) params.append('affiliateId', filter.affiliateId);
@@ -3191,6 +3224,7 @@ export const api = {
     const data = await safeFetchJson<any>(
       `/api/admin/affiliates/commissions?${params.toString()}`,
       {
+        cache: 'no-store', signal: filter?.signal,
         headers: { 'x-admin-token': activeToken || '' }
       },
       'Failed to load commissions ledger.'
