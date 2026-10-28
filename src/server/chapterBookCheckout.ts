@@ -50,6 +50,12 @@ export async function loadChapterBookCheckout(
 }
 
 /** Refuse a stale price instead of silently asking the phone to authorize more. */
+export function requireCurrentBookEdition(book: ContentBundle, requestedRevision: unknown): void {
+  if (typeof requestedRevision !== 'string' || requestedRevision !== book.updatedAt) {
+    throw new ChapterBookCheckoutError(409, 'This book edition has changed. Reopen its contents and review the chapters before paying.');
+  }
+}
+
 export function requireCurrentBookPrice(quote: ContentBookQuote, requestedAmount: unknown): number {
   if (quote.alreadyOwned || quote.amountKes === 0) {
     throw new ChapterBookCheckoutError(409, 'You already have purchase access to every paid chapter. Open the book to read.');

@@ -36,7 +36,7 @@ import {
 import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
 import { validateChapterBookMetadata, validateContentBundlePieceIds, validateContentBundleMembers } from './src/server/chapterBooks.js';
 import { getPurchasedChapterIdsForUser } from './src/server/chapterBookOwnership.js';
-import { ChapterBookCheckoutError, createChapterBookQuoteHandler, loadChapterBookCheckout, requireCurrentBookPrice } from './src/server/chapterBookCheckout.js';
+import { ChapterBookCheckoutError, createChapterBookQuoteHandler, loadChapterBookCheckout, requireCurrentBookEdition, requireCurrentBookPrice } from './src/server/chapterBookCheckout.js';
 import {
   SubscriptionPlanConflictError,
   subscriptionStore
@@ -2888,9 +2888,7 @@ export async function createApp() {
           articleTitle = bundle.name;
           chargeAmount = bundle.priceKes;
           if (bundle.kind === 'book') {
-            if (req.body?.bookUpdatedAt !== bundle.updatedAt) {
-              throw new ChapterBookCheckoutError(409, 'This book edition has changed. Reopen its contents and review the chapters before paying.');
-            }
+            requireCurrentBookEdition(bundle, req.body?.bookUpdatedAt);
             const current = await loadChapterBookCheckout(bundle.id, user, {
               getBook: async () => bundle,
               getPublishedArticles: () => store.getFreshArticles(false, true),

@@ -235,6 +235,7 @@ export const publicWriteValidators = {
 
   stkPush: validateJsonBody({
     articleId: optionalId,
+    bookUpdatedAt: { kind: 'string', maxLength: 80, pattern: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/ },
     phoneNumber: optionalPhone,
     phone: optionalPhone,
     tel: optionalPhone,
