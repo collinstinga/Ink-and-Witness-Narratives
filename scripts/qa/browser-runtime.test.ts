@@ -26,6 +26,9 @@ describe('reproducible synthetic CI browser runtime', () => {
   it('installs the exact runtime browser and dependencies instead of runner Chrome', () => {
     expect(workflow).toContain('node "$PLAYWRIGHT_TEST_RUNTIME/node_modules/playwright/cli.js" install --with-deps --only-shell chromium');
     expect(workflow).toContain('PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ink-witness-browsers');
+    const beforeSteps = workflow.slice(0, workflow.indexOf('    steps:'));
+    expect(beforeSteps).not.toContain('runner.temp');
+    expect(workflow).toContain('echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"');
     expect(workflow).not.toContain('command -v google-chrome');
     expect(workflow).not.toContain('CHROME_PATH:');
     expect(workflow).not.toMatch(/continue-on-error|retry|retries/);

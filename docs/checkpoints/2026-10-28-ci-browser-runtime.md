@@ -22,6 +22,7 @@ Seven-day artifacts contain only allowlisted synthetic screenshots, JSON proofs 
 - Focused runtime and workflow-contract tests: 6 passed locally.
 - Independent diff review: no blocking findings.
 - CJS syntax checks: passed for the runtime and all three suites.
+- The first unmerged CI candidate placed `runner.temp` in the unsupported job-level `env` context; GitHub rejected that workflow before starting a job. Corrected to step-scoped environment plus controlled path persistence through `GITHUB_ENV`. Local actionlint now validates the workflow; a regression assertion prevents restoring the invalid placement.
 - Full exact-source GitHub suite and managed-browser checks must pass before advancing main. Record their run IDs in the release checkpoint outside the repository.
 - This change is CI/test infrastructure only. Production application code, purchases, accounts, access permissions, M-PESA configuration and database contents are unchanged. No production rebuild or migration is required.
 

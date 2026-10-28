@@ -18,9 +18,6 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ink-witness-browsers
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -44,8 +41,15 @@ jobs:
       - name: Install matching managed Chromium and verify three fresh launches
         id: browser_setup
         timeout-minutes: 6
+        env:
+          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ink-witness-browsers
         run: |
           set -euo pipefail
+          # Runner context is available at step scope, not job.env. Persist only
+          # these controlled directory paths for the subsequent synthetic suites.
+          echo "PLAYWRIGHT_TEST_RUNTIME=$PLAYWRIGHT_TEST_RUNTIME" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
           mkdir -p data/ci-browser-qa
           npm install --prefix "$PLAYWRIGHT_TEST_RUNTIME" --no-audit --no-fund --ignore-scripts --no-package-lock playwright@1.62.1
           node "$PLAYWRIGHT_TEST_RUNTIME/node_modules/playwright/cli.js" install --with-deps --only-shell chromium
