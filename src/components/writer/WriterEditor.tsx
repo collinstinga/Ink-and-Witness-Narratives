@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { 
   Save, 
   Globe, 
@@ -216,6 +216,22 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [permanentCoverSaved, setPermanentCoverSaved] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pendingEditorSelectionRef = useRef<{ content: string; selectionStart: number; selectionEnd: number } | null>(null);
+
+  // Restore a formatting selection in the same commit as its controlled value.
+  // A later timer can overwrite a newer reader selection between two toolbar actions.
+  useLayoutEffect(() => {
+    const pending = pendingEditorSelectionRef.current;
+    if (!pending || pending.content !== content || activeTab !== 'write') return;
+    pendingEditorSelectionRef.current = null;
+    const textarea = textareaRef.current;
+    if (!textarea || textarea.value !== pending.content) return;
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(pending.selectionStart, pending.selectionEnd);
+    setBoldActive(isCursorInsideInlineMarkdown(pending.content, pending.selectionStart, '**'));
+    setItalicActive(isCursorInsideInlineMarkdown(pending.content, pending.selectionStart, '*'));
+    setHeadingLevel(getMarkdownHeadingLevel(pending.content, pending.selectionStart));
+  }, [content, activeTab]);
 
   // Word count & Read time
   const wordCount = content.trim() ? content.trim().split(/\s+/).length : 0;
@@ -473,15 +489,18 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
   const applyEditorResult = (result: { content: string; selectionStart: number; selectionEnd: number }) => {
     const textarea = textareaRef.current;
-    setContent(result.content);
-    setTimeout(() => {
-      if (!textarea) return;
-      textarea.focus();
+    if (textarea && result.content === content) {
+      // Toggling a typing marker off can move only the caret, without a render.
+      pendingEditorSelectionRef.current = null;
+      textarea.focus({ preventScroll: true });
       textarea.setSelectionRange(result.selectionStart, result.selectionEnd);
       setBoldActive(isCursorInsideInlineMarkdown(result.content, result.selectionStart, '**'));
       setItalicActive(isCursorInsideInlineMarkdown(result.content, result.selectionStart, '*'));
       setHeadingLevel(getMarkdownHeadingLevel(result.content, result.selectionStart));
-    }, 0);
+      return;
+    }
+    pendingEditorSelectionRef.current = result;
+    setContent(result.content);
   };
 
   const updateInlineToolbarState = (nextContent = content) => {
@@ -1327,7 +1346,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                 onChange={(e) => {
                   const nextContent = e.target.value;
                   setContent(nextContent);
-                  requestAnimationFrame(() => updateInlineToolbarState(nextContent));
+                  updateInlineToolbarState(nextContent);
                 }}
                 onSelect={() => updateInlineToolbarState()}
                 onKeyUp={() => updateInlineToolbarState()}
