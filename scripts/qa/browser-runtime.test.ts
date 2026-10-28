@@ -45,6 +45,13 @@ describe('reproducible synthetic CI browser runtime', () => {
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('retention-days: 7');
     expect(workflow).not.toContain('secrets.');
-    expect(workflow).not.toMatch(/path: \.[\r\n]|data\/\*\*|\.env/);
+    const artifactPaths = workflow.slice(workflow.lastIndexOf('          path: |'))
+      .split(/\r?\n/).slice(1).map(line => line.trim()).filter(Boolean);
+    expect(artifactPaths).toEqual([
+      'data/ci-browser-qa/*.json', 'data/ci-browser-qa/*.log',
+      'data/financial-controls-qa/*.json', 'data/financial-controls-qa/*.png',
+      'data/writer-security-qa/*.json', 'data/writer-security-qa/*.png',
+      'data/chapter-books-qa/*.json', 'data/chapter-books-qa/*.png',
+    ]);
   });
 });
