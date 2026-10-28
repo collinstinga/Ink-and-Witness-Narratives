@@ -215,7 +215,9 @@ export const MpesaCheckoutModal: React.FC<MpesaCheckoutModalProps> = ({
       setErrorMessage('');
       localStorage.setItem('ink_user_phone', cleanPhone);
       
-      const res = await api.initiateStkPush(article.id, cleanPhone, basePriceKes);
+      const res = article.category === 'Book'
+        ? await api.initiateStkPush(article.id, cleanPhone, basePriceKes, false, undefined, undefined, article.bookCheckoutUpdatedAt)
+        : await api.initiateStkPush(article.id, cleanPhone, basePriceKes);
       if (!res || !res.checkoutRequestId || !res.paymentCapability) {
         throw new Error(res?.error || 'Safaricom did not return a valid CheckoutRequestID.');
       }

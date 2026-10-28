@@ -4,6 +4,60 @@ export interface MarkdownEditResult {
   selectionEnd: number;
 }
 
+export type MarkdownHeadingLevel = 0 | 1 | 2 | 3;
+
+/** Returns the heading label at the cursor, without interpreting text as HTML. */
+export function getMarkdownHeadingLevel(content: string, cursor: number): MarkdownHeadingLevel {
+  const position = Math.max(0, Math.min(cursor, content.length));
+  const lineStart = position === 0 ? 0 : content.lastIndexOf('\n', position - 1) + 1;
+  const match = /^ {0,3}(#{1,3})(?:[\t ]+|$)/.exec(content.slice(lineStart));
+  return match ? match[1].length as MarkdownHeadingLevel : 0;
+}
+
+/** Replaces a line's heading label instead of stacking incompatible Markdown prefixes. */
+export function setMarkdownHeading(
+  content: string,
+  start: number,
+  end: number,
+  level: MarkdownHeadingLevel
+): MarkdownEditResult {
+  const selectionStart = Math.max(0, Math.min(start, content.length));
+  const selectionEnd = Math.max(selectionStart, Math.min(end, content.length));
+  const lineStart = selectionStart === 0 ? 0 : content.lastIndexOf('\n', selectionStart - 1) + 1;
+  // A selection ending at the next line's start must not change that next line.
+  const lastSelectedPosition = selectionEnd > selectionStart && content[selectionEnd - 1] === '\n'
+    ? selectionEnd - 1 : selectionEnd;
+  const nextBreak = content.indexOf('\n', lastSelectedPosition);
+  const lineEnd = nextBreak < 0 ? content.length : nextBreak;
+  const lines = content.slice(lineStart, lineEnd).split('\n');
+  const transforms: Array<{ oldStart: number; oldLength: number; oldPrefix: number; newStart: number; newPrefix: number; text: string }> = [];
+  let oldOffset = lineStart;
+  let newOffset = lineStart;
+  for (const line of lines) {
+    const heading = /^( {0,3})#{1,6}(?:[\t ]+|$)/.exec(line);
+    const indentation = heading?.[1] ?? (/^ {0,3}/.exec(line)?.[0] || '');
+    const oldPrefix = heading ? heading[0].length : indentation.length;
+    const newPrefix = indentation + (level ? `${'#'.repeat(level)} ` : '');
+    const formatLine = Boolean(line.trim()) || (selectionStart === selectionEnd && selectionStart >= oldOffset && selectionStart <= oldOffset + line.length);
+    const text = formatLine ? newPrefix + line.slice(oldPrefix) : line;
+    transforms.push({ oldStart: oldOffset, oldLength: line.length, oldPrefix, newStart: newOffset, newPrefix: formatLine ? newPrefix.length : oldPrefix, text });
+    oldOffset += line.length + 1;
+    newOffset += text.length + 1;
+  }
+  const updatedBlock = transforms.map(line => line.text).join('\n');
+  const delta = updatedBlock.length - (lineEnd - lineStart);
+  const mapPosition = (position: number) => {
+    if (position > lineEnd) return position + delta;
+    const line = transforms.find(item => position <= item.oldStart + item.oldLength) ?? transforms[transforms.length - 1];
+    return line.newStart + Math.max(line.newPrefix, position - line.oldStart + line.newPrefix - line.oldPrefix);
+  };
+  return {
+    content: content.slice(0, lineStart) + updatedBlock + content.slice(lineEnd),
+    selectionStart: mapPosition(selectionStart),
+    selectionEnd: mapPosition(selectionEnd)
+  };
+}
+
 function markerPositions(content: string, marker: string): number[] {
   const positions: number[] = [];
   let from = 0;

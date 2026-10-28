@@ -34,6 +34,9 @@ import {
   normalizeHomepageSections
 } from "./src/homepageSections.js";
 import { readerExperienceStore, READER_REACTIONS } from "./src/server/readerExperienceStore.js";
+import { validateChapterBookMetadata, validateContentBundlePieceIds, validateContentBundleMembers } from './src/server/chapterBooks.js';
+import { getPurchasedChapterIdsForUser } from './src/server/chapterBookOwnership.js';
+import { ChapterBookCheckoutError, createChapterBookQuoteHandler, loadChapterBookCheckout, requireCurrentBookPrice } from './src/server/chapterBookCheckout.js';
 import {
   SubscriptionPlanConflictError,
   subscriptionStore
@@ -628,6 +631,7 @@ function toPublicArticleSummary(article: Article, defaultPriceKes: number, isUnl
     categories: article.categories || (article.category ? [article.category] : []),
     topics: article.topics || [],
     status: article.status,
+    publicationType: article.publicationType === 'chapter' ? 'chapter' : 'individual',
     isPaid,
     priceKes,
     prices: { ...(article.prices || {}), KES: priceKes },
@@ -687,13 +691,14 @@ function sanitizeBehindThePiece(value: unknown): Article['behindThePiece'] | und
 function publicBundleCheckoutArticle(bundle: ContentBundle, pieces: Article[]): Article {
   return {
     id: `bundle:${bundle.id}`,
+    ...(bundle.kind === 'book' ? { bookCheckoutUpdatedAt: bundle.updatedAt } : {}),
     title: bundle.name,
-    subtitle: `${pieces.length} pieces • permanent account access`,
+    subtitle: `${pieces.length} ${bundle.kind === 'book' ? 'chapters' : 'pieces'} • permanent account access`,
     slug: `bundle-${bundle.slug}`,
     excerpt: bundle.description,
     content: '',
-    category: 'Bundle',
-    categories: ['Bundle'],
+    category: bundle.kind === 'book' ? 'Book' : 'Bundle',
+    categories: [bundle.kind === 'book' ? 'Book' : 'Bundle'],
     topics: [],
     status: 'published',
     isPaid: true,
@@ -706,7 +711,7 @@ function publicBundleCheckoutArticle(bundle: ContentBundle, pieces: Article[]): 
     coverImage: bundle.coverImage || pieces[0]?.coverImage,
     downloadsCount: 0,
     previewParagraphs: [],
-    tags: ['Bundle']
+    tags: [bundle.kind === 'book' ? 'Book' : 'Bundle']
   };
 }
 
@@ -2873,7 +2878,7 @@ export async function createApp() {
           bundleId = articleId.slice('bundle:'.length);
           const bundle = await readerExperienceStore.getBundle(bundleId, false);
           if (!bundle) return res.status(404).json({ error: 'Bundle not found or unavailable for purchase.' });
-          const publishedIds = new Set(store.getArticles(false).map(piece => piece.id));
+          const publishedIds = new Set((await store.getFreshArticles(false, true)).map(piece => piece.id));
           bundlePieceIds = [...new Set(bundle.pieceIds)].filter(id => publishedIds.has(id));
           if (bundlePieceIds.length < 2 || bundlePieceIds.length !== bundle.pieceIds.length) {
             return res.status(409).json({ error: 'This bundle is being updated. Reload before purchasing.' });
@@ -2882,6 +2887,17 @@ export async function createApp() {
           canonicalArticleId = `bundle:${bundle.id}`;
           articleTitle = bundle.name;
           chargeAmount = bundle.priceKes;
+          if (bundle.kind === 'book') {
+            if (req.body?.bookUpdatedAt !== bundle.updatedAt) {
+              throw new ChapterBookCheckoutError(409, 'This book edition has changed. Reopen its contents and review the chapters before paying.');
+            }
+            const current = await loadChapterBookCheckout(bundle.id, user, {
+              getBook: async () => bundle,
+              getPublishedArticles: () => store.getFreshArticles(false, true),
+              getPurchasedChapterIds: getPurchasedChapterIdsForUser
+            });
+            chargeAmount = requireCurrentBookPrice(current.quote, amount);
+          }
         } else {
           const article = await store.getFreshArticleById(articleId, false, true);
           if (!article) {
@@ -3005,6 +3021,7 @@ export async function createApp() {
         await releaseKnownFailedAffiliateClaim(reservedAttribution);
       }
       console.error("STK Push controller exception:", err);
+      if (err instanceof ChapterBookCheckoutError) return res.status(err.status).json({ error: err.message });
       res.status(500).json({ error: err.message || "Failed to initiate M-Pesa payment" });
     }
   });
@@ -4028,13 +4045,19 @@ export async function createApp() {
     }
   });
 
+  app.get('/api/books/:id/quote', requireAuth, verifyAccessLimiter, createChapterBookQuoteHandler({
+    getBook: id => readerExperienceStore.getBundle(id, false),
+    getPublishedArticles: () => store.getFreshArticles(false, true),
+    getPurchasedChapterIds: getPurchasedChapterIdsForUser
+  }));
+
   app.get('/api/discovery/collections', async (_req: Request, res: Response) => {
     try {
       const [collections, bundles] = await Promise.all([
         readerExperienceStore.listCollections(false),
         readerExperienceStore.listBundles(false)
       ]);
-      const articles = store.getArticles(false);
+      const articles = await store.getFreshArticles(false, true);
       const byId = new Map(articles.map(article => [article.id, article]));
       const defaultPrice = store.getMpesaSettings().defaultPriceKes || 1050;
       const piecesFor = (ids: string[]) => ids
@@ -4395,8 +4418,13 @@ export async function createApp() {
         metaDescription,
         manualRelatedPieceIds,
         behindThePiece,
+        publicationType,
         notifyNewsletterSubscribers
       } = req.body;
+
+      if (publicationType !== undefined && publicationType !== 'individual' && publicationType !== 'chapter') {
+        return res.status(400).json({ error: 'Choose an individual piece or a book chapter.' });
+      }
 
       if (!title || !content) {
         return res.status(400).json({ error: "Title and content are required." });
@@ -4419,6 +4447,7 @@ export async function createApp() {
 
       const newArticle: Article = {
         id: `art-${Date.now()}`,
+        publicationType: publicationType === 'chapter' ? 'chapter' : 'individual',
         title: title.trim(),
         subtitle: subtitle ? subtitle.trim() : "",
         slug,
@@ -4485,6 +4514,9 @@ export async function createApp() {
         revisionSummary,
         ...articlePatch
       } = req.body || {};
+      if (articlePatch.publicationType !== undefined && articlePatch.publicationType !== 'individual' && articlePatch.publicationType !== 'chapter') {
+        return res.status(400).json({ error: 'Choose an individual piece or a book chapter.' });
+      }
       const existing = await store.getFreshArticleById(id, true, true);
       if (!existing) {
         return res.status(404).json({ error: "Piece not found." });
@@ -5015,8 +5047,9 @@ export async function createApp() {
 
   app.post('/api/admin/bundles', requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const validation = validateExperiencePieceIds(req.body?.pieceIds, 2);
-      if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const pieceIds = validateContentBundlePieceIds(req.body?.pieceIds);
+      const metadata = validateChapterBookMetadata(req.body);
+      validateContentBundleMembers({ pieceIds, isPublished: true }, await store.getFreshArticles(false, true));
       const coverPosition = validateCoverPosition(req.body?.coverPosition);
       if (coverPosition.error) return res.status(400).json({ error: coverPosition.error });
       const name = String(req.body?.name || '').trim();
@@ -5027,7 +5060,8 @@ export async function createApp() {
         name,
         slug: String(req.body?.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')).slice(0, 140),
         description: String(req.body?.description || '').slice(0, 1_500),
-        pieceIds: validation.pieceIds,
+        pieceIds,
+        ...metadata,
         priceKes,
         coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
         coverPosition: coverPosition.coverPosition,
@@ -5041,16 +5075,21 @@ export async function createApp() {
 
   app.put('/api/admin/bundles/:id', requireAdminAuth, async (req: Request, res: Response) => {
     try {
-      const validation = validateExperiencePieceIds(req.body?.pieceIds, 2);
-      if (!validation.pieceIds) return res.status(400).json({ error: validation.error });
+      const previous = await readerExperienceStore.getBundle(req.params.id, true);
+      if (!previous) return res.status(404).json({ error: 'Book or bundle not found.' });
+      const pieceIds = validateContentBundlePieceIds(req.body?.pieceIds);
+      const metadata = validateChapterBookMetadata(req.body, previous);
+      validateContentBundleMembers({ pieceIds, isPublished: true }, await store.getFreshArticles(false, true));
       const coverPosition = validateCoverPosition(req.body?.coverPosition);
       if (coverPosition.error) return res.status(400).json({ error: coverPosition.error });
       const bundle = await readerExperienceStore.saveBundle({
         id: req.params.id,
+        updatedAt: req.body?.updatedAt,
         name: String(req.body?.name || '').trim(),
         slug: String(req.body?.slug || '').trim(),
         description: String(req.body?.description || '').slice(0, 1_500),
-        pieceIds: validation.pieceIds,
+        pieceIds,
+        ...metadata,
         priceKes: Math.round(Number(req.body?.priceKes)),
         coverImage: typeof req.body?.coverImage === 'string' ? req.body.coverImage.slice(0, 2_048) : undefined,
         coverPosition: coverPosition.coverPosition,
@@ -5058,7 +5097,7 @@ export async function createApp() {
       });
       return res.json({ success: true, bundle });
     } catch (error: any) {
-      return res.status(400).json({ error: error?.message || 'Bundle could not be updated.' });
+      return res.status(error?.statusCode === 409 ? 409 : 400).json({ error: error?.message || 'Bundle could not be updated.' });
     }
   });
 

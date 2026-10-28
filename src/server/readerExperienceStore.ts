@@ -10,6 +10,7 @@ import {
   ReaderReactionType
 } from '../types.js';
 import { getDb, sanitizeForFirestore } from './db.js';
+import { validateChapterBookMetadata, validateContentBundlePieceIds } from './chapterBooks.js';
 
 const PROFILE_COLLECTION = 'reader_profiles';
 const SOCIAL_COLLECTION = 'piece_social';
@@ -232,9 +233,18 @@ function normalizeBundle(id: string, value: unknown): ContentBundle | null {
   const input = value as Partial<ContentBundle>;
   const name = cleanText(input.name, 120);
   if (!name) return null;
+  let metadata: ReturnType<typeof validateChapterBookMetadata>;
+  try {
+    metadata = validateChapterBookMetadata(input);
+    // Books must not silently omit duplicate, malformed or truncated chapters.
+    if (metadata.kind === 'book') validateContentBundlePieceIds(input.pieceIds);
+  } catch {
+    return null;
+  }
   const coverPosition = normalizeCoverPosition(input.coverPosition);
   return {
     id,
+    ...metadata,
     name,
     slug: cleanText(input.slug, 140) || id,
     description: cleanText(input.description, 1_500),
@@ -248,6 +258,15 @@ function normalizeBundle(id: string, value: unknown): ContentBundle | null {
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : new Date().toISOString(),
     updatedAt: typeof input.updatedAt === 'string' ? input.updatedAt : new Date().toISOString()
   };
+}
+
+export class ChapterBookSaveConflictError extends Error {
+  readonly statusCode = 409;
+  readonly code = 'CHAPTER_BOOK_SAVE_CONFLICT';
+
+  constructor() {
+    super('This book changed since you opened it. Reload its latest chapters and price before saving again.');
+  }
 }
 
 export const readerExperienceStore = {
@@ -655,18 +674,34 @@ export const readerExperienceStore = {
   },
 
   async saveBundle(value: Partial<ContentBundle>): Promise<ContentBundle> {
-    const now = new Date().toISOString();
     const id = value.id ? safeId(value.id) : `bundle_${crypto.randomBytes(12).toString('base64url')}`;
-    const existing = await getDb().collection(BUNDLES_COLLECTION).doc(id).get();
-    const normalized = normalizeBundle(id, {
-      ...value,
-      createdAt: existing.exists ? existing.data()?.createdAt : now,
-      updatedAt: now
+    const pieceIds = validateContentBundlePieceIds(value.pieceIds);
+    if (!Number.isSafeInteger(value.priceKes) || value.priceKes! < 1 || value.priceKes! > 1_000_000) {
+      throw new Error('Enter a valid whole-shilling bundle or book price between KSh 1 and KSh 1,000,000.');
+    }
+    const ref = getDb().collection(BUNDLES_COLLECTION).doc(id);
+    return getDb().runTransaction(async transaction => {
+      const existing = await transaction.get(ref);
+      const previous = existing.exists ? existing.data() as Partial<ContentBundle> : undefined;
+      const metadata = validateChapterBookMetadata(value, previous);
+      if (existing.exists && (previous?.kind === 'book' || metadata.kind === 'book')) {
+        if (typeof value.updatedAt !== 'string' || !value.updatedAt || value.updatedAt !== previous?.updatedAt) {
+          throw new ChapterBookSaveConflictError();
+        }
+      }
+      const previousTime = Date.parse(previous?.updatedAt || '');
+      const now = new Date(Number.isFinite(previousTime) ? Math.max(Date.now(), previousTime + 1) : Date.now()).toISOString();
+      const normalized = normalizeBundle(id, {
+        ...value,
+        ...metadata,
+        pieceIds,
+        createdAt: previous?.createdAt || now,
+        updatedAt: now
+      });
+      if (!normalized) throw new Error('Bundle name is required.');
+      transaction.set(ref, sanitizeForFirestore(normalized));
+      return normalized;
     });
-    if (!normalized) throw new Error('Bundle name is required.');
-    if (normalized.pieceIds.length < 2) throw new Error('A bundle must contain at least two pieces.');
-    await getDb().collection(BUNDLES_COLLECTION).doc(id).set(sanitizeForFirestore(normalized), { merge: false });
-    return normalized;
   },
 
   async deleteBundle(idInput: string): Promise<void> {

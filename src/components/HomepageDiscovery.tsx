@@ -10,11 +10,12 @@ import {
   X,
 } from 'lucide-react';
 
-import type { Article, Category, ContentBundle, ContentCollection, HomepageConfig } from '../types.js';
+import type { Article, Category, ContentBookQuote, ContentBundle, ContentCollection, HomepageConfig } from '../types.js';
 import { normalizeHomepageSections, type HomepageSectionId } from '../homepageSections.js';
 import { responsiveImageUrl, responsiveImageSrcSet } from '../utils/responsiveImage.js';
 import { HomepageBundles, type HomepageBundle } from './HomepageBundles.js';
 import { buildHomepageLibrarySections, HomepageLibraryGuide } from './HomepageLibraryGuide.js';
+import { orderedBookChapters } from '../utils/bookCatalogue.js';
 
 const MAX_HOMEPAGE_COLLECTIONS = 6;
 const MAX_HOMEPAGE_BUNDLES = 6;
@@ -36,6 +37,8 @@ export interface HomepageDiscoveryProps {
   onReadArticle: (article: Article) => void;
   onUnlockArticle: (article: Article) => void;
   onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  getBookQuote?: (bookId: string) => Promise<ContentBookQuote>;
+  readerIdentity?: string | null;
   onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: PublicView) => void;
   heroSection?: React.ReactNode;
@@ -106,14 +109,18 @@ export const buildHomepageDiscoveryModel = (
 
     seenBundleIds.add(bundle.id);
     const seenPieceIds = new Set<string>();
-    const bundlePieces = (bundle.pieces || []).flatMap((candidate) => {
+    const orderedPieces = bundle.kind === 'book' ? orderedBookChapters(bundle, bundle.pieces || []) : bundle.pieces || [];
+    const bundlePieces = orderedPieces.flatMap((candidate) => {
       const article = candidate?.id ? articleById.get(candidate.id) : null;
       if (!article || seenPieceIds.has(article.id)) return [];
       seenPieceIds.add(article.id);
       return [article];
     });
     if (bundlePieces.length < 2) return;
-    bundlePieces.forEach((article) => representedPieceIds.add(article.id));
+    // A book can deliberately retain its chapters on the individual shelf.
+    if (bundle.kind !== 'book' || bundle.showChaptersSeparately === false) {
+      bundlePieces.forEach((article) => representedPieceIds.add(article.id));
+    }
     resolvedBundles.push({ ...bundle, pieces: bundlePieces });
   });
 
@@ -210,6 +217,8 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   onReadArticle,
   onUnlockArticle,
   onPurchaseBundle,
+  getBookQuote,
+  readerIdentity,
   onSelectCategory,
   onNavigate,
   heroSection,
@@ -219,9 +228,14 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
   initialBundleId,
   onInitialDestinationHandled,
 }) => {
+  const homepageSections = useMemo(
+    () => normalizeHomepageSections(config?.sections),
+    [config?.sections],
+  );
+  const bundlesVisible = homepageSections.some(section => section.id === 'bundles' && section.isVisible);
   const model = useMemo(
-    () => buildHomepageDiscoveryModel(collections, allArticles, pieces, bundles),
-    [collections, allArticles, pieces, bundles],
+    () => buildHomepageDiscoveryModel(collections, allArticles, pieces, bundlesVisible ? bundles : []),
+    [collections, allArticles, pieces, bundles, bundlesVisible],
   );
   const [activeCollection, setActiveCollection] = useState<HomepageCollectionView | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -514,6 +528,9 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
           config={config}
           onPurchaseBundle={onPurchaseBundle}
           onPreviewPiece={onReadArticle}
+          onReadPiece={onReadArticle}
+          getBookQuote={getBookQuote}
+          readerIdentity={readerIdentity}
           initialBundleId={initialBundleId}
           onInitialBundleHandled={onInitialDestinationHandled}
         />
@@ -532,10 +549,6 @@ export const HomepageDiscovery: React.FC<HomepageDiscoveryProps> = ({
     collections: collectionsSection ? <DiscoverySectionFrame>{collectionsSection}</DiscoverySectionFrame> : null,
     pieces: piecesSection ? <DiscoverySectionFrame>{piecesSection}</DiscoverySectionFrame> : null,
   };
-  const homepageSections = useMemo(
-    () => normalizeHomepageSections(config?.sections),
-    [config?.sections],
-  );
 
   return (
     <div id="home-discovery">

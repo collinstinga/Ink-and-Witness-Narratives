@@ -93,6 +93,38 @@ vi.mock('./affiliateStore.js', () => ({
   }
 }));
 
+// This is a unit regression for the real article/cache/atomic-batch logic below.
+// Its database is already fully synthetic. Do not also cold-load the unrelated
+// gRPC Firestore client or native password/image engines on a constrained runner.
+// Those collaborators have their own SDK/security tests; invoking them here is
+// an error rather than an accidental network, password or image operation.
+vi.mock('firebase-admin/firestore', () => ({
+  FieldPath: { documentId: () => { throw new Error('Unexpected document-ID query in article price test.'); } },
+  FieldValue: { increment: () => { throw new Error('Unexpected increment in article price test.'); } }
+}));
+vi.mock('./auth.js', () => ({
+  hashPassword: () => { throw new Error('Unexpected password operation in article price test.'); },
+  verifyPassword: () => { throw new Error('Unexpected password operation in article price test.'); },
+  generateSecureToken: () => { throw new Error('Unexpected access-token operation in article price test.'); }
+}));
+vi.mock('./imageSecurity.js', () => ({
+  ImageValidationError: class ImageValidationError extends Error {},
+  sanitizeImageDataUrl: () => { throw new Error('Unexpected image operation in article price test.'); },
+  validateImageDataUrl: () => { throw new Error('Unexpected image operation in article price test.'); }
+}));
+vi.mock('fs', () => ({
+  default: {
+    // Cloud-mode price tests must not read local production backups/settings or
+    // write their synthetic startup snapshots into the developer's data folder.
+    existsSync: () => false,
+    mkdirSync: () => undefined,
+    readdirSync: () => [],
+    writeFileSync: () => undefined,
+    renameSync: () => undefined,
+    readFileSync: () => { throw new Error('Unexpected local-file read in cloud article price test.'); }
+  }
+}));
+
 const originalArticle: Article = {
   id: 'pricing-persistence-test',
   title: 'A Durable Price',

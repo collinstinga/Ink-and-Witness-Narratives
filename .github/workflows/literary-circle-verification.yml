@@ -4,7 +4,7 @@ name: Literary Circle verification
 # customer data, provider keys, or permission to modify repository contents.
 on:
   push:
-    branches: [feature/literary-circle-upgrade]
+    branches: [feature/literary-circle-upgrade, feat/chaptered-books-20261028]
   workflow_dispatch:
 
 permissions:
@@ -55,3 +55,11 @@ jobs:
           export CHROME_PATH="$(command -v google-chrome)"
           test -x "$CHROME_PATH"
           node scripts/qa/writer-security.cjs
+      - name: Verify chapter books and formatting on mobile and desktop with synthetic services only
+        timeout-minutes: 4
+        env:
+          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
+        run: |
+          export CHROME_PATH="$(command -v google-chrome)"
+          test -x "$CHROME_PATH"
+          node scripts/qa/chapter-books.cjs

@@ -14,6 +14,8 @@ import { api, getStoredTokens } from './utils/api.js';
 import { applyFavicon } from './utils/favicon.js';
 import { responsiveImageUrl } from './utils/responsiveImage.js';
 import { resolveDirectWriterTab } from './utils/writerNavigation.js';
+import { resolveChapterBook } from './utils/bookCatalogue.js';
+import type { HomepageBundle } from './components/HomepageBundles.js';
 
 import { Navbar, PublicViewType } from './components/Navbar.js';
 import { HomeView, parseHomepageDeepLink, type HomepageDeepLink } from './components/views/HomeView.js';
@@ -183,6 +185,9 @@ export default function App() {
   const [activeReaderArticle, setActiveReaderArticle] = useState<Article | null>(null);
   const [activeCheckoutArticle, setActiveCheckoutArticle] = useState<Article | null>(null);
   const [pendingBundleCheckoutArticle, setPendingBundleCheckoutArticle] = useState<Article | null>(null);
+  const [publishedBooks, setPublishedBooks] = useState<HomepageBundle[]>([]);
+  const [bookCheckoutError, setBookCheckoutError] = useState('');
+  const bookCheckoutRequestRef = React.useRef(0);
   const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<SubscriptionPlan | null>(null);
   const [pendingSubscriptionPlan, setPendingSubscriptionPlan] = useState<SubscriptionPlan | null>(null);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
@@ -211,6 +216,20 @@ export default function App() {
   useEffect(() => {
     currentUserRef.current = currentUser;
   }, [currentUser]);
+
+  // The full book index is not on the initial home critical path. It is needed
+  // only for the archive and chapter navigation; all article IDs remain intact.
+  useEffect(() => {
+    if (currentView !== 'all-pieces' && !activeReaderArticle) return;
+    let disposed = false;
+    api.getDiscoveryCollections().then(discovery => {
+      if (!disposed) setPublishedBooks(discovery.bundles.filter(bundle => bundle.kind === 'book'));
+    }).catch(() => {
+      // Never hide original chapters using an unverified or stale book index.
+      if (!disposed) setPublishedBooks([]);
+    });
+    return () => { disposed = true; };
+  }, [currentView, Boolean(activeReaderArticle), articles]);
 
   useEffect(() => {
     void api.trackSiteVisit();
@@ -862,14 +881,15 @@ export default function App() {
       const checkoutArticle = pendingBundleCheckoutArticle;
       setPendingBundleCheckoutArticle(null);
       navigate({ isLibraryOpen: false, isSignInOpen: false }, 'push');
-      bundleCheckoutActiveRef.current = true;
-      setActiveCheckoutArticle(checkoutArticle);
+      void openVerifiedBundleCheckout(checkoutArticle, user);
     } else {
       navigate({ isLibraryOpen: true, isSignInOpen: false }, 'push');
     }
   };
 
   const handleLogout = async () => {
+    bookCheckoutRequestRef.current += 1;
+    setBookCheckoutError('');
     authSessionRequestIdRef.current += 1;
     accountLibraryRequestIdRef.current += 1;
     setAccountLibraryLoading(false);
@@ -1015,16 +1035,43 @@ export default function App() {
     setCurrentUser(user);
   }, []);
 
-  const handlePurchaseBundle = (_bundle: ContentBundle, checkoutArticle: Article) => {
+  async function openVerifiedBundleCheckout(checkoutArticle: Article, user: User) {
+    const requestId = ++bookCheckoutRequestRef.current;
+    setBookCheckoutError('');
+    try {
+      let quotedArticle = checkoutArticle;
+      if (checkoutArticle.category === 'Book') {
+        const bookId = checkoutArticle.id.slice('bundle:'.length);
+        const quote = await api.getBookQuote(bookId);
+        if (requestId !== bookCheckoutRequestRef.current || currentUserRef.current?.id !== user.id) return;
+        if (quote.bookId !== bookId || !Number.isSafeInteger(quote.amountKes) || quote.amountKes < 0) throw new Error('Book pricing could not be verified. Please reopen the book.');
+        if (quote.alreadyOwned) {
+          setIsLibraryOpen(true);
+          return;
+        }
+        if (checkoutArticle.bookCheckoutUpdatedAt && quote.bookUpdatedAt !== checkoutArticle.bookCheckoutUpdatedAt) throw new Error('This book edition has changed. Reopen its contents and review the chapters before paying.');
+        quotedArticle = { ...checkoutArticle, bookCheckoutUpdatedAt: quote.bookUpdatedAt, priceKes: quote.amountKes, prices: { KES: quote.amountKes }, currencyOverrides: [] };
+      }
+      if (requestId !== bookCheckoutRequestRef.current || currentUserRef.current?.id !== user.id) return;
+      bundleCheckoutActiveRef.current = true;
+      setIsLibraryOpen(false);
+      setActiveCheckoutArticle(quotedArticle);
+    } catch (error) {
+      if (requestId === bookCheckoutRequestRef.current && currentUserRef.current?.id === user.id) {
+        setBookCheckoutError(error instanceof Error ? error.message : 'Book pricing is temporarily unavailable. Please retry.');
+      }
+    }
+  }
+
+  const handlePurchaseBundle = (bundle: ContentBundle, checkoutArticle: Article) => {
+    const normalizedCheckoutArticle = { ...checkoutArticle, category: bundle.kind === 'book' ? 'Book' : checkoutArticle.category };
     if (!currentUser || currentUser.role !== 'client') {
-      setPendingBundleCheckoutArticle(checkoutArticle);
+      setPendingBundleCheckoutArticle(normalizedCheckoutArticle);
       setIsLibraryOpen(false);
       setIsSignInOpen(true);
       return;
     }
-    bundleCheckoutActiveRef.current = true;
-    setIsLibraryOpen(false);
-    setActiveCheckoutArticle(checkoutArticle);
+    void openVerifiedBundleCheckout(normalizedCheckoutArticle, currentUser);
   };
 
   const handlePurchaseSubscription = (plan: SubscriptionPlan) => {
@@ -1119,6 +1166,7 @@ export default function App() {
 
       {/* Main View Router */}
       <main className="flex-1">
+        {bookCheckoutError && <div role="alert" className="fixed bottom-4 left-4 right-4 z-[180] mx-auto max-w-xl rounded-xl border border-rose-700 bg-slate-950 p-4 text-sm text-rose-200 shadow-xl">{bookCheckoutError}<button type="button" onClick={() => setBookCheckoutError('')} className="ml-3 underline">Dismiss</button></div>}
         {currentView === 'home' && (
           <HomeView
             author={author}
@@ -1128,6 +1176,8 @@ export default function App() {
             onReadArticle={handleOpenReader}
             onUnlockArticle={handleUnlockRequest}
             onPurchaseBundle={handlePurchaseBundle}
+            getBookQuote={currentUser?.role === 'client' ? api.getBookQuote : undefined}
+            readerIdentity={currentUser?.id}
             onPurchaseSubscription={handlePurchaseSubscription}
             onSelectCategory={handleSelectCategory}
             onNavigate={handleNavigateView}
@@ -1141,6 +1191,10 @@ export default function App() {
           <DeferredFeature label="Explore Pieces" onDismiss={() => handleNavigateView('home')}>
           <AllPiecesView
             articles={articles}
+            books={publishedBooks}
+            onPurchaseBundle={handlePurchaseBundle}
+            getBookQuote={currentUser?.role === 'client' ? api.getBookQuote : undefined}
+            readerIdentity={currentUser?.id}
             categories={categories}
             unlockedTokens={effectiveUnlockedTokens}
             onReadArticle={handleOpenReader}
@@ -1336,6 +1390,7 @@ export default function App() {
       {activeReaderArticle && <DeferredFeature label="the reader" onDismiss={handleCloseReader}>
       <ArticleReaderModal
         article={activeReaderArticle}
+        chapterBook={resolveChapterBook(activeReaderArticle.id, articles, publishedBooks)}
         isOpen={Boolean(activeReaderArticle)}
         isUnlocked={activeReaderArticle ? Boolean(effectiveUnlockedTokens[activeReaderArticle.id] || activeReaderArticle.isUnlocked) : false}
         onClose={handleCloseReader}

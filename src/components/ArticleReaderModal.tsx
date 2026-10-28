@@ -60,6 +60,8 @@ import { api, getArticleReceipt } from '../utils/api.js';
 import { chooseNarrationVoice, cleanTextForNarration, splitNarrationText } from '../utils/narration.js';
 import { SafeMarkdown } from './common/SafeMarkdown.js';
 import { ArticleCard } from './ArticleCard.js';
+import { BookChapterNavigation } from './BookChapterNavigation.js';
+import type { ChapterBookContext } from '../utils/bookCatalogue.js';
 
 const EMPTY_ARTICLES: Article[] = [];
 const DEFAULT_X_HANDLE = '@bigboyjake_';
@@ -130,6 +132,7 @@ interface ArticleReaderModalProps {
   articles?: Article[];
   onReadArticle?: (article: Article) => void;
   isArticleUnlocked?: (article: Article) => boolean;
+  chapterBook?: ChapterBookContext | null;
 }
 
 interface SpeechChunk {
@@ -211,7 +214,8 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   onTabChange,
   articles = EMPTY_ARTICLES,
   onReadArticle,
-  isArticleUnlocked
+  isArticleUnlocked,
+  chapterBook
 }) => {
   const [copiedQuote, setCopiedQuote] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -2455,6 +2459,10 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
 
             {socialLoading && <p className="text-xs text-slate-500">Loading reader responses…</p>}
           </section>
+
+          {chapterBook && onReadArticle && (
+            <BookChapterNavigation context={chapterBook} articleId={article.id} onReadArticle={onReadArticle} />
+          )}
 
           {effectiveUnlocked && onReadArticle && readerRecommendations.length > 0 && (
             <section

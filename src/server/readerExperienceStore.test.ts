@@ -131,6 +131,57 @@ describe('reader experience persistence', () => {
     firestore.documents.clear();
   });
 
+  it('preserves ordered chapter records and book settings across saves without touching articles or licences', async () => {
+    firestore.documents.set('articles/chapter-1', { content: 'Original chapter', priceKes: 100 });
+    firestore.documents.set('reader_licenses/old-purchase', { articleId: 'chapter-1', userId: 'reader-1' });
+    const originals = structuredClone([...firestore.documents.entries()]);
+    const book = await readerExperienceStore.saveBundle({
+      name: 'The Complete Book', kind: 'book', pieceIds: ['chapter-2', 'chapter-1'],
+      priceKes: 150, showChaptersSeparately: false, existingOwnerPricing: 'remaining_chapters', isPublished: false
+    });
+    await expect(readerExperienceStore.getBundle(book.id)).resolves.toBeNull();
+    await expect(readerExperienceStore.getBundle(book.id, true)).resolves.toMatchObject({
+      kind: 'book', pieceIds: ['chapter-2', 'chapter-1'], showChaptersSeparately: false, existingOwnerPricing: 'remaining_chapters'
+    });
+    const revised = await readerExperienceStore.saveBundle({
+      id: book.id, name: 'Revised Book', pieceIds: book.pieceIds, priceKes: 175, isPublished: true, updatedAt: book.updatedAt
+    });
+    expect(revised).toMatchObject({ kind: 'book', showChaptersSeparately: false, existingOwnerPricing: 'remaining_chapters', priceKes: 175 });
+    for (const [key, value] of originals) expect(firestore.documents.get(key)).toEqual(value);
+  });
+
+  it('rejects stale or unversioned book edits and preserves the newer price and chapter order atomically', async () => {
+    const book = await readerExperienceStore.saveBundle({
+      name: 'Book', kind: 'book', pieceIds: ['chapter-1', 'chapter-2'], priceKes: 100, isPublished: true
+    });
+    const revised = await readerExperienceStore.saveBundle({ ...book, pieceIds: ['chapter-2', 'chapter-1'], priceKes: 200 });
+    expect(revised.updatedAt).not.toBe(book.updatedAt);
+    await expect(readerExperienceStore.saveBundle({ ...book, priceKes: 50 })).rejects.toMatchObject({ code: 'CHAPTER_BOOK_SAVE_CONFLICT', statusCode: 409 });
+    await expect(readerExperienceStore.saveBundle({ id: book.id, name: 'Old client', pieceIds: book.pieceIds, priceKes: 50 })).rejects.toMatchObject({ code: 'CHAPTER_BOOK_SAVE_CONFLICT' });
+    await expect(readerExperienceStore.getBundle(book.id)).resolves.toMatchObject({ priceKes: 200, pieceIds: ['chapter-2', 'chapter-1'] });
+  });
+
+  it('fails closed on corrupt stored book members or modes rather than silently shortening or demoting a book', async () => {
+    const base = { name: 'Corrupt Book', kind: 'book', priceKes: 100, isPublished: true };
+    firestore.documents.set('content_bundles/duplicate', { ...base, pieceIds: ['chapter-1', 'chapter-1'] });
+    firestore.documents.set('content_bundles/invalid-mode', { ...base, kind: 'mystery', pieceIds: ['chapter-1', 'chapter-2'] });
+    await expect(readerExperienceStore.getBundle('duplicate')).resolves.toBeNull();
+    await expect(readerExperienceStore.getBundle('invalid-mode')).resolves.toBeNull();
+    await expect(readerExperienceStore.listBundles()).resolves.toEqual([]);
+  });
+
+  it('rejects invalid chapter writes and prices before persisting anything', async () => {
+    for (const extra of [
+      { pieceIds: ['chapter-1', 'chapter-1'] }, { kind: 'invalid' }, { priceKes: 0 }, { priceKes: 1.5 },
+      { showChaptersSeparately: 'false' }, { existingOwnerPricing: 'make_everything_free' }
+    ]) {
+      await expect(readerExperienceStore.saveBundle({
+        name: 'Invalid Book', kind: 'book', pieceIds: ['chapter-1', 'chapter-2'], priceKes: 100, ...extra
+      } as any)).rejects.toThrow();
+    }
+    expect(firestore.documents.size).toBe(0);
+  });
+
   it('saves cross-session progress and counts completion only once', async () => {
     await readerExperienceStore.saveProgress({
       userId: 'reader-1',

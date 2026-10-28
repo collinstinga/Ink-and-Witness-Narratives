@@ -7,9 +7,6 @@ import {
   Sparkles, 
   Bold, 
   Italic, 
-  Heading1, 
-  Heading2, 
-  Heading3, 
   Quote, 
   List, 
   ListOrdered, 
@@ -64,7 +61,10 @@ import { UnsavedChangesPromptModal } from '../common/UnsavedChangesPromptModal.j
 import { SafeMarkdown } from '../common/SafeMarkdown.js';
 import {
   applyMarkdownLinePrefix,
+  getMarkdownHeadingLevel,
   isCursorInsideInlineMarkdown,
+  type MarkdownHeadingLevel,
+  setMarkdownHeading,
   toggleInlineMarkdown
 } from '../../utils/markdownEditor.js';
 
@@ -125,8 +125,10 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [excerpt, setExcerpt] = useState(initialArticle?.excerpt || '');
   const [synopsis, setSynopsis] = useState(initialArticle?.synopsis || '');
   const [content, setContent] = useState(initialArticle?.content || '');
+  const [publicationType, setPublicationType] = useState<'individual' | 'chapter'>(initialArticle?.publicationType === 'chapter' ? 'chapter' : 'individual');
   const [boldActive, setBoldActive] = useState(false);
   const [italicActive, setItalicActive] = useState(false);
+  const [headingLevel, setHeadingLevel] = useState<MarkdownHeadingLevel>(0);
   const [category, setCategory] = useState(initialArticle?.category || '');
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
     initialArticle?.categories && initialArticle.categories.length > 0
@@ -269,6 +271,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     excerpt, 
     synopsis,
     content, 
+    publicationType,
     category,
     selectedCategories,
     status, 
@@ -329,6 +332,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         setExcerpt(res.article.excerpt || '');
         setSynopsis(res.article.synopsis || '');
         setContent(res.article.content || '');
+        setPublicationType(res.article.publicationType === 'chapter' ? 'chapter' : 'individual');
         setCategory(res.article.category || '');
         setSelectedCategories(
           res.article.categories && res.article.categories.length > 0
@@ -369,6 +373,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
             excerpt: excerpt.trim(),
             synopsis: synopsis.trim(),
             content: content.trim(),
+            publicationType,
             category: category.trim(),
             status,
             scheduledAt: scheduledAt || undefined,
@@ -420,6 +425,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     excerpt, 
     synopsis,
     content, 
+    publicationType,
     category, 
     status, 
     scheduledAt, 
@@ -474,6 +480,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       textarea.setSelectionRange(result.selectionStart, result.selectionEnd);
       setBoldActive(isCursorInsideInlineMarkdown(result.content, result.selectionStart, '**'));
       setItalicActive(isCursorInsideInlineMarkdown(result.content, result.selectionStart, '*'));
+      setHeadingLevel(getMarkdownHeadingLevel(result.content, result.selectionStart));
     }, 0);
   };
 
@@ -483,6 +490,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     const cursor = textarea.selectionStart;
     setBoldActive(isCursorInsideInlineMarkdown(nextContent, cursor, '**'));
     setItalicActive(isCursorInsideInlineMarkdown(nextContent, cursor, '*'));
+    setHeadingLevel(getMarkdownHeadingLevel(nextContent, cursor));
   };
 
   const toggleInlineFormatting = (marker: '**' | '*') => {
@@ -505,6 +513,12 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       textarea.selectionEnd,
       prefix
     ));
+  };
+
+  const setHeadingLabel = (level: MarkdownHeadingLevel) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    applyEditorResult(setMarkdownHeading(content, textarea.selectionStart, textarea.selectionEnd, level));
   };
 
   // Text formatting helper for links and other paired insertions.
@@ -752,6 +766,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         excerpt: excerpt.trim(),
         synopsis: synopsis.trim() || undefined,
         content: content.trim(),
+        publicationType,
         category: selectedCategories[0] || category.trim() || '',
         categories: selectedCategories,
         status: finalStatus,
@@ -872,6 +887,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       excerpt: excerpt.trim(),
       synopsis: synopsis.trim() || undefined,
       content,
+      publicationType,
       category,
       status,
       scheduledAt,
@@ -1077,6 +1093,14 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         
         {/* Left Column: Title, Subtitle, Excerpt & Writing Area */}
         <div className="lg:col-span-8 space-y-6">
+          <fieldset className="rounded-xl border border-slate-700 bg-[#0b1120] p-4">
+            <legend className="px-1 text-xs font-mono uppercase tracking-wider text-slate-300">Publication format</legend>
+            <div className="flex flex-wrap gap-4 text-sm text-slate-200">
+              <label className="flex cursor-pointer items-center gap-2"><input type="radio" name="publication-format" value="individual" checked={publicationType === 'individual'} onChange={() => setPublicationType('individual')} className="h-4 w-4 accent-sky-500" />Individual piece</label>
+              <label className="flex cursor-pointer items-center gap-2"><input type="radio" name="publication-format" value="chapter" checked={publicationType === 'chapter'} onChange={() => setPublicationType('chapter')} className="h-4 w-4 accent-sky-500" />Book chapter</label>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-slate-400">{publicationType === 'chapter' ? 'Save this chapter, then open Reader experience → New Book to choose its book and chapter order. Existing pieces can also become chapters without changing their content, links or reader access.' : 'Publish on its own. You can include this piece in an ordered book later without deleting the original.'}</p>
+          </fieldset>
           
           {/* Title input */}
           <div>
@@ -1172,52 +1196,42 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
           {/* Formatting Toolbar */}
           <div className="bg-[#0b1120] border border-slate-700/80 rounded-xl p-2 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1">
+            <fieldset disabled={activeTab !== 'write'} className="flex min-w-0 flex-wrap items-center gap-1 disabled:opacity-50">
+              <legend className="sr-only">Text formatting</legend>
               <button
                 type="button"
                 onClick={() => toggleInlineFormatting('**')}
+                onMouseDown={event => event.preventDefault()}
+                aria-label="Bold selected text"
                 aria-pressed={boldActive}
                 className={`p-1.5 rounded transition-colors cursor-pointer ${boldActive ? 'bg-sky-900 text-sky-200 ring-1 ring-sky-600' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}`}
                 title="Bold selected text or toggle bold typing"
               >
-                <Bold className="w-4 h-4" />
+                <Bold className="inline w-4 h-4" /><span className="ml-1 text-xs">Bold</span>
               </button>
               <button
                 type="button"
                 onClick={() => toggleInlineFormatting('*')}
+                onMouseDown={event => event.preventDefault()}
+                aria-label="Italicize selected text"
                 aria-pressed={italicActive}
                 className={`p-1.5 rounded transition-colors cursor-pointer ${italicActive ? 'bg-sky-900 text-sky-200 ring-1 ring-sky-600' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}`}
                 title="Italicize selected text or toggle italic typing"
               >
-                <Italic className="w-4 h-4" />
+                <Italic className="inline w-4 h-4" /><span className="ml-1 text-xs">Italic</span>
               </button>
 
               <div className="w-px h-4 bg-slate-700 mx-1" />
 
-              <button
-                type="button"
-                onClick={() => toggleLineFormatting('# ')}
-                className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                title="Heading 1"
-              >
-                <Heading1 className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => toggleLineFormatting('## ')}
-                className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                title="Heading 2"
-              >
-                <Heading2 className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => toggleLineFormatting('### ')}
-                className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                title="Heading 3"
-              >
-                <Heading3 className="w-4 h-4" />
-              </button>
+              <label className="flex items-center gap-1 text-xs text-slate-300">
+                <span>Heading label</span>
+                <select aria-label="Heading label" value={headingLevel} onChange={event => setHeadingLabel(Number(event.target.value) as MarkdownHeadingLevel)} className="min-w-0 rounded border border-slate-700 bg-[#080d1a] px-2 py-1.5 text-xs text-white">
+                  <option value={0}>Normal text</option>
+                  <option value={1}>Heading 1 — main</option>
+                  <option value={2}>Heading 2 — section</option>
+                  <option value={3}>Heading 3 — subsection</option>
+                </select>
+              </label>
 
               <div className="w-px h-4 bg-slate-700 mx-1" />
 
@@ -1275,7 +1289,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                 <Upload className="w-3.5 h-3.5" />
                 <span>{uploadingImage ? 'Uploading...' : 'Insert Photo'}</span>
               </button>
-            </div>
+            </fieldset>
 
             {/* View Mode Switcher */}
             <div className="flex items-center gap-1 bg-[#080d1a] border border-slate-800 p-0.5 rounded-lg text-xs font-mono">
@@ -1295,16 +1309,19 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                   activeTab === 'preview' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                Formatted View
+                Preview formatting
               </button>
             </div>
           </div>
+
+          <p className="text-xs leading-relaxed text-slate-400">Select words, then choose <strong className="font-bold text-slate-200">Bold</strong> or <em className="text-slate-200">Italic</em>. Place the cursor in a line to label it as a heading. Preview formatting shows the reader&rsquo;s styled text; return to Markdown Editor to edit.</p>
 
           {/* Writing Content Area */}
           <div className="relative">
             {activeTab === 'write' ? (
               <textarea
                 ref={textareaRef}
+                aria-label="Piece content"
                 rows={22}
                 value={content}
                 onChange={(e) => {

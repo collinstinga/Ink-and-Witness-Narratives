@@ -1,12 +1,18 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Search, Filter, Plus, BookOpen, Layers, Sparkles } from 'lucide-react';
-import { Article, Category } from '../../types.js';
+import { Article, Category, ContentBookQuote, ContentBundle } from '../../types.js';
+import { HomepageBundles, type HomepageBundle } from '../HomepageBundles.js';
+import { visibleStandaloneArticles } from '../../utils/bookCatalogue.js';
 import { ArticleCard } from '../ArticleCard.js';
 import { CategoryManagerModal } from '../writer/CategoryManagerModal.js';
 import { api } from '../../utils/api.js';
 
 interface AllPiecesViewProps {
   articles: Article[];
+  books?: HomepageBundle[];
+  onPurchaseBundle?: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  getBookQuote?: (bookId: string) => Promise<ContentBookQuote>;
+  readerIdentity?: string | null;
   categories?: Category[];
   unlockedTokens: Record<string, any>;
   onReadArticle: (article: Article) => void;
@@ -24,6 +30,10 @@ interface AllPiecesViewProps {
 
 export const AllPiecesView: React.FC<AllPiecesViewProps> = ({
   articles,
+  books = [],
+  onPurchaseBundle,
+  getBookQuote,
+  readerIdentity,
   categories: propCategories,
   unlockedTokens,
   onReadArticle,
@@ -106,7 +116,7 @@ export const AllPiecesView: React.FC<AllPiecesViewProps> = ({
 
   // Filtered articles
   const filteredArticles = useMemo(() => {
-    return articles.filter(art => {
+    return visibleStandaloneArticles(articles, onPurchaseBundle ? books : []).filter(art => {
       const q = activeSearch.toLowerCase().trim();
       const matchesSearch = !q || 
         art.title.toLowerCase().includes(q) ||
@@ -125,7 +135,17 @@ export const AllPiecesView: React.FC<AllPiecesViewProps> = ({
 
       return matchesSearch && matchesCategory && matchesTag;
     });
-  }, [articles, activeSearch, activeCategory, activeTag]);
+  }, [articles, books, onPurchaseBundle, activeSearch, activeCategory, activeTag]);
+
+  const matchingBooks = books.filter(book => {
+    const q = activeSearch.toLowerCase().trim();
+    const members = book.pieces;
+    const matchesSearch = !q || `${book.name} ${book.description}`.toLowerCase().includes(q)
+      || members.some(piece => `${piece.title} ${piece.excerpt}`.toLowerCase().includes(q));
+    const matchesCategory = activeCategory === 'ALL' || members.some(piece => piece.category === activeCategory || piece.categories?.includes(activeCategory));
+    const matchesTag = !activeTag || members.some(piece => piece.tags.includes(activeTag));
+    return matchesSearch && matchesCategory && matchesTag;
+  });
 
   return (
     <div id="all-pieces-view" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-28 pb-20 sm:pt-36 sm:pb-28">
@@ -145,6 +165,7 @@ export const AllPiecesView: React.FC<AllPiecesViewProps> = ({
       </div>
 
       {/* Filter and Search Bar */}
+      {matchingBooks.length > 0 && onPurchaseBundle && <div className="mb-12"><HomepageBundles bundles={matchingBooks} onPurchaseBundle={onPurchaseBundle} onPreviewPiece={onReadArticle} onReadPiece={onReadArticle} getBookQuote={getBookQuote} readerIdentity={readerIdentity} /></div>}
       <div className="mb-10 space-y-4 max-w-5xl mx-auto">
         <div className="flex flex-col sm:flex-row items-center gap-3">
           {/* Search Field */}

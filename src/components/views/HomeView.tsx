@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowRight, Feather, Sparkles } from 'lucide-react';
-import { Article, AuthorProfile, Category, ContentBundle, ContentCollection, HomepageConfig, SubscriptionPlan } from '../../types.js';
+import { Article, AuthorProfile, Category, ContentBookQuote, ContentBundle, ContentCollection, HomepageConfig, SubscriptionPlan } from '../../types.js';
 import { api } from '../../utils/api.js';
 import { responsiveImageUrl, responsiveImageSrcSet } from '../../utils/responsiveImage.js';
 import { normalizeHomepageSections, type HomepageSectionId } from '../../homepageSections.js';
@@ -17,6 +17,8 @@ interface HomeViewProps {
   onReadArticle: (article: Article) => void;
   onUnlockArticle: (article: Article) => void;
   onPurchaseBundle: (bundle: ContentBundle, checkoutArticle: Article) => void;
+  getBookQuote?: (bookId: string) => Promise<ContentBookQuote>;
+  readerIdentity?: string | null;
   onPurchaseSubscription: (plan: SubscriptionPlan) => void;
   onSelectCategory: (categoryName: string) => void;
   onNavigate: (view: 'home' | 'all-pieces' | 'about' | 'how-to-pay' | 'support') => void;
@@ -151,6 +153,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onReadArticle,
   onUnlockArticle,
   onPurchaseBundle,
+  getBookQuote,
+  readerIdentity,
   onPurchaseSubscription,
   onSelectCategory,
   onNavigate,
@@ -389,6 +393,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
         onReadArticle={onReadArticle}
         onUnlockArticle={onUnlockArticle}
         onPurchaseBundle={onPurchaseBundle}
+        getBookQuote={getBookQuote}
+        readerIdentity={readerIdentity}
         onSelectCategory={onSelectCategory}
         onNavigate={onNavigate}
         initialCollectionId={homepageLoaded && deepLink?.kind === 'collection' ? deepLink.id : null}

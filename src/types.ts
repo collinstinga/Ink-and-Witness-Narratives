@@ -71,6 +71,10 @@ export interface PriceHistoryEntry {
 
 export interface Article {
   id: string;
+  /** Checkout-only book edition. Never grants access or supplies a payment price. */
+  bookCheckoutUpdatedAt?: string;
+  /** Optional authoring label; existing pieces remain individual publications. */
+  publicationType?: 'individual' | 'chapter';
   title: string;
   subtitle: string;
   slug: string;
@@ -192,16 +196,35 @@ export interface ContentCollection {
 
 export interface ContentBundle {
   id: string;
+  /** Books reuse the established, snapshot-based bundle checkout. */
+  kind?: 'bundle' | 'book';
   name: string;
   slug: string;
   description: string;
   pieceIds: string[];
+  /** Books retain original chapter IDs and the writer's chapter order. */
+  showChaptersSeparately?: boolean;
+  existingOwnerPricing?: 'full_price' | 'remaining_chapters';
   priceKes: number;
   coverImage?: string;
   coverPosition?: CoverPosition;
   isPublished: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Personalized, server-calculated quote; never accepted as a client payment amount. */
+export interface ContentBookQuote {
+  bookId: string;
+  /** Exact book revision quoted, checked again before starting payment. */
+  bookUpdatedAt: string;
+  listPriceKes: number;
+  amountKes: number;
+  creditKes: number;
+  ownedPieceIds: string[];
+  remainingPieceIds: string[];
+  alreadyOwned: boolean;
+  pricingPolicy: 'full_price' | 'remaining_chapters';
 }
 
 export interface SubscriptionPlan {

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { BookMarked, Check, Eye, EyeOff, ImagePlus, Layers3, Loader2, PackageOpen, RefreshCw, Save, Star, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, BookMarked, BookOpen, Check, Eye, EyeOff, ImagePlus, Layers3, Loader2, PackageOpen, RefreshCw, Save, Star, Trash2, X } from 'lucide-react';
 import { Article, ContentBundle, ContentCollection, PieceReview } from '../../types.js';
 import { api } from '../../utils/api.js';
 import {
@@ -8,10 +8,11 @@ import {
   prepareImageFileForUpload,
 } from '../../utils/imageUploadPolicy.js';
 
-type EditorKind = 'collection' | 'bundle';
+type EditorKind = 'collection' | 'bundle' | 'book';
 
 type EditorState = {
   id?: string;
+  updatedAt?: string;
   name: string;
   description: string;
   pieceIds: string[];
@@ -21,6 +22,8 @@ type EditorState = {
   coverImage: string;
   coverPositionX: number;
   coverPositionY: number;
+  showChaptersSeparately: boolean;
+  existingOwnerPricing: 'full_price' | 'remaining_chapters';
 };
 
 const emptyEditor = (): EditorState => ({
@@ -32,8 +35,58 @@ const emptyEditor = (): EditorState => ({
   priceKes: 1,
   coverImage: '',
   coverPositionX: 50,
-  coverPositionY: 50
+  coverPositionY: 50,
+  showChaptersSeparately: true,
+  existingOwnerPricing: 'full_price'
 });
+
+/** Ordered IDs remain the original pieces; grouping never rewrites their contents or licences. */
+export function moveBookChapter(pieceIds: string[], pieceId: string, direction: -1 | 1): string[] {
+  const index = pieceIds.indexOf(pieceId);
+  const destination = index + direction;
+  if (index < 0 || destination < 0 || destination >= pieceIds.length) return pieceIds;
+  const next = [...pieceIds];
+  [next[index], next[destination]] = [next[destination], next[index]];
+  return next;
+}
+
+export function createWriterBundlePayload(editor: EditorState, kind: 'book' | 'bundle'): Partial<ContentBundle> {
+  return {
+    id: editor.id,
+    ...(editor.id ? { updatedAt: editor.updatedAt } : {}),
+    kind,
+    name: editor.name,
+    description: editor.description,
+    pieceIds: [...editor.pieceIds],
+    isPublished: editor.isPublished,
+    priceKes: editor.priceKes,
+    coverImage: editor.coverImage || undefined,
+    coverPosition: { x: editor.coverPositionX, y: editor.coverPositionY },
+    ...(kind === 'book' ? {
+      showChaptersSeparately: editor.showChaptersSeparately,
+      existingOwnerPricing: editor.existingOwnerPricing
+    } : {})
+  };
+}
+
+/** Rehydrate from the authoritative save acknowledgement, including its new CAS revision. */
+export function createWriterBundleEditor(bundle: ContentBundle): EditorState {
+  return {
+    id: bundle.id,
+    updatedAt: bundle.updatedAt,
+    name: bundle.name,
+    description: bundle.description,
+    pieceIds: [...bundle.pieceIds],
+    isPublished: bundle.isPublished,
+    order: 0,
+    priceKes: bundle.priceKes,
+    coverImage: bundle.coverImage || '',
+    coverPositionX: bundle.coverPosition?.x ?? 50,
+    coverPositionY: bundle.coverPosition?.y ?? 50,
+    showChaptersSeparately: bundle.showChaptersSeparately !== false,
+    existingOwnerPricing: bundle.existingOwnerPricing === 'remaining_chapters' ? 'remaining_chapters' : 'full_price'
+  };
+}
 
 export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   const [collections, setCollections] = useState<ContentCollection[]>([]);
@@ -67,6 +120,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   useEffect(() => { void load(); }, [load]);
 
   const selectCollection = (collection?: ContentCollection) => {
+    if (saving) return;
     coverUploadSequenceRef.current += 1;
     setUploadingCover(false);
     setEditorKind('collection');
@@ -80,26 +134,18 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
       priceKes: 1,
       coverImage: collection.coverImage || '',
       coverPositionX: collection.coverPosition?.x ?? 50,
-      coverPositionY: collection.coverPosition?.y ?? 50
+      coverPositionY: collection.coverPosition?.y ?? 50,
+      showChaptersSeparately: true,
+      existingOwnerPricing: 'full_price'
     } : emptyEditor());
   };
 
-  const selectBundle = (bundle?: ContentBundle) => {
+  const selectBundle = (bundle?: ContentBundle, kind: 'bundle' | 'book' = bundle?.kind === 'book' ? 'book' : 'bundle') => {
+    if (saving) return;
     coverUploadSequenceRef.current += 1;
     setUploadingCover(false);
-    setEditorKind('bundle');
-    setEditor(bundle ? {
-      id: bundle.id,
-      name: bundle.name,
-      description: bundle.description,
-      pieceIds: bundle.pieceIds,
-      isPublished: bundle.isPublished,
-      order: 0,
-      priceKes: bundle.priceKes,
-      coverImage: bundle.coverImage || '',
-      coverPositionX: bundle.coverPosition?.x ?? 50,
-      coverPositionY: bundle.coverPosition?.y ?? 50
-    } : { ...emptyEditor(), priceKes: 500 });
+    setEditorKind(kind);
+    setEditor(bundle ? createWriterBundleEditor(bundle) : { ...emptyEditor(), priceKes: 500 });
   };
 
   const togglePiece = (pieceId: string) => {
@@ -107,7 +153,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
       ...current,
       pieceIds: current.pieceIds.includes(pieceId)
         ? current.pieceIds.filter(id => id !== pieceId)
-        : [...current.pieceIds, pieceId]
+        : current.pieceIds.length < (editorKind === 'collection' ? 100 : 30) ? [...current.pieceIds, pieceId] : current.pieceIds
     }));
   };
 
@@ -131,10 +177,10 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
 
     const uploadKind = editorKind;
     const editorId = editor.id;
-    const validationError = getContentCoverValidationError(file, uploadKind);
+    const validationError = getContentCoverValidationError(file, uploadKind === 'collection' ? 'collection' : 'bundle');
     if (validationError) {
       setNotice('');
-      setError(validationError);
+      setError(uploadKind === 'book' ? validationError.replace(/^Bundle/, 'Book') : validationError);
       return;
     }
 
@@ -167,6 +213,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
     setError('');
     setNotice('');
     try {
+      let savedBook: ContentBundle | undefined;
       if (editorKind === 'collection') {
         await api.saveContentCollection({
           id: editor.id,
@@ -183,36 +230,32 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
         });
         setNotice('Collection saved. Piece categories were not changed.');
       } else {
-        await api.saveContentBundle({
-          id: editor.id,
-          name: editor.name,
-          description: editor.description,
-          pieceIds: editor.pieceIds,
-          isPublished: editor.isPublished,
-          priceKes: editor.priceKes,
-          coverImage: editor.coverImage || undefined,
-          coverPosition: {
-            x: editor.coverPositionX,
-            y: editor.coverPositionY
-          }
-        });
-        setNotice('Bundle saved. Its current piece list will be snapshotted when each payment begins.');
+        const result = await api.saveContentBundle(createWriterBundlePayload(editor, editorKind));
+        if (editorKind === 'book') savedBook = result.bundle;
+        setNotice(editorKind === 'book'
+          ? 'Book saved. Original chapter content, links and existing reader access were preserved. New checkout prices use your selected ownership policy.'
+          : 'Bundle saved. Its current piece list will be snapshotted when each payment begins.');
       }
-      setEditor(editorKind === 'bundle' ? { ...emptyEditor(), priceKes: 500 } : emptyEditor());
+      setEditor(savedBook ? createWriterBundleEditor(savedBook)
+        : editorKind !== 'collection' ? { ...emptyEditor(), priceKes: 500 } : emptyEditor());
       await load();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Changes could not be saved.');
+      const message = requestError instanceof Error ? requestError.message : 'Changes could not be saved.';
+      setError(editorKind === 'book'
+        ? `${message} Your book draft has been kept. If the book changed elsewhere, refresh the list and reopen it before saving again.`
+        : message);
     } finally {
       setSaving(false);
     }
   };
 
   const remove = async (kind: EditorKind, id: string) => {
+    if (saving || uploadingCover) return;
     if (!window.confirm(`Delete this ${kind}? Existing piece content and reader access will remain unchanged.`)) return;
     try {
       if (kind === 'collection') await api.deleteContentCollection(id);
       else await api.deleteContentBundle(id);
-      setEditor(kind === 'bundle' ? { ...emptyEditor(), priceKes: 500 } : emptyEditor());
+      setEditor(kind !== 'collection' ? { ...emptyEditor(), priceKes: 500 } : emptyEditor());
       await load();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : `${kind} could not be deleted.`);
@@ -229,14 +272,15 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
   };
 
   const publishedArticles = articles.filter(article => article.status === 'published');
+  const pieceLimit = editorKind === 'collection' ? 100 : 30;
 
   return (
     <div className="space-y-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-sky-400">Reader experience</p>
-          <h1 className="mt-1 font-serif text-2xl font-bold text-white">Collections, Bundles &amp; Testimonials</h1>
-          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-400">Curate discovery independently of categories, package paid pieces, and decide which verified reader words become public social proof.</p>
+          <h1 className="mt-1 font-serif text-2xl font-bold text-white">Books, Collections, Bundles &amp; Testimonials</h1>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-400">Arrange existing pieces into chaptered books without deleting originals, curate discovery independently of categories, and manage verified testimonials.</p>
         </div>
         <button type="button" onClick={() => void load()} disabled={loading} className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-60"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button>
       </header>
@@ -245,10 +289,11 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
       {notice && <div role="status" className="rounded-xl border border-emerald-800 bg-emerald-950/40 p-3 text-xs text-emerald-300">{notice}</div>}
 
       <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <section className="space-y-4 rounded-2xl border border-slate-800 bg-[#0b1120] p-5">
+        <fieldset disabled={saving} className="min-w-0 space-y-4 rounded-2xl border border-slate-800 bg-[#0b1120] p-5 disabled:opacity-70">
+          <legend className="sr-only">Publication grouping editor</legend>
           <div>
             <p className="text-xs font-semibold text-slate-200">Choose what you are creating</p>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
               <div className="rounded-xl border border-sky-900/70 bg-sky-950/20 p-3">
                 <p className="flex items-center gap-2 text-xs font-bold text-sky-200"><Layers3 className="h-4 w-4" aria-hidden="true" />Collection</p>
                 <p className="mt-1 text-[11px] leading-relaxed text-slate-400">A library section that helps readers browse related pieces. It does not create a purchase or change the pieces&rsquo; individual prices.</p>
@@ -257,18 +302,24 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
                 <p className="flex items-center gap-2 text-xs font-bold text-emerald-200"><PackageOpen className="h-4 w-4" aria-hidden="true" />Bundle</p>
                 <p className="mt-1 text-[11px] leading-relaxed text-slate-400">A purchasable pack of two or more pieces. You choose one bundle price, and a successful payment unlocks every included piece.</p>
               </div>
+              <div className="rounded-xl border border-amber-900/70 bg-amber-950/20 p-3">
+                <p className="flex items-center gap-2 text-xs font-bold text-amber-200"><BookOpen className="h-4 w-4" aria-hidden="true" />Chaptered book</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-400">One book with ordered chapters and one complete-book price. Keep or hide individual catalogue listings; existing chapter purchases stay valid.</p>
+              </div>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => selectCollection()} className={`rounded-full border px-3 py-1.5 text-xs ${editorKind === 'collection' ? 'border-sky-500 bg-sky-950 text-sky-200' : 'border-slate-700 text-slate-400'}`}><Layers3 className="mr-1 inline h-3.5 w-3.5" />New Collection</button>
             <button type="button" onClick={() => selectBundle()} className={`rounded-full border px-3 py-1.5 text-xs ${editorKind === 'bundle' ? 'border-emerald-500 bg-emerald-950 text-emerald-200' : 'border-slate-700 text-slate-400'}`}><PackageOpen className="mr-1 inline h-3.5 w-3.5" />New Bundle</button>
+            <button type="button" onClick={() => selectBundle(undefined, 'book')} className={`rounded-full border px-3 py-1.5 text-xs ${editorKind === 'book' ? 'border-amber-500 bg-amber-950 text-amber-200' : 'border-slate-700 text-slate-400'}`}><BookOpen className="mr-1 inline h-3.5 w-3.5" />New Book</button>
           </div>
+          <p className="text-xs font-semibold text-slate-300">{editor.id ? 'Editing' : 'Creating'} {editorKind === 'book' ? 'chaptered book' : editorKind}</p>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Name *<input value={editor.name} maxLength={120} onChange={event => setEditor({ ...editor, name: event.target.value })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
             <label className="space-y-1 text-xs text-slate-400 sm:col-span-2">Description<textarea value={editor.description} maxLength={1500} rows={3} onChange={event => setEditor({ ...editor, description: event.target.value })} className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-sky-500" /></label>
             <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3 sm:col-span-2">
               <div>
-                <p className="text-xs font-semibold text-slate-300">{editorKind === 'collection' ? 'Collection' : 'Bundle'} cover photo</p>
+                <p className="text-xs font-semibold text-slate-300">{editorKind === 'collection' ? 'Collection' : editorKind === 'book' ? 'Book' : 'Bundle'} cover photo</p>
                 <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Upload a JPEG up to 5 MB. The photo is attached permanently when you save the {editorKind}.</p>
               </div>
               <input
@@ -307,7 +358,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
                   >
                     <img
                       src={editor.coverImage}
-                      alt={`${editorKind === 'collection' ? 'Collection' : 'Bundle'} cover preview`}
+                      alt={`${editorKind === 'collection' ? 'Collection' : editorKind === 'book' ? 'Book' : 'Bundle'} cover preview`}
                       style={{ objectPosition: `${editor.coverPositionX}% ${editor.coverPositionY}%` }}
                       className="pointer-events-none h-full w-full select-none object-cover"
                     />
@@ -390,23 +441,39 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
             {editorKind === 'collection' ? (
               <label className="space-y-1 text-xs text-slate-400">Display order<input type="number" min={0} value={editor.order} onChange={event => setEditor({ ...editor, order: Number(event.target.value) })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white" /></label>
             ) : (
-              <label className="space-y-1 text-xs text-slate-400">Bundle price (KES) *<input type="number" min={1} value={editor.priceKes} onChange={event => setEditor({ ...editor, priceKes: Number(event.target.value) })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-white" /></label>
+              <label className="space-y-1 text-xs text-slate-400">{editorKind === 'book' ? 'Complete book' : 'Bundle'} price (KES) *<input type="number" min={1} max={500000} value={editor.priceKes} onChange={event => setEditor({ ...editor, priceKes: Number(event.target.value) })} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-white" /></label>
             )}
             <label className="flex items-center gap-2 self-end rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300"><input type="checkbox" checked={editor.isPublished} onChange={event => setEditor({ ...editor, isPublished: event.target.checked })} className="h-4 w-4 accent-sky-500" />Visible to readers</label>
           </div>
+          {editorKind === 'book' && (
+            <section className="space-y-3 rounded-xl border border-amber-900/60 bg-amber-950/10 p-3" aria-label="Chapter publication and pricing">
+              <label className="flex items-start gap-2 text-xs leading-relaxed text-slate-200"><input type="checkbox" checked={editor.showChaptersSeparately} onChange={event => setEditor(current => ({ ...current, showChaptersSeparately: event.target.checked }))} className="mt-0.5 h-4 w-4 shrink-0 accent-amber-500" />Also show chapters as separate pieces in the catalogue</label>
+              <p className="text-[11px] leading-relaxed text-slate-400">Turning this off hides duplicate catalogue listings only while the book is public. Original chapter links, content and purchases remain available.</p>
+              <label className="block space-y-1 text-xs text-slate-300"><span>Price for readers with valid chapter purchases</span><select value={editor.existingOwnerPricing} onChange={event => setEditor(current => ({ ...current, existingOwnerPricing: event.target.value as EditorState['existingOwnerPricing'] }))} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"><option value="full_price">Complete-book price (existing purchase access is unchanged)</option><option value="remaining_chapters">Reduce the price for chapters with valid purchase access</option></select></label>
+              <p className="text-[11px] leading-relaxed text-slate-400">The server checks current, valid paid chapter purchases when a new payment starts. Expired purchases, manual grants, reader passes, complimentary or preview access do not qualify for this price reduction. Changes never rewrite completed payments, extend old chapter expiry dates or remove existing access.</p>
+              <p className="text-[11px] leading-relaxed text-slate-400">A complete-book purchase permanently includes the chapters in that edition at checkout. Adding chapters later does not silently add them to earlier purchases. Earlier individual chapter purchases keep their original access terms.</p>
+              {editor.existingOwnerPricing === 'remaining_chapters' && <p className="text-[11px] leading-relaxed text-amber-200/80">Credit for valid chapter purchases is proportional to the chapters&rsquo; current individual prices within this book, not a refund of past payments. The secure checkout rounds the remaining price up to a whole shilling; readers with valid purchase access to every paid chapter do not pay again.</p>}
+              {editor.id && !editor.updatedAt && <p role="alert" className="text-xs text-rose-300">Reload this book before saving so a newer edit cannot be overwritten.</p>}
+            </section>
+          )}
           <div>
-            <p className="mb-2 text-xs font-semibold text-slate-300">Included pieces ({editor.pieceIds.length})</p>
+            <p className="mb-2 text-xs font-semibold text-slate-300">{editorKind === 'book' ? 'Select existing pieces as chapters' : 'Included pieces'} ({editor.pieceIds.length}/{pieceLimit})</p>
+            {editorKind === 'book' && <p className="mb-2 text-[11px] leading-relaxed text-slate-400">Choose published chapters or existing individual pieces below, then put them in reading order. Nothing is automatically grouped by title.</p>}
             <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/60 p-2">
               {publishedArticles.map(article => (
                 <label key={article.id} className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-xs ${editor.pieceIds.includes(article.id) ? 'border-sky-700 bg-sky-950/40 text-sky-100' : 'border-transparent text-slate-400 hover:bg-slate-900'}`}>
-                  <input type="checkbox" checked={editor.pieceIds.includes(article.id)} onChange={() => togglePiece(article.id)} className="mt-0.5 h-4 w-4 accent-sky-500" />
-                  <span><span className="block font-semibold">{article.title}</span><span className="text-[10px] text-slate-500">{article.category} • {article.isPaid === false ? 'Free' : `KES ${article.priceKes}`}</span></span>
+                  <input type="checkbox" checked={editor.pieceIds.includes(article.id)} disabled={!editor.pieceIds.includes(article.id) && editor.pieceIds.length >= pieceLimit} onChange={() => togglePiece(article.id)} className="mt-0.5 h-4 w-4 accent-sky-500" />
+                  <span><span className="block font-semibold">{article.title}</span><span className="text-[10px] text-slate-500">{article.publicationType === 'chapter' ? 'Chapter • ' : ''}{article.category} • {article.isPaid === false ? 'Free' : `KES ${article.priceKes}`} • ID {article.id}</span></span>
                 </label>
               ))}
             </div>
           </div>
-          <button type="button" onClick={() => void save()} disabled={saving || uploadingCover || !editor.name.trim() || editor.pieceIds.length < (editorKind === 'bundle' ? 2 : 1) || (editorKind === 'bundle' && (!Number.isFinite(editor.priceKes) || editor.priceKes < 1))} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-3 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50"><Save className="h-4 w-4" />{saving ? 'Saving…' : uploadingCover ? 'Uploading cover…' : `Save ${editorKind}`}</button>
-        </section>
+          {editorKind === 'book' && editor.pieceIds.length > 0 && <section aria-label="Book chapter order" className="space-y-2"><p className="text-xs font-semibold text-amber-200">Chapter order</p><ol className="space-y-2">{editor.pieceIds.map((pieceId, index) => {
+            const article = articles.find(item => item.id === pieceId);
+            return <li key={pieceId} className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950 p-2"><span className="shrink-0 text-xs font-semibold text-amber-300">{index + 1}.</span><span className="min-w-0 flex-1 break-words text-xs text-slate-300">{article?.title || `Unavailable chapter (${pieceId})`}</span><button type="button" disabled={index === 0} aria-label={`Move chapter ${index + 1} up`} onClick={() => setEditor(current => ({ ...current, pieceIds: moveBookChapter(current.pieceIds, pieceId, -1) }))} className="rounded border border-slate-700 p-2 text-slate-300 disabled:opacity-30"><ArrowUp className="h-4 w-4" aria-hidden="true" /></button><button type="button" disabled={index === editor.pieceIds.length - 1} aria-label={`Move chapter ${index + 1} down`} onClick={() => setEditor(current => ({ ...current, pieceIds: moveBookChapter(current.pieceIds, pieceId, 1) }))} className="rounded border border-slate-700 p-2 text-slate-300 disabled:opacity-30"><ArrowDown className="h-4 w-4" aria-hidden="true" /></button><button type="button" aria-label={`Remove chapter ${index + 1} from book`} onClick={() => togglePiece(pieceId)} className="rounded p-2 text-slate-400 hover:text-rose-300"><X className="h-4 w-4" aria-hidden="true" /></button></li>;
+          })}</ol></section>}
+          <button type="button" onClick={() => void save()} disabled={saving || uploadingCover || !editor.name.trim() || (editorKind === 'book' && Boolean(editor.id) && !editor.updatedAt) || editor.pieceIds.length < (editorKind !== 'collection' ? 2 : 1) || editor.pieceIds.length > pieceLimit || (editorKind !== 'collection' && (!Number.isFinite(editor.priceKes) || !Number.isInteger(editor.priceKes) || editor.priceKes < 1 || editor.priceKes > 1000000))} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-3 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50"><Save className="h-4 w-4" />{saving ? 'Saving…' : uploadingCover ? 'Uploading cover…' : `Save ${editorKind}`}</button>
+        </fieldset>
 
         <div className="space-y-5">
           <section className="rounded-2xl border border-slate-800 bg-[#0b1120] p-5">
@@ -417,10 +484,10 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
             </div>
           </section>
           <section className="rounded-2xl border border-slate-800 bg-[#0b1120] p-5">
-            <div className="mb-4 flex items-center gap-2"><PackageOpen className="h-4 w-4 text-emerald-400" /><h2 className="font-serif text-lg font-bold text-white">Bundles</h2></div>
+            <div className="mb-4 flex items-center gap-2"><PackageOpen className="h-4 w-4 text-emerald-400" /><h2 className="font-serif text-lg font-bold text-white">Books &amp; Bundles</h2></div>
             <div className="space-y-2">
               {bundles.length === 0 && <p className="text-xs text-slate-500">No reader bundles yet.</p>}
-              {bundles.map(bundle => <div key={bundle.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3"><button type="button" onClick={() => selectBundle(bundle)} className="min-w-0 text-left"><span className="block truncate text-sm font-semibold text-white">{bundle.name}</span><span className="text-[10px] text-slate-500">{bundle.pieceIds.length} pieces • KES {bundle.priceKes.toLocaleString()} • {bundle.isPublished ? 'Public' : 'Hidden'}</span></button><button type="button" aria-label={`Delete bundle ${bundle.name}`} onClick={() => void remove('bundle', bundle.id)} className="rounded-lg p-2 text-slate-500 hover:bg-rose-950 hover:text-rose-300"><Trash2 className="h-4 w-4" /></button></div>)}
+              {bundles.map(bundle => <div key={bundle.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3"><button type="button" disabled={saving} onClick={() => selectBundle(bundle)} className="min-w-0 text-left"><span className="block truncate text-sm font-semibold text-white">{bundle.name}</span><span className="text-[10px] text-slate-500">{bundle.kind === 'book' ? `${bundle.pieceIds.length} ordered chapters` : `${bundle.pieceIds.length} pieces`} • KES {bundle.priceKes.toLocaleString()} • {bundle.isPublished ? 'Public' : 'Hidden'}</span></button><button type="button" disabled={saving} aria-label={`Delete ${bundle.kind === 'book' ? 'book' : 'bundle'} ${bundle.name}`} onClick={() => void remove(bundle.kind === 'book' ? 'book' : 'bundle', bundle.id)} className="rounded-lg p-2 text-slate-500 hover:bg-rose-950 hover:text-rose-300"><Trash2 className="h-4 w-4" /></button></div>)}
             </div>
           </section>
         </div>

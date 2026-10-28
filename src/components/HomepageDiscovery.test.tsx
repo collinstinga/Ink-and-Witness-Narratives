@@ -133,6 +133,32 @@ describe('HomepageDiscovery', () => {
     expect(model.pieces.map((item) => item.id)).toEqual(['standalone']);
   });
 
+  it('honors the writer choice to keep book chapters individually listed', () => {
+    const first = piece('one');
+    const second = piece('two');
+    const book: HomepageBundle = { ...bundle('book', [first, second]), kind: 'book', pieceIds: [second.id, first.id], showChaptersSeparately: true };
+    const separate = buildHomepageDiscoveryModel([], [first, second], [first, second], [book]);
+    expect(separate.bundles[0].pieces.map(item => item.id)).toEqual(['two', 'one']);
+    expect(separate.pieces.map(item => item.id)).toEqual(['one', 'two']);
+    const combined = buildHomepageDiscoveryModel([], [first, second], [first, second], [{ ...book, showChaptersSeparately: false }]);
+    expect(combined.pieces).toEqual([]);
+  });
+
+  it('does not hide chapters behind a disabled book shelf', () => {
+    const first = piece('one');
+    const second = piece('two');
+    const book: HomepageBundle = { ...bundle('book', [first, second]), kind: 'book', showChaptersSeparately: false };
+    const markup = renderToStaticMarkup(<HomepageDiscovery
+      config={{ sections: [{ id: 'bundles', isVisible: false, order: 0 }] } as any}
+      bundles={[book]} collections={[]} categories={[]} allArticles={[first, second]} pieces={[first, second]}
+      unlockedTokens={{}} onReadArticle={vi.fn()} onUnlockArticle={vi.fn()} onPurchaseBundle={vi.fn()}
+      onSelectCategory={vi.fn()} onNavigate={vi.fn()}
+    />);
+    expect(markup).not.toContain('data-bundle-id="book"');
+    expect(markup).toContain('data-piece-id="one"');
+    expect(markup).toContain('data-piece-id="two"');
+  });
+
   it('honors writer section visibility and renders sections in the saved order', () => {
     const inCollection = piece('in-collection');
     const standalone = piece('standalone');

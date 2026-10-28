@@ -83,4 +83,23 @@ describe('HomepageBundles', () => {
     expect(markup).toContain('View every piece in Starter Shelf');
     expect(markup).toContain('object-position:18% 82%');
   });
+
+  it('presents books as ordered chapters without leaking paid text or inferring full ownership', () => {
+    const first = { ...piece('one'), content: 'SECRET CHAPTER ONE', isUnlocked: true };
+    const second = { ...piece('two'), content: 'SECRET CHAPTER TWO' };
+    const book: HomepageBundle = {
+      id: 'book', kind: 'book', name: 'Complete Story', slug: 'complete-story', description: '',
+      pieceIds: [second.id, first.id], pieces: [first, second], checkoutArticle: piece('bundle:book'),
+      priceKes: 600, existingOwnerPricing: 'remaining_chapters', showChaptersSeparately: false,
+      isPublished: true, createdAt: '', updatedAt: '',
+    };
+    const markup = renderToStaticMarkup(<HomepageBundles bundles={[book]} onPurchaseBundle={vi.fn()} />);
+    expect(markup).toContain('Book · 2 chapters');
+    expect(markup).toContain('Complete book price');
+    expect(markup).toContain('Open book');
+    expect(markup).toContain('Read or buy Complete Story');
+    expect(markup.indexOf('1. Piece two')).toBeLessThan(markup.indexOf('2. Piece one'));
+    expect(markup).not.toContain('SECRET CHAPTER');
+    expect(markup).not.toContain('All chapters are in your library');
+  });
 });

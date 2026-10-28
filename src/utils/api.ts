@@ -46,6 +46,7 @@ import {
   ReaderReactionType,
   ContentCollection,
   ContentBundle,
+  ContentBookQuote,
   PieceReview,
   ReaderSubscriptionSummary,
   SubscriptionPlan,
@@ -702,7 +703,8 @@ export const api = {
     affiliateMeta?: {
       affiliateCode?: string;
       campaignCode?: string;
-    }
+    },
+    bookUpdatedAt?: string
   ) {
     const ref = getActiveReferral();
     const res = await fetch('/api/mpesa/stkpush', {
@@ -713,6 +715,7 @@ export const api = {
         phoneNumber, 
         amount, 
         isTip,
+        ...(bookUpdatedAt ? { bookUpdatedAt } : {}),
         currency: currencyMeta?.currency || 'KES',
         originalAmount: currencyMeta?.originalAmount || amount,
         exchangeRate: currencyMeta?.exchangeRate,
@@ -1173,6 +1176,10 @@ export const api = {
     bundles: Array<ContentBundle & { pieces: Article[]; checkoutArticle: Article }>;
   }> {
     return safeFetchJson('/api/discovery/collections', { cache: 'no-store' });
+  },
+
+  async getBookQuote(bookId: string): Promise<ContentBookQuote> {
+    return safeFetchJson(`/api/books/${encodeURIComponent(bookId)}/quote`, { cache: 'no-store' });
   },
 
   async getAdminReaderExperience(): Promise<{
