@@ -4,16 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { createRequire } = require('node:module');
+const { launchFixtureBrowser, recordFixtureFailure } = require('./browser-runtime.cjs');
 const app = path.resolve(__dirname, '../..');
 const output = path.join(app, 'data/financial-controls-qa');
 let phase = 'setup';
 (async () => {
-  assert.ok(process.env.PLAYWRIGHT_TEST_RUNTIME && path.isAbsolute(process.env.PLAYWRIGHT_TEST_RUNTIME));
-  assert.ok(process.env.CHROME_PATH && path.isAbsolute(process.env.CHROME_PATH));
-  assert.ok(fs.existsSync(process.env.CHROME_PATH));
-  const runtime = createRequire(path.join(process.env.PLAYWRIGHT_TEST_RUNTIME, 'package.json'));
-  const { chromium } = runtime('playwright');
   fs.mkdirSync(output, { recursive: true });
   await require('esbuild').build({ entryPoints: [path.join(__dirname, 'financial-controls.fixture.tsx')],
     outfile: path.join(output, 'lab.js'), bundle: true, format: 'esm', platform: 'browser', jsx: 'automatic',
@@ -41,7 +36,7 @@ let phase = 'setup';
   const results = [];
   try {
     phase = 'launch';
-    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH, headless: true, timeout: 30000 });
+    browser = await launchFixtureBrowser(output);
     for (const width of [390, 1280]) {
       const context = await browser.newContext({ viewport: { width, height: 1000 }, serviceWorkers: 'block' });
       const page = await context.newPage(), errors = [], unexpected = [], writes = [];
@@ -102,4 +97,4 @@ let phase = 'setup';
   const report = { status: 'verified', results, cloudWrites: 0, realProviderCalls: 0, realSessions: 0, fixtureApiOnly: true };
   fs.writeFileSync(path.join(output, 'proof.json'), JSON.stringify(report, null, 2));
   process.stdout.write(JSON.stringify(report) + '\n');
-})().catch(error => { process.stderr.write(JSON.stringify({ status: 'failed', phase, error: error.message, fixtureApiOnly: true }) + '\n'); process.exitCode = 1; });
+})().catch(error => { recordFixtureFailure(output, { status: 'failed', phase, error: error.message, fixtureApiOnly: true }); process.exitCode = 1; });

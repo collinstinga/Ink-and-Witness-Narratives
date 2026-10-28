@@ -18,6 +18,9 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ink-witness-browsers
     steps:
       - name: Check out the exact source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -36,30 +39,48 @@ jobs:
       - name: Run the complete serial regression suite
         run: pnpm exec vitest run --pool=threads --maxWorkers=1 --testTimeout=30000 --reporter=dot --silent
       - name: Build frontend and server
+        id: build
         run: pnpm run build
-      - name: Verify financial controls on mobile and desktop with synthetic API only
-        timeout-minutes: 4
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
-          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
+      - name: Install matching managed Chromium and verify three fresh launches
+        id: browser_setup
+        timeout-minutes: 6
         run: |
+          set -euo pipefail
+          mkdir -p data/ci-browser-qa
           npm install --prefix "$PLAYWRIGHT_TEST_RUNTIME" --no-audit --no-fund --ignore-scripts --no-package-lock playwright@1.62.1
-          export CHROME_PATH="$(command -v google-chrome)"
-          test -x "$CHROME_PATH"
-          node scripts/qa/financial-controls.cjs
+          node "$PLAYWRIGHT_TEST_RUNTIME/node_modules/playwright/cli.js" install --with-deps --only-shell chromium
+          node scripts/qa/browser-runtime.cjs 2>&1 | tee data/ci-browser-qa/preflight.log
+      - name: Verify financial controls on mobile and desktop with synthetic API only
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && steps.browser_setup.conclusion == 'success' }}
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          node scripts/qa/financial-controls.cjs 2>&1 | tee data/ci-browser-qa/financial-controls.log
       - name: Verify writer recovery form and panel with synthetic services only
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && steps.browser_setup.conclusion == 'success' }}
         timeout-minutes: 4
-        env:
-          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
         run: |
-          export CHROME_PATH="$(command -v google-chrome)"
-          test -x "$CHROME_PATH"
-          node scripts/qa/writer-security.cjs
+          set -euo pipefail
+          node scripts/qa/writer-security.cjs 2>&1 | tee data/ci-browser-qa/writer-security.log
       - name: Verify chapter books and formatting on mobile and desktop with synthetic services only
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && steps.browser_setup.conclusion == 'success' }}
         timeout-minutes: 4
-        env:
-          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
         run: |
-          export CHROME_PATH="$(command -v google-chrome)"
-          test -x "$CHROME_PATH"
-          node scripts/qa/chapter-books.cjs
+          set -euo pipefail
+          node scripts/qa/chapter-books.cjs 2>&1 | tee data/ci-browser-qa/chapter-books.log
+      - name: Preserve synthetic browser proof and failure diagnostics
+        if: ${{ !cancelled() && steps.browser_setup.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: synthetic-browser-qa-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            data/ci-browser-qa/*.json
+            data/ci-browser-qa/*.log
+            data/financial-controls-qa/*.json
+            data/financial-controls-qa/*.png
+            data/writer-security-qa/*.json
+            data/writer-security-qa/*.png
+            data/chapter-books-qa/*.json
+            data/chapter-books-qa/*.png

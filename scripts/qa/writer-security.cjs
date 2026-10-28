@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { createRequire } = require('node:module');
+const { launchFixtureBrowser, recordFixtureFailure } = require('./browser-runtime.cjs');
 const app = path.resolve(__dirname, '../..');
 const output = path.join(app, 'data/writer-security-qa');
 const capability = '/api/auth/writer-password-reset';
@@ -12,10 +12,6 @@ const token = 'wcr1_' + 'a'.repeat(43);
 const password = 'SyntheticNewPassword1!';
 let phase = 'setup';
 (async () => {
-  assert.ok(process.env.PLAYWRIGHT_TEST_RUNTIME && path.isAbsolute(process.env.PLAYWRIGHT_TEST_RUNTIME));
-  assert.ok(process.env.CHROME_PATH && path.isAbsolute(process.env.CHROME_PATH) && fs.existsSync(process.env.CHROME_PATH));
-  const runtime = createRequire(path.join(process.env.PLAYWRIGHT_TEST_RUNTIME, 'package.json'));
-  const { chromium } = runtime('playwright');
   fs.mkdirSync(output, { recursive: true });
   const build = require('esbuild').build;
   await build({ entryPoints: [path.join(__dirname, 'writer-security.fixture.tsx')], outfile: path.join(output, 'lab.js'),
@@ -38,7 +34,7 @@ let phase = 'setup';
     }
     assert.equal(lab.snapshot().consumes, 0); assert.equal(lab.snapshot().hashes, 0);
     phase = 'launch';
-    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH, headless: true, timeout: 30000 });
+    browser = await launchFixtureBrowser(output);
     for (const width of [390, 1280]) {
       const context = await browser.newContext({ viewport: { width, height: 1000 }, serviceWorkers: 'block' });
       const page = await context.newPage(), errors = [], unexpected = [];
@@ -113,5 +109,5 @@ let phase = 'setup';
   process.stdout.write(JSON.stringify(report) + '\n');
 })().catch(error => {
   const message = String(error.message).replace(/wcr1_[A-Za-z0-9_-]+/g, '[capability]').replaceAll(password, '[password]');
-  process.stderr.write(JSON.stringify({ status: 'failed', phase, error: message, syntheticServicesOnly: true }) + '\n'); process.exitCode = 1;
+  recordFixtureFailure(output, { status: 'failed', phase, error: message, syntheticServicesOnly: true }); process.exitCode = 1;
 });
