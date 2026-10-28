@@ -68,6 +68,20 @@ import {
 } from '../types.js';
 import { clearReferral, getActiveReferral } from './affiliateReferral.js';
 
+// Safe Writer Studio security DTOs deliberately contain no account IDs,
+// recovery capabilities, backup locations, password hashes or provider receipts.
+export interface WriterAccountSecurityStatus {
+  status: 'unavailable' | 'review_required' | 'ready' | 'pending' | 'active';
+  memberCount: number;
+  canIssue: boolean;
+  expiresAt?: number;
+}
+export interface WriterAccountRecoveryIssue {
+  status: 'pending';
+  expiresAt: number;
+  delivery: 'accepted' | 'unconfirmed';
+}
+
 // Local storage key for purchased tokens
 const TOKENS_STORAGE_KEY = 'ink_witness_tokens';
 const ADMIN_SESSION_MARKER_KEY = 'ink_writer_session_active';
@@ -2897,6 +2911,23 @@ export const api = {
       },
       'Failed to run partner notification operations.'
     );
+  },
+
+  async getWriterAccountSecurity(options: { signal?: AbortSignal } = {}): Promise<{
+    success: true; security: WriterAccountSecurityStatus;
+  }> {
+    return safeFetchJson('/api/admin/account-security', {
+      cache: 'no-store', signal: options.signal, headers: { 'x-admin-token': getWriterToken() || '' },
+    }, 'Account security status could not be checked.');
+  },
+
+  async requestWriterAccountRecovery(): Promise<{ success: true; recovery: WriterAccountRecoveryIssue }> {
+    // No caller-selected identity, recipient, URL, token or password is accepted.
+    return safeFetchJson('/api/admin/account-security/password-recovery', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify({}),
+    }, 'Recovery delivery could not be confirmed. Check your inbox and refresh security status before continuing.');
   },
 
   async getAdminAffiliateFinancialAdjustments(options: { signal?: AbortSignal } = {}): Promise<{

@@ -2032,6 +2032,8 @@ export interface AuthSession {
   expiresAt: number;
   /** New reader sessions must match the server-side active-session pointer. */
   activeReaderSession?: true;
+  /** Server-owned generation after explicit writer identity recovery. */
+  writerIdentityGeneration?: string;
 }
 
 export interface AuthResponse {

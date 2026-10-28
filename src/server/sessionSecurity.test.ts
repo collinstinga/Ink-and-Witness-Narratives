@@ -77,4 +77,14 @@ describe('primary session storage security', () => {
     expect(normalizeAuthSessionRecord({ ...record, storageVersion: 2, userId: '' })).toBeNull();
     expect(normalizeAuthSessionRecord({ ...record, storageVersion: 2, sessionId: token })).toBeNull();
   });
+
+  it('preserves only a valid writer-only identity generation', () => {
+    const generation = 'g'.repeat(43);
+    expect(normalizeAuthSessionRecord({ ...record, storageVersion: 2, writerIdentityGeneration: generation }))
+      .toMatchObject({ writerIdentityGeneration: generation });
+    for (const value of ['', 'x'.repeat(42), 'x'.repeat(44), {}, null]) {
+      expect(normalizeAuthSessionRecord({ ...record, storageVersion: 2, writerIdentityGeneration: value })).toBeNull();
+    }
+    expect(normalizeAuthSessionRecord({ ...record, storageVersion: 2, role: 'client', writerIdentityGeneration: generation })).toBeNull();
+  });
 });

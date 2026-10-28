@@ -3,7 +3,8 @@ import type { Express, Request, RequestHandler, Response } from 'express';
 import type { Firestore } from 'firebase-admin/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ verify: vi.fn(), gate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ verify: vi.fn(), gate: vi.fn(), identity: vi.fn() }));
+vi.mock('./writerIdentityConsolidation.js', () => ({ resolveWriterIdentityByEmail: mocks.identity }));
 vi.mock('google-auth-library', () => ({ OAuth2Client: class { verifyIdToken = mocks.verify; } }));
 vi.mock('./affiliateNotificationRollout.js', () => ({
   AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN: 'https://www.inkandwitness-narratives.co.ke',
@@ -67,11 +68,19 @@ function harness(env: NodeJS.ProcessEnv = ENV) {
 
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(NOW); mocks.verify.mockReset(); mocks.gate.mockReset(); mocks.gate.mockReturnValue('allowed');
+  mocks.identity.mockReset(); mocks.identity.mockResolvedValue({ kind: 'none' });
   mocks.verify.mockResolvedValue({ getPayload: () => CLAIMS });
 });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('Google-signed identity for the temporary owner probe', () => {
+  it('uses only a completed authoritative consolidation and rejects an invalid repair', async () => {
+    const h = harness(); mocks.identity.mockResolvedValue({ kind: 'active', user: USER });
+    expect((await h.invoke()).status).toBe(200);
+    expect(h.where).not.toHaveBeenCalled();
+    mocks.identity.mockResolvedValue({ kind: 'invalid' });
+    expect((await h.invoke()).status).toBe(403);
+  });
   it('uses the official signature verifier with the exact CLI audience and maximum expiry', async () => {
     expect(await verifyAffiliateNotificationOwnerIdToken('signed.google.jwt')).toBe(OWNER);
     expect(mocks.verify).toHaveBeenCalledExactlyOnceWith({ idToken: 'signed.google.jwt', audience: AUDIENCE, maxExpiry: 3600 });

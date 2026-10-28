@@ -9,6 +9,8 @@ import { affiliateStore } from './affiliateStore.js';
 import { consumeAffiliateAttributionClaimInTransaction } from './affiliateAttributionClaimStore.js';
 import { normalizeAffiliateConversionSourceClick } from './affiliateConversionCohort.js';
 import { hashPassword, generateSecureToken } from './auth.js';
+import { resolveWriterIdentityByEmail, resolveWriterIdentityForSessionCreation,
+  writerConsolidationSessionAllowed } from './writerIdentityConsolidation.js';
 import {
   ImageValidationError,
   sanitizeImageDataUrl,
@@ -7701,6 +7703,16 @@ export const store = {
     const normalizedEmail = (email || '').trim().toLowerCase();
     if (!normalizedEmail || normalizedEmail.length > 254) return null;
 
+    // A completed, owner-activated recovery is authoritative before any warm
+    // first-match credential. Pending metadata deliberately changes nothing.
+    const identity = await resolveWriterIdentityByEmail(getDb(), normalizedEmail);
+    if (identity.kind === 'invalid') return null;
+    if (identity.kind === 'active') {
+      for (const id of identity.memberUserIds) cachedUsers.delete(id);
+      cachedUsers.set(identity.user.id, identity.user);
+      return identity.user;
+    }
+
     const cached = this.getUserByEmail(normalizedEmail);
     let documentId = cached?.id || '';
     let stored: UserRecord | null = null;
@@ -7837,6 +7849,19 @@ export const store = {
       return;
     }
 
+    // An empty cold cache is not proof production has no writer. Do not
+    // overwrite credentials or promote an existing account from bootstrap env.
+    const cloudBacked = Boolean(process.env.VERCEL || process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    if (cloudBacked) {
+      try {
+        const admins = await getDb().collection('users').where('role', '==', 'admin').limit(1).get();
+        if (admins.docs.length) return;
+      } catch {
+        console.warn('[Auth Security] Writer bootstrap skipped: authoritative account state is unavailable.');
+        return;
+      }
+    }
+
     const adminEmail = (process.env.INITIAL_ADMIN_EMAIL || process.env.ADMIN_EMAIL || '').trim().toLowerCase();
     const adminPassword = (process.env.INITIAL_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || '').trim();
 
@@ -7845,6 +7870,7 @@ export const store = {
         const passwordHash = await hashPassword(adminPassword);
         const existing = this.getUserByEmail(adminEmail);
         if (existing) {
+          if (cloudBacked) throw new Error('Writer bootstrap cannot promote or rotate an existing account.');
           existing.role = 'admin';
           existing.passwordHash = passwordHash;
           existing.updatedAt = new Date().toISOString();
@@ -7913,7 +7939,13 @@ export const store = {
         cachedAuthSessionVerifiedAt.delete(previousDocumentId);
       }
     } else {
-      await setFirestoreDoc('sessions', documentId, session);
+      const db = getDb();
+      await db.runTransaction(async transaction => {
+        const identity = await resolveWriterIdentityForSessionCreation(db, user, transaction);
+        if (!identity) throw new Error('Sign-in changed. Please sign in again.');
+        if (identity.writerIdentityGeneration) session.writerIdentityGeneration = identity.writerIdentityGeneration;
+        transaction.create(db.collection('sessions').doc(documentId), sanitizeForFirestore(session));
+      });
     }
     cachedAuthSessions.set(documentId, session);
     cachedAuthSessionVerifiedAt.set(documentId, now);
@@ -7936,7 +7968,13 @@ export const store = {
     const cached = cachedAuthSessions.get(documentId);
     const verifiedAt = cachedAuthSessionVerifiedAt.get(documentId) || 0;
     const cacheTtl = cached?.role === 'client' ? READER_SESSION_CACHE_TTL_MS : AUTH_SESSION_CACHE_TTL_MS;
-    if (cached && cached.expiresAt > now && now - verifiedAt < cacheTtl) return cached;
+    if (cached && cached.expiresAt > now && now - verifiedAt < cacheTtl) {
+      if (cached.role === 'admin' && !await writerConsolidationSessionAllowed(getDb(), cached)) {
+        cachedAuthSessions.delete(documentId); cachedAuthSessionVerifiedAt.delete(documentId);
+        return null;
+      }
+      return cached;
+    }
     if (cached) {
       if (cached.expiresAt <= now) {
         cachedAuthSessions.delete(documentId);
@@ -7955,6 +7993,10 @@ export const store = {
       const storedValue = await getFirestoreDoc<Record<string, unknown>>('sessions', documentId);
       const storedSession = normalizeAuthSessionRecord(storedValue);
       if (storedSession) {
+        if (storedSession.role === 'admin' && !await writerConsolidationSessionAllowed(getDb(), storedSession)) {
+          cachedAuthSessions.delete(documentId); cachedAuthSessionVerifiedAt.delete(documentId);
+          return null;
+        }
         if (storedSession.expiresAt <= Date.now()) {
           cachedAuthSessions.delete(documentId);
           cachedAuthSessionVerifiedAt.delete(documentId);
@@ -8024,6 +8066,7 @@ export const store = {
         persistAuthSessionCache();
         return null;
       }
+      if (legacySession.role === 'admin' && !await writerConsolidationSessionAllowed(db, legacySession)) return null;
       if (legacySession.expiresAt <= Date.now()) {
         cachedAuthSessions.delete(documentId);
         cachedAuthSessionVerifiedAt.delete(documentId);

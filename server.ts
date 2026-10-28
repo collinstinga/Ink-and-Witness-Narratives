@@ -98,6 +98,7 @@ import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntim
 import { affiliateNotificationWebhookModeEnabled, registerAffiliateNotificationRolloutRoutes } from "./src/server/affiliateNotificationRolloutRoutes.js";
 import { registerAffiliateNotificationScheduledRoutes } from "./src/server/affiliateNotificationScheduledRoutes.js";
 import { registerAffiliateFinancialAdjustmentRoutes } from "./src/server/affiliateFinancialAdjustmentRoutes.js";
+import { registerWriterIdentityConsolidationRoutes } from "./src/server/writerIdentityConsolidationRoutes.js";
 import { registerAffiliateNotificationOwnerOperatorRoutes } from "./src/server/affiliateNotificationOwnerOperatorRoutes.js";
 import { AffiliateNotificationEligibilityOverflowError, readAffiliateNotificationEligibility } from "./src/server/affiliateNotificationEligibilityRead.js";
 import { isStagingVerificationBindingEnabled, readStagingVerificationBinding } from "./src/server/stagingVerificationBinding.js";
@@ -7075,6 +7076,11 @@ ${currentDraft || prompt}
   registerAffiliateFinancialAdjustmentRoutes(app, {
     requireAdminAuth, noStore: noStoreNotificationRuntime,
     rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
+  });
+  registerWriterIdentityConsolidationRoutes(app, {
+    requireAdminAuth, sameOrigin: requireSameOriginPublicWrite,
+    issueLimiter: passwordResetRequestLimiter, capabilityLimiter: passwordResetCapabilityLimiter,
+    getDb, clearSessionCookie,
   });
   registerAffiliateNotificationScheduledRoutes(app, {
     noStore: noStoreNotificationRuntime, rateLimiter: affiliateNotificationRuntimeLimiter, getDb,

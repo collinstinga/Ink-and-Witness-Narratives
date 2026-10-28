@@ -3,6 +3,7 @@ import { OAuth2Client } from 'google-auth-library';
 import type { Express, Request, RequestHandler, Response } from 'express';
 import type { Firestore } from 'firebase-admin/firestore';
 import { normalizeNewsletterEmail } from './newsletterSecurity.js';
+import { resolveWriterIdentityByEmail } from './writerIdentityConsolidation.js';
 import {
   AFFILIATE_NOTIFICATION_PRODUCTION_ORIGIN, AffiliateNotificationRolloutError,
   getProductionAffiliateNotificationRolloutStatus, productionAffiliateNotificationGate,
@@ -101,9 +102,13 @@ export function registerAffiliateNotificationOwnerOperatorRoutes(app: Pick<Expre
     if (productionAffiliateNotificationGate(db, env, true) !== 'allowed') { res.status(403).json({ success: false }); return null; }
     // Authoritative bounded query, including duplicate detection. An OAuth
     // email cannot grant a role from a warm cache or self-register as a writer.
-    const users = await db.collection('users').where('email', '==', email).limit(2).get();
-    const document = users.docs.length === 1 ? users.docs[0] : null; const user = document?.data();
-    if (!document || user?.id !== document.id || !/^user_[A-Za-z0-9_-]{8,120}$/.test(document.id)
+    const identity = await resolveWriterIdentityByEmail(db, email);
+    if (identity.kind === 'invalid') { res.status(403).json({ success: false }); return null; }
+    const users = identity.kind === 'none' ? await db.collection('users').where('email', '==', email).limit(2).get() : null;
+    const document = users?.docs.length === 1 ? users.docs[0] : null;
+    const user = identity.kind === 'active' ? identity.user : document?.data();
+    const documentId = identity.kind === 'active' ? identity.user.id : document?.id;
+    if (!documentId || user?.id !== documentId || !/^user_[A-Za-z0-9_-]{8,120}$/.test(documentId)
       || user.role !== 'admin' || normalizeNewsletterEmail(user.email) !== email || !/^\$argon2id\$/.test(user.passwordHash || '')) {
       res.status(403).json({ success: false }); return null;
     }

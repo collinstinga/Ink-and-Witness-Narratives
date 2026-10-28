@@ -1,4 +1,10 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+const identityMocks = vi.hoisted(() => ({ resolve: vi.fn(), session: vi.fn(), create: vi.fn() }));
+vi.mock('./writerIdentityConsolidation.js', () => ({
+  resolveWriterIdentityByEmail: identityMocks.resolve,
+  writerConsolidationSessionAllowed: identityMocks.session,
+  resolveWriterIdentityForSessionCreation: identityMocks.create,
+}));
 
 type MockDocumentRef = {
   collectionName: string;
@@ -156,6 +162,9 @@ describe('lazy hashed primary sessions', () => {
   }, 60_000);
 
   beforeEach(() => {
+    identityMocks.resolve.mockReset().mockResolvedValue({ kind: 'none' });
+    identityMocks.session.mockReset().mockResolvedValue(true);
+    identityMocks.create.mockReset().mockImplementation(async (_db, user) => ({ user }));
     for (const key of Array.from(dbMocks.documents.keys())) {
       if (key.startsWith('sessions/') || key.startsWith('active_reader_sessions/')) dbMocks.documents.delete(key);
     }
@@ -317,5 +326,40 @@ describe('lazy hashed primary sessions', () => {
     expect(dbMocks.documents.has(dbMocks.keyFor('sessions', removeId))).toBe(false);
     expect(dbMocks.getAllFirestoreDocs.mock.calls
       .filter(([collectionName]) => collectionName === 'sessions')).toHaveLength(0);
+  });
+
+  it('checks writer identity generation before returning a warm cached session', async () => {
+    const token = createSignedAuthSessionToken(process.env.SESSION_SIGNING_SECRET);
+    const id = getAuthSessionDocumentId(token)!;
+    dbMocks.documents.set(dbMocks.keyFor('sessions', id), activeRecord('user_writer_live123'));
+    expect(await store.getAuthSession(token)).not.toBeNull();
+    identityMocks.session.mockResolvedValue(false);
+    expect(await store.getAuthSession(token)).toBeNull();
+    expect(identityMocks.session).toHaveBeenCalledTimes(2);
+    expect(dbMocks.documents.has(dbMocks.keyFor('sessions', id))).toBe(true);
+  });
+
+  it('uses a credential CAS and persists the active writer generation on session creation', async () => {
+    const user = { id: 'user_writer_active123', role: 'admin' as const, email: 'collinstinga@gmail.com',
+      name: 'Writer', passwordHash: '$argon2id$synthetic-verified', createdAt: new Date().toISOString() };
+    identityMocks.create.mockResolvedValueOnce(null);
+    await expect(store.createAuthSession(user)).rejects.toThrow('Sign-in changed');
+    const generation = 'q'.repeat(43);
+    identityMocks.create.mockResolvedValueOnce({ user, writerIdentityGeneration: generation });
+    const token = await store.createAuthSession(user);
+    expect(dbMocks.documents.get(dbMocks.keyFor('sessions', getAuthSessionDocumentId(token)!)))
+      .toMatchObject({ userId: user.id, writerIdentityGeneration: generation });
+    expect(identityMocks.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves the activated canonical writer before a cached email match', async () => {
+    const user = { id: 'user_canonical_writer123', role: 'admin' as const, email: 'collinstinga@gmail.com',
+      name: 'Writer', passwordHash: '$argon2id$synthetic-current', createdAt: new Date().toISOString() };
+    identityMocks.resolve.mockResolvedValueOnce({ kind: 'active', user, memberUserIds: [user.id, 'user_older_writer123'],
+      identityGeneration: 'q'.repeat(43), activatedAt: new Date().toISOString() });
+    expect(await store.getFreshUserByEmail(user.email)).toEqual(user);
+    expect(dbMocks.getFirestoreDoc).not.toHaveBeenCalled();
+    identityMocks.resolve.mockResolvedValueOnce({ kind: 'invalid' });
+    expect(await store.getFreshUserByEmail(user.email)).toBeNull();
   });
 });

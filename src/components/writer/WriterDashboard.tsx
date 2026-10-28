@@ -49,6 +49,7 @@ import { WriterEditor } from './WriterEditor.js';
 import { WriterPayments } from './WriterPayments.js';
 import { WriterTips } from './WriterTips.js';
 import { WriterSettings } from './WriterSettings.js';
+import { WriterAccountSecurityPanel } from './WriterAccountSecurityPanel.js';
 import { HomepageManager } from './HomepageManager.js';
 import { WriterAnalytics } from './WriterAnalytics.js';
 import { WriterReaders } from './WriterReaders.js';
@@ -101,6 +102,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
   const [currentSubTab, setCurrentSubTab] = useState<string | undefined>(initialSubTab);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   // Sync with initialTab prop if it changes externally
   useEffect(() => {
@@ -910,6 +912,13 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
       {/* Main Content Area */}
       <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto">
+          <div className="mb-4 flex justify-end">
+            <button type="button" onClick={() => setSecurityOpen(open => !open)} aria-expanded={securityOpen}
+              aria-controls="writer-account-security" className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200">
+              <ShieldCheck className="h-4 w-4" aria-hidden="true" />Account security
+            </button>
+          </div>
+          {securityOpen ? <WriterAccountSecurityPanel onClose={() => setSecurityOpen(false)} /> : null}
           <div className="mb-4 hidden justify-end md:flex">
             <button
               id="desktop-writer-guide-btn"
