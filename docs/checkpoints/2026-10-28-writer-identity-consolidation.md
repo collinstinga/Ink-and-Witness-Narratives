@@ -21,13 +21,19 @@ query; the genuine owner-email probe correctly refused that ambiguous identity.
 The first targeted backup stopped at its20record limit without writes.
 The repair now permits at most32members plus an overflow sentinel, based on
 the confirmed21record size; it never truncates the live cohort. The expanded
-private, read-only backup/dependency capture must pass before review seeding.
+private, read-only backup/dependency capture completed without production writes:
+manifest SHA2568f0e1c5883f3710d77af5cbc5c881c5ce850a89c93d6299a2de8b6037f74df75,
+captured2026-10-28T04:22:56.048Z. All21 rows were retained. One licence and
+16transactions belong to the SAME member; no other cohort-owned records were
+found in the bounded linked-record capture. Never label this a no-owned backup.
 
 ## Candidate design
 
 - Separate writer-purpose recovery from unchanged client-only reader resets.
-- Actual signed-in Writer Studio actor chooses its own canonical ID, not an
-  operator, first query result or oldest-password guess.
+- A genuine signed-in owner-cohort member may initiate recovery. A private
+  preservation review retains the sole existing purchase-owning member's ID;
+  if there is no ownership, use the authenticated actor's ID. Never select by
+  query order, oldest record or an arbitrary password. No financial rows move.
 - Private fresh backup/review binds the complete cohort and snapshot digest.
   Alias-owned purchases/access/profiles/reviews/comments/reactions cause refusal;
   retaining database rows is not permission to strand their functional ownership.
@@ -47,9 +53,13 @@ private, read-only backup/dependency capture must pass before review seeding.
 
 ## Unfinished gates
 
-Candidate files are not deployed. Full CI, independent integration review,
-actual isolated staging/race/preservation rehearsal and mobile checks remain.
-Root is preparing the private production cohort/dependency backup read-only.
+Candidate files are not deployed. Initial0622e71 passed full CI run40631660182:
+173suites/2614tests, types and frontend/server builds. That was BEFORE the
+new browser submission fix, batched checks and ownership-review extension.
+Fresh exact-source CI, actual isolated staging/race/preservation rehearsal and
+mobile/desktop checks remain. Native no-referrer form submission was found to
+send Origin:null; external-script CORS-mode fetch now preserves strict origin
+guards with no Referer. A synthetic actual-route browser QA was added to CI.
 Do not seed review, send mail, activate consolidation or claim completion until
 the corresponding proof exists. No real payment/refund or announcements allowed.
 

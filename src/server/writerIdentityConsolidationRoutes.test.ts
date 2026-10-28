@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import type { RequestHandler } from 'express';
 import { WriterIdentityConsolidationError, WRITER_CONSOLIDATION_ORIGIN, WRITER_CONSOLIDATION_OWNER } from './writerIdentityConsolidation.js';
-import { buildWriterIdentityRecoveryEmail, registerWriterIdentityConsolidationRoutes, WRITER_ACCOUNT_SECURITY_PATH, WRITER_RECOVERY_CAPABILITY_PATH } from './writerIdentityConsolidationRoutes.js';
+import { buildWriterIdentityRecoveryEmail, registerWriterIdentityConsolidationRoutes, WRITER_ACCOUNT_SECURITY_PATH, WRITER_RECOVERY_CAPABILITY_PATH, WRITER_RECOVERY_SCRIPT_PATH, WRITER_RECOVERY_FORM_SCRIPT } from './writerIdentityConsolidationRoutes.js';
 
 const token = `wcr1_${'a'.repeat(43)}`;
 const actor = { id: 'user_authenticated_writer', email: WRITER_CONSOLIDATION_OWNER, role: 'admin' };
@@ -32,10 +32,10 @@ function fixture(options: { auth?: boolean; origin?: boolean; limited?: boolean 
     capabilityLimiter: (_req, res, next) => { guards.push('capability-limit'); if (options.limited) res.status(429).json({ success: false }); else next(); },
     getDb, service: service as any, sendEmail, hashPassword, clearSessionCookie,
   });
-  const invoke = async (method: 'GET' | 'POST', path: string, input: { body?: any; query?: any; user?: any; form?: boolean } = {}) => {
+  const invoke = async (method: 'GET' | 'POST', path: string, input: { body?: any; query?: any; user?: any; form?: boolean; accept?: string } = {}) => {
     const handlers = routes.get(`${method} ${path}`);
     if (!handlers) throw new Error('Unknown route');
-    const req: any = { body: input.body, query: input.query || {}, user: Object.hasOwn(input, 'user') ? input.user : actor,
+    const req: any = { body: input.body, query: input.query || {}, headers: { accept: input.accept }, user: Object.hasOwn(input, 'user') ? input.user : actor,
       is: (type: string) => input.form && type === 'application/x-www-form-urlencoded', get: () => 'evil.example' };
     const res: any = { statusCode: 200, headers: {}, body: undefined,
       setHeader(name: string, value: string) { this.headers[name] = value; return this; },
@@ -129,6 +129,29 @@ describe('separate Writer Studio recovery HTTP boundary', () => {
     expect(response.body).toContain('autocomplete="new-password"'); expect(response.headers['Referrer-Policy']).toBe('no-referrer');
     expect(test.service.isActive).toHaveBeenCalledExactlyOnceWith(token);
     expect(test.service.consume).not.toHaveBeenCalled(); expect(test.hashPassword).not.toHaveBeenCalled(); expect(test.sendEmail).not.toHaveBeenCalled(); expect(test.clearSessionCookie).not.toHaveBeenCalled();
+  });
+  it('loads a capability-free same-origin external script and leaves native submission disabled until the strict-origin-safe handler is ready', async () => {
+    const test = fixture();
+    const response = await test.invoke('GET', WRITER_RECOVERY_SCRIPT_PATH, { user: null });
+    expect(response.statusCode).toBe(200); expect(response.headers['Content-Type']).toBe('application/javascript');
+    expect(response.headers['Referrer-Policy']).toBe('no-referrer');
+    expect(response.body).toBe(WRITER_RECOVERY_FORM_SCRIPT); expect(response.body).not.toContain(token);
+    expect(response.body).toContain("mode: 'cors'"); expect(response.body).toContain("referrerPolicy: 'no-referrer'");
+    expect(response.body).toContain('event.preventDefault()'); expect(response.body).toContain('if (busy || !form.reportValidity()) return');
+    expect(response.body).toContain("response.status === 400"); expect(response.body).not.toMatch(/console\.|localStorage|sessionStorage|setTimeout|setInterval/);
+    expect(() => new Function(response.body)).not.toThrow();
+    expect(test.service.isActive).not.toHaveBeenCalled(); expect(test.service.consume).not.toHaveBeenCalled(); expect(test.getDb).not.toHaveBeenCalled();
+    const form = await test.invoke('GET', WRITER_RECOVERY_CAPABILITY_PATH, { query: { token } });
+    expect(form.body).toContain(`src="${WRITER_RECOVERY_SCRIPT_PATH}" defer`);
+    expect(form.body).toContain('id="writer-recovery-submit" type="submit" disabled');
+    expect((await test.invoke('GET', WRITER_RECOVERY_SCRIPT_PATH, { query: { token } })).statusCode).toBe(400);
+  });
+  it('returns JSON for the enhanced URL-encoded form only when explicitly requested, without changing native-form or reader behavior', async () => {
+    const test = fixture();
+    const response = await test.invoke('POST', WRITER_RECOVERY_CAPABILITY_PATH, { body: validReset, form: true, accept: 'application/json' });
+    expect(response.body).toEqual({ success: true, message: 'Writer Studio password updated. Sign in normally with your new password.' });
+    expect(test.service.consume).toHaveBeenCalledExactlyOnceWith(token, 'server_argon_hash', password);
+    expect(test.clearSessionCookie).toHaveBeenCalledTimes(1);
   });
   it.each([{ token: `pr1_${'a'.repeat(43)}` }, { token: [token, token] }, { token, actor: 'spoof' }, {}])('rejects reader-purpose/malformed/query-spoofed GET capabilities (%j)', async query => {
     const test = fixture();

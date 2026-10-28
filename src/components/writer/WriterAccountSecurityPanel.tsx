@@ -9,7 +9,7 @@ export function canRequestWriterRecovery(status: WriterAccountSecurityStatus | n
 export function writerSecurityDescription(status: WriterAccountSecurityStatus | null): string {
   switch (status?.status) {
     case 'review_required': return 'A fresh reviewed backup and account-preservation check are required before recovery can be requested. Your current login is unchanged.';
-    case 'ready': return 'The required backup and account-preservation review are ready. You may request a one-use recovery email for this signed-in Writer Studio account.';
+    case 'ready': return 'The required backup and account-preservation review are ready. You may request a one-use recovery email. Recovery preserves the reviewed purchase-owning account when duplicates exist.';
     case 'pending': return 'A recovery link is already pending. Check the approved owner inbox. No second email will be sent while this request is pending; your current login stays unchanged until you submit a new password.';
     case 'active': return 'Writer account recovery has been activated. Sign in normally with your updated password. Original account and payment records are retained; this does not promise access held by a different account.';
     default: return 'Recovery readiness is unavailable. No password or account changes can be requested here until the required checks succeed.';
@@ -46,7 +46,7 @@ export function WriterAccountSecurityView(props: WriterAccountSecurityViewProps)
     <label className="mt-4 flex min-w-0 items-start gap-3 text-sm leading-relaxed">
       <input type="checkbox" checked={props.approved} disabled={busy || props.status?.status !== 'ready' || !props.status.canIssue}
         onChange={event => props.onApprove(event.target.checked)} className="mt-1 h-4 w-4 shrink-0" />
-      <span className="min-w-0">I want to send a recovery link for this signed-in writer to the approved owner email. I understand that submitting a new password will end previous writer sessions.</span>
+      <span className="min-w-0">I want to send a recovery link to the approved owner email, preserving the reviewed account and its purchases. I understand that submitting a new password will end previous writer sessions.</span>
     </label>
     <div className="mt-4 flex flex-wrap gap-3">
       <button type="button" onClick={props.onRefresh} disabled={busy} className="min-h-11 rounded-xl border border-slate-700 px-4 py-2 text-sm disabled:opacity-50">Refresh security status</button>

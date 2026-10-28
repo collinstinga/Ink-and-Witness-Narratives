@@ -33,7 +33,9 @@ export interface WriterIdentityRepairReview {
   memberUserIds: string[];
   cohortSha256: string;
   backupManifestSha256: string;
-  dependencyProof: { schemaVersion: 1; result: 'no-owned-records'; checkedAt: string; datasetsSha256: string };
+  dependencyProof: {
+    schemaVersion: 1; checkedAt: string; datasetsSha256: string;
+  } & ({ result: 'no-owned-records' } | { result: 'canonical-owned-records-only'; preservedOwnerUserId: string });
   createdAt: string;
   expiresAt: string;
 }
@@ -108,7 +110,7 @@ function validMembers(value: unknown): value is string[] {
     && value.every(id => typeof id === 'string' && USER_ID.test(id))
     && new Set(value).size === value.length && [...value].sort().join(',') === value.join(',');
 }
-function validReview(value: unknown, projectId: string, rows: CohortRow[], now: number): value is WriterIdentityRepairReview {
+function validReview(value: unknown, projectId: string, rows: CohortRow[], canonicalUserId: string, now: number): value is WriterIdentityRepairReview {
   if (!object(value) || !exact(value, ['schemaVersion', 'kind', 'projectId', 'databaseId', 'emailSha256', 'memberUserIds',
     'cohortSha256', 'backupManifestSha256', 'dependencyProof', 'createdAt', 'expiresAt']) || value.schemaVersion !== 1
     || value.kind !== 'writer-identity-consolidation-review' || value.projectId !== projectId || value.databaseId !== '(default)'
@@ -117,9 +119,14 @@ function validReview(value: unknown, projectId: string, rows: CohortRow[], now: 
     || value.cohortSha256 !== writerIdentityCohortSha256(rows) || !HASH.test(value.backupManifestSha256)
     || !iso(value.createdAt) || !iso(value.expiresAt) || Date.parse(value.createdAt) > now
     || Date.parse(value.expiresAt) <= now || Date.parse(value.expiresAt) - Date.parse(value.createdAt) > DAY
-    || !object(value.dependencyProof) || !exact(value.dependencyProof, ['schemaVersion', 'result', 'checkedAt', 'datasetsSha256'])) return false;
+    || !object(value.dependencyProof)) return false;
   const proof = value.dependencyProof;
-  return proof.schemaVersion === 1 && proof.result === 'no-owned-records' && HASH.test(proof.datasetsSha256)
+  const ownership = proof.result === 'no-owned-records'
+    ? exact(proof, ['schemaVersion', 'result', 'checkedAt', 'datasetsSha256'])
+    : proof.result === 'canonical-owned-records-only'
+      && exact(proof, ['schemaVersion', 'result', 'preservedOwnerUserId', 'checkedAt', 'datasetsSha256'])
+      && proof.preservedOwnerUserId === canonicalUserId && value.memberUserIds.includes(canonicalUserId);
+  return proof.schemaVersion === 1 && ownership && HASH.test(proof.datasetsSha256)
     && iso(proof.checkedAt) && Date.parse(proof.checkedAt) <= Date.parse(value.createdAt)
     && now - Date.parse(proof.checkedAt) <= DAY;
 }
@@ -142,34 +149,56 @@ function validPlan(value: unknown): value is RecordValue {
 export async function checkWriterIdentityDependencies(db: Firestore, memberUserIds: string[], canonicalUserId: string,
   transaction?: Transaction): Promise<boolean> {
   const aliases = memberUserIds.filter(id => id !== canonicalUserId);
+  const chunks: string[][] = [];
+  for (let start = 0; start < aliases.length; start += 10) chunks.push(aliases.slice(start, start + 10));
+  const checks: Array<() => Promise<boolean>> = [];
   const fields: Array<[string, string]> = [
     ['reader_licenses', 'userId'], ['reader_subscriptions', 'userId'], ['subscription_activations', 'userId'],
     ['manual_access', 'boundUserId'], ['manual_access', 'claimedUserId'], ['manual_access_phone_reservations', 'boundUserId'],
     ['manual_access_entitlements', 'userId'], ['reader_profiles', 'userId'], ['piece_reviews', 'userId'],
     ['transactions', 'userId'], ['transactions', 'buyer.userId'], ['mpesa_callback_intents', 'userId'], ['mpesa_payment_intents', 'userId'],
   ];
-  for (const id of aliases) {
+  for (const ids of chunks) {
     for (const [collection, field] of fields) {
-      const found = await read(db, db.collection(collection).where(field, '==', id).limit(1), transaction) as QuerySnapshot;
-      if (found.docs.length) return false;
+      checks.push(async () => {
+        const found = await read(db, db.collection(collection).where(field, 'in', ids).limit(1), transaction) as QuerySnapshot;
+        return found.docs.length === 0;
+      });
     }
-    for (const collection of ['comments']) {
-      const found = await read(db, db.collection(collection).where('readerHash', '==', `account_${hash(id).slice(0, 40)}`).limit(1), transaction) as QuerySnapshot;
-      if (found.docs.length) return false;
+    checks.push(async () => {
+      const found = await read(db, db.collection('comments').where('readerHash', 'in', ids.map(id => `account_${hash(id).slice(0, 40)}`)).limit(1), transaction) as QuerySnapshot;
+      return found.docs.length === 0;
+    });
+  }
+  const references = aliases.flatMap(id => [db.collection('reader_profiles').doc(hash(id)),
+    db.collection('reader_subscriptions').doc(`sub_${hash(id)}`)]);
+  if (references.length) checks.push(async () => {
+    const documents = transaction ? await transaction.getAll(...references) : await db.getAll(...references);
+    return documents.length === references.length && documents.every(document => !document.exists);
+  });
+  checks.push(async () => {
+    const reactions = await read(db, db.collection('reader_piece_reactions').limit(1001), transaction) as QuerySnapshot;
+    if (reactions.docs.length > 1000) return false;
+    for (const document of reactions.docs) {
+      const value = document.data();
+      if (typeof value.articleId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.articleId)
+        || !HASH.test(document.id)) return false;
+      if (aliases.some(id => hash([id, value.articleId].join('\u001f')) === document.id)) return false;
     }
-    for (const [collection, docId] of [['reader_profiles', hash(id)], ['reader_subscriptions', `sub_${hash(id)}`]]) {
-      if ((await read(db, db.collection(collection).doc(docId), transaction) as DocumentSnapshot).exists) return false;
+    return true;
+  });
+  // Keep all reads before writes, but avoid hundreds of serial RPCs for the
+  // preserved cohort. Never start unbounded requests, retry failures or return
+  // while another worker is still reading. A failed/uncertain read is a veto.
+  let next = 0; let allowed = true;
+  async function worker(): Promise<void> {
+    while (allowed && next < checks.length) {
+      const check = checks[next++];
+      try { if (!await check()) allowed = false; } catch { allowed = false; }
     }
   }
-  const reactions = await read(db, db.collection('reader_piece_reactions').limit(1001), transaction) as QuerySnapshot;
-  if (reactions.docs.length > 1000) return false;
-  for (const document of reactions.docs) {
-    const value = document.data();
-    if (typeof value.articleId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.articleId)
-      || !HASH.test(document.id)) return false;
-    if (aliases.some(id => hash([id, value.articleId].join('\u001f')) === document.id)) return false;
-  }
-  return true;
+  await Promise.all(Array.from({ length: Math.min(4, checks.length) }, () => worker()));
+  return allowed;
 }
 
 export async function resolveWriterIdentityByEmail(db: Firestore, email: string, options: ReadOptions = {}): Promise<WriterIdentityResolution> {
@@ -178,10 +207,14 @@ export async function resolveWriterIdentityByEmail(db: Firestore, email: string,
     target(db, options.env || process.env);
     const id = writerIdentityConsolidationId(email);
     const snapshot = await read(db, db.collection(PLANS).doc(id), options.transaction) as DocumentSnapshot;
-    if (!snapshot.exists) return { kind: 'none' };
+    if (!snapshot.exists) {
+      return { kind: await hasActivationRemnant(db, id, options.transaction) ? 'invalid' : 'none' };
+    }
     const plan = snapshot.data();
     if (!validPlan(plan)) return { kind: 'invalid' };
-    if (plan.state === 'pending') return { kind: 'none' };
+    if (plan.state === 'pending') {
+      return { kind: await hasActivationRemnant(db, id, options.transaction) ? 'invalid' : 'none' };
+    }
     const reservation = await read(db, db.collection('user_email_reservations').doc(`uer1_${hash(WRITER_CONSOLIDATION_OWNER)}`), options.transaction) as DocumentSnapshot;
     const rows = await cohort(db, options.transaction);
     // Intentional tamper fence: subsequent profile/credential changes require
@@ -202,6 +235,13 @@ export async function resolveWriterIdentityByEmail(db: Firestore, email: string,
       memberUserIds: [...plan.memberUserIds], activatedAt: plan.activatedAt };
   } catch { return { kind: 'invalid' }; }
 }
+async function hasActivationRemnant(db: Firestore, id: string, transaction?: Transaction): Promise<boolean> {
+  const [reservation, receipts] = await Promise.all([
+    read(db, db.collection('user_email_reservations').doc(`uer1_${hash(WRITER_CONSOLIDATION_OWNER)}`), transaction) as Promise<DocumentSnapshot>,
+    read(db, db.collection('user_identity_repair_audit').where('planId', '==', id).limit(1), transaction) as Promise<QuerySnapshot>,
+  ]);
+  return reservation.exists || receipts.docs.length > 0;
+}
 export async function writerConsolidationSessionAllowed(db: Firestore, session: {
   userId: string; email: string; writerIdentityGeneration?: unknown;
 }, options: ReadOptions = {}): Promise<boolean> {
@@ -219,10 +259,18 @@ export async function writerConsolidationSessionAllowed(db: Firestore, session: 
     // Historical session snapshots can carry a previous email. Cohort USER ID,
     // not that snapshot's email, determines whether activation revoked it.
     const snapshot = await read(db, db.collection(PLANS).doc(writerIdentityConsolidationId(WRITER_CONSOLIDATION_OWNER)), options.transaction) as DocumentSnapshot;
-    if (!snapshot.exists) return session.writerIdentityGeneration === undefined;
     const plan = snapshot.data();
     const member = Array.isArray(plan?.memberUserIds) && plan.memberUserIds.includes(session.userId);
-    if (validPlan(plan) && plan.state === 'pending') return session.writerIdentityGeneration === undefined;
+    if (!snapshot.exists || validPlan(plan) && plan.state === 'pending') {
+      if (!await hasActivationRemnant(db, writerIdentityConsolidationId(WRITER_CONSOLIDATION_OWNER), options.transaction)) {
+        return session.writerIdentityGeneration === undefined;
+      }
+      // An orphan reservation/receipt must not turn a completed repair back
+      // into pre-activation login after its plan is lost or downgraded.
+      if (ownerEmail || member || session.writerIdentityGeneration !== undefined) return false;
+      const current = await read(db, db.collection('users').doc(session.userId), options.transaction) as DocumentSnapshot;
+      return current.exists && normalizedEmail(current.data()?.email) !== WRITER_CONSOLIDATION_OWNER;
+    }
     let currentOwner = ownerEmail || member;
     if (!currentOwner) {
       const current = await read(db, db.collection('users').doc(session.userId), options.transaction) as DocumentSnapshot;
@@ -261,12 +309,21 @@ export class WriterIdentityConsolidationStore {
     const rows = await cohort(db, transaction);
     if (!rows.some(row => row.id === actor.id)) blocked();
     const id = writerIdentityConsolidationId(actor.email);
-    const [review, reservation, plan] = await Promise.all([
+    const [review, reservation, plan, receipts] = await Promise.all([
       transaction.get(db.collection(REVIEWS).doc(id)),
       transaction.get(db.collection('user_email_reservations').doc(`uer1_${hash(WRITER_CONSOLIDATION_OWNER)}`)),
       transaction.get(db.collection(PLANS).doc(id)),
+      transaction.get(db.collection('user_identity_repair_audit').where('planId', '==', id).limit(1)),
     ]);
-    return { rows, id, review: review.data(), reservation, plan: plan.data(), projectId, now };
+    const reviewValue = review.data();
+    // A reviewed unique existing owner preserves its purchase/access identity.
+    // Otherwise the actual authenticated actor chooses their own ID. Neither
+    // route input, query order nor privilege ranking can choose another ID.
+    const preserved = reviewValue?.dependencyProof?.result === 'canonical-owned-records-only'
+      ? reviewValue.dependencyProof.preservedOwnerUserId : undefined;
+    const canonicalUserId = typeof preserved === 'string' && rows.some(row => row.id === preserved) ? preserved : actor.id;
+    return { rows, id, review: reviewValue, reservation, plan: plan.data(), projectId, now, canonicalUserId,
+      activationReceiptExists: receipts.docs.length > 0 };
   }
 
   async status(actor: Actor): Promise<WriterIdentityConsolidationStatus> {
@@ -280,11 +337,12 @@ export class WriterIdentityConsolidationStore {
           const resolved = await resolveWriterIdentityByEmail(db, actor.email, { transaction, env: this.envProvider() });
           return { status: resolved.kind === 'active' ? 'active' : 'unavailable', memberCount: count, canIssue: false };
         }
+        if (state.activationReceiptExists) return { status: 'unavailable', memberCount: count, canIssue: false };
         if (state.plan?.state === 'pending' && state.plan.expiresAt > now) {
           return { status: 'pending', memberCount: count, canIssue: false, expiresAt: state.plan.expiresAt };
         }
-        if (state.reservation.exists || !validReview(state.review, state.projectId, state.rows, now)
-          || !await checkWriterIdentityDependencies(db, state.rows.map(row => row.id), actor.id, transaction)) {
+        if (state.reservation.exists || !validReview(state.review, state.projectId, state.rows, state.canonicalUserId, now)
+          || !await checkWriterIdentityDependencies(db, state.rows.map(row => row.id), state.canonicalUserId, transaction)) {
           return { status: 'review_required', memberCount: count, canIssue: false };
         }
         return { status: 'ready', memberCount: count, canIssue: true };
@@ -300,20 +358,21 @@ export class WriterIdentityConsolidationStore {
       const expiresAt = now + WRITER_CONSOLIDATION_TOKEN_TTL_MS;
       await db.runTransaction(async transaction => {
         const state = await this.reviewed(db, actor, transaction, now);
+        if (state.activationReceiptExists && state.plan?.state !== 'active') blocked();
         if (state.plan && validPlan(state.plan) && (state.plan.state === 'active' || state.plan.expiresAt > now)) {
           throw new WriterIdentityConsolidationError('conflict');
         }
         if (state.reservation.exists || state.plan && !validPlan(state.plan)
-          || !validReview(state.review, state.projectId, state.rows, now)
-          || !await checkWriterIdentityDependencies(db, state.rows.map(row => row.id), actor.id, transaction)) blocked();
+          || !validReview(state.review, state.projectId, state.rows, state.canonicalUserId, now)
+          || !await checkWriterIdentityDependencies(db, state.rows.map(row => row.id), state.canonicalUserId, transaction)) blocked();
         const revision = (state.plan?.revision || 0) + 1;
         const plan = { schemaVersion: 1, kind: 'writer-identity-consolidation', state: 'pending', emailSha256: hash(WRITER_CONSOLIDATION_OWNER),
-          canonicalUserId: actor.id, memberUserIds: state.rows.map(row => row.id), cohortSha256: writerIdentityCohortSha256(state.rows),
+          canonicalUserId: state.canonicalUserId, memberUserIds: state.rows.map(row => row.id), cohortSha256: writerIdentityCohortSha256(state.rows),
           reviewSha256: hash(canonical(state.review)), revision, createdAt: now, expiresAt, tokenHash };
         if (state.plan?.tokenHash) transaction.delete(db.collection(TOKENS).doc(state.plan.tokenHash));
         transaction.set(db.collection(PLANS).doc(state.id), plan);
         transaction.create(db.collection(TOKENS).doc(tokenHash), { schemaVersion: 1, purpose: 'writer-identity-consolidation',
-          planId: state.id, revision, canonicalUserId: actor.id, cohortSha256: plan.cohortSha256, createdAt: now, expiresAt });
+          planId: state.id, revision, canonicalUserId: state.canonicalUserId, cohortSha256: plan.cohortSha256, createdAt: now, expiresAt });
       });
       return { token, expiresAt };
     } catch (error) {
@@ -328,15 +387,16 @@ export class WriterIdentityConsolidationStore {
     const id = writerIdentityConsolidationId(WRITER_CONSOLIDATION_OWNER);
     if (!object(token) || !exact(token, ['schemaVersion', 'purpose', 'planId', 'revision', 'canonicalUserId', 'cohortSha256', 'createdAt', 'expiresAt'])
       || token.schemaVersion !== 1 || token.purpose !== 'writer-identity-consolidation' || token.planId !== id) return null;
-    const [planSnapshot, reviewSnapshot, reservation] = await Promise.all([
+    const [planSnapshot, reviewSnapshot, reservation, receipts] = await Promise.all([
       transaction.get(db.collection(PLANS).doc(id)), transaction.get(db.collection(REVIEWS).doc(id)),
       transaction.get(db.collection('user_email_reservations').doc(`uer1_${hash(WRITER_CONSOLIDATION_OWNER)}`)),
+      transaction.get(db.collection('user_identity_repair_audit').where('planId', '==', id).limit(1)),
     ]);
     const plan = planSnapshot.data(); const rows = await cohort(db, transaction); const review = reviewSnapshot.data();
     if (!validPlan(plan) || plan.state !== 'pending' || plan.tokenHash !== tokenHash || plan.createdAt > now || plan.expiresAt <= now
       || token.revision !== plan.revision || token.canonicalUserId !== plan.canonicalUserId || token.cohortSha256 !== plan.cohortSha256
-      || token.createdAt !== plan.createdAt || token.expiresAt !== plan.expiresAt || reservation.exists
-      || !validReview(review, projectId, rows, now) || hash(canonical(review)) !== plan.reviewSha256
+      || token.createdAt !== plan.createdAt || token.expiresAt !== plan.expiresAt || reservation.exists || receipts.docs.length > 0
+      || !validReview(review, projectId, rows, plan.canonicalUserId, now) || hash(canonical(review)) !== plan.reviewSha256
       || plan.memberUserIds.join(',') !== rows.map(row => row.id).join(',')
       || !rows.some(row => row.id === plan.canonicalUserId)
       || writerIdentityCohortSha256(rows) !== plan.cohortSha256

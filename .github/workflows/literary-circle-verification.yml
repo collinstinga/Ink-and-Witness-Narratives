@@ -47,3 +47,11 @@ jobs:
           export CHROME_PATH="$(command -v google-chrome)"
           test -x "$CHROME_PATH"
           node scripts/qa/financial-controls.cjs
+      - name: Verify writer recovery form and panel with synthetic services only
+        timeout-minutes: 4
+        env:
+          PLAYWRIGHT_TEST_RUNTIME: ${{ runner.temp }}/ink-witness-browser-qa
+        run: |
+          export CHROME_PATH="$(command -v google-chrome)"
+          test -x "$CHROME_PATH"
+          node scripts/qa/writer-security.cjs

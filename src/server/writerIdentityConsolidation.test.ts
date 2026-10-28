@@ -10,7 +10,7 @@ import {
   WriterIdentityConsolidationStore, WRITER_CONSOLIDATION_OWNER as OWNER, WRITER_CONSOLIDATION_TOKEN_PATTERN,
   WRITER_CONSOLIDATION_TOKEN_TTL_MS as TTL, writerIdentityConsolidationId, writerIdentityCohortSha256,
   hashWriterConsolidationToken, resolveWriterIdentityByEmail, writerConsolidationSessionAllowed,
-  resolveWriterIdentityForSessionCreation, WRITER_CONSOLIDATION_MAX_MEMBERS,
+  resolveWriterIdentityForSessionCreation, WRITER_CONSOLIDATION_MAX_MEMBERS, checkWriterIdentityDependencies,
 } from './writerIdentityConsolidation.js';
 
 const NOW = Date.parse('2026-10-27T15:00:00.000Z');
@@ -19,6 +19,7 @@ const sha = (value: string) => crypto.createHash('sha256').update(value).digest(
 const PLAN = `user_identity_consolidations/${writerIdentityConsolidationId(OWNER)}`;
 const REVIEW = `user_identity_repair_reviews/${writerIdentityConsolidationId(OWNER)}`;
 const RESERVATION = `user_email_reservations/uer1_${sha(OWNER)}`;
+const AUDIT = `user_identity_repair_audit/${writerIdentityConsolidationId(OWNER)}_1`;
 const ENV: NodeJS.ProcessEnv = { VERCEL_ENV: 'production', FIREBASE_PROJECT_ID: 'ink-and-witness-narratives', FIRESTORE_DATABASE_ID: '(default)' };
 const actor = { id: ID2, email: OWNER, role: 'admin' };
 const NEW_PASSWORD = 'new-writer-password-123!';
@@ -28,26 +29,42 @@ const user = (id: string): UserRecord => ({ id, email: OWNER, role: 'admin', nam
 function fakeFirestore() {
   const docs = new Map<string, Record<string, any>>();
   let failCommit = false;
+  let activeReads = 0; let maxConcurrentReads = 0;
+  const queries: Array<{ name: string; filters: Array<[string, string, unknown]>; max: number }> = [];
+  const batches: number[] = [];
   const clone = <T>(value: T): T => structuredClone(value);
   const snap = (path: string) => ({ id: path.split('/').pop()!, exists: docs.has(path), data: () => docs.has(path) ? clone(docs.get(path)!) : undefined });
   const field = (value: any, key: string) => key.split('.').reduce((current, part) => current?.[part], value);
   function collection(name: string) {
-    const query = (filters: Array<[string, unknown]> = [], max = Infinity): any => ({ name, filters, max,
+    const query = (filters: Array<[string, string, unknown]> = [], max = Infinity): any => ({ name, filters, max,
       doc: (id: string) => ({ path: `${name}/${id}`, get: async () => snap(`${name}/${id}`) }),
-      where: (key: string, op: string, value: unknown) => { if (op !== '==') throw new Error('Unexpected operator'); return query([...filters, [key, value]], max); },
-      limit: (limit: number) => query(filters, limit), get: async () => result(query(filters, max)),
+      where: (key: string, op: string, value: unknown) => {
+        if (!['==', 'in'].includes(op) || op === 'in' && (!Array.isArray(value) || !value.length || value.length > 10)) throw new Error('Unexpected operator or bound');
+        return query([...filters, [key, op, value]], max);
+      },
+      limit: (limit: number) => query(filters, limit), get: async () => trackedRead(query(filters, max)),
     });
     return query();
   }
   function result(ref: any): any {
     if (ref.path) return snap(ref.path);
     return { docs: [...docs.entries()].filter(([key, value]) => key.startsWith(`${ref.name}/`)
-      && ref.filters.every(([key, expected]: [string, unknown]) => field(value, key) === expected))
+      && ref.filters.every(([key, op, expected]: [string, string, any]) => op === 'in' ? expected.includes(field(value, key)) : field(value, key) === expected))
       .slice(0, ref.max).map(([key]) => snap(key)) };
   }
-  const db = { collection, runTransaction: async (callback: (tx: any) => Promise<any>) => {
+  async function trackedRead(ref: any): Promise<any> {
+    if (!ref.path) queries.push(ref);
+    activeReads++; maxConcurrentReads = Math.max(maxConcurrentReads, activeReads);
+    try { await Promise.resolve(); return result(ref); } finally { activeReads--; }
+  }
+  async function trackedBatch(refs: any[]): Promise<any[]> {
+    batches.push(refs.length); activeReads++; maxConcurrentReads = Math.max(maxConcurrentReads, activeReads);
+    try { await Promise.resolve(); return refs.map(result); } finally { activeReads--; }
+  }
+  const db = { collection, getAll: async (...refs: any[]) => trackedBatch(refs), runTransaction: async (callback: (tx: any) => Promise<any>) => {
     const operations: Array<() => void> = []; let writing = false;
-    const tx = { get: async (ref: any) => { if (writing) throw new Error('Read after write'); return result(ref); },
+    const tx = { get: async (ref: any) => { if (writing) throw new Error('Read after write'); return trackedRead(ref); },
+      getAll: async (...refs: any[]) => { if (writing) throw new Error('Read after write'); return trackedBatch(refs); },
       create: (ref: any, value: any) => { writing = true; operations.push(() => { if (docs.has(ref.path)) throw new Error('Exists'); docs.set(ref.path, clone(value)); }); },
       set: (ref: any, value: any) => { writing = true; operations.push(() => { docs.set(ref.path, clone(value)); }); },
       update: (ref: any, value: any) => { writing = true; operations.push(() => { if (!docs.has(ref.path)) throw new Error('Missing'); docs.set(ref.path, { ...docs.get(ref.path), ...clone(value) }); }); },
@@ -58,7 +75,8 @@ function fakeFirestore() {
     for (const operation of operations) operation();
     return value;
   } } as unknown as Firestore;
-  return { db, docs, setFailCommit: (value: boolean) => { failCommit = value; } };
+  return { db, docs, queries, batches, maxConcurrentReads: () => maxConcurrentReads,
+    setFailCommit: (value: boolean) => { failCommit = value; } };
 }
 function seed(fake: ReturnType<typeof fakeFirestore>) {
   fake.docs.set(`users/${ID1}`, user(ID1)); fake.docs.set(`users/${ID2}`, user(ID2));
@@ -232,14 +250,129 @@ describe('one-time activation and authoritative session fences', () => {
     fake.docs.get(PLAN)!.memberUserIds = [ID2];
     expect(await writerConsolidationSessionAllowed(fake.db, old, { env: ENV })).toBe(false);
   });
+  it.each(['missing', 'generation', 'cohort', 'canonical', 'extra'])('requires the immutable activation receipt to remain coherent: %s', async tamper => {
+    const issued = await store.issue(actor); const consumed = await store.consume(issued.token, '$argon2id$new', NEW_PASSWORD);
+    expect(fake.docs.get(AUDIT)).toMatchObject({ kind: 'writer-identity-consolidation-completed', identityGeneration: consumed!.identityGeneration });
+    if (tamper === 'missing') fake.docs.delete(AUDIT);
+    if (tamper === 'generation') fake.docs.get(AUDIT)!.identityGeneration = 'x'.repeat(43);
+    if (tamper === 'cohort') fake.docs.get(AUDIT)!.beforeCohortSha256 = 'f'.repeat(64);
+    if (tamper === 'canonical') fake.docs.get(AUDIT)!.canonicalUserId = ID1;
+    if (tamper === 'extra') fake.docs.get(AUDIT)!.unreviewedAuthority = true;
+    expect(await resolveWriterIdentityByEmail(fake.db, OWNER, { env: ENV })).toEqual({ kind: 'invalid' });
+    expect(await writerConsolidationSessionAllowed(fake.db, { userId: ID2, email: OWNER, writerIdentityGeneration: consumed!.identityGeneration }, { env: ENV })).toBe(false);
+  });
+  it.each(['orphan-reservation', 'orphan-receipt', 'downgraded-pending'])('does not resurrect preactivation sessions in partial state: %s', async partial => {
+    const issued = await store.issue(actor); const pending = structuredClone(fake.docs.get(PLAN));
+    await store.consume(issued.token, '$argon2id$new', NEW_PASSWORD);
+    if (partial === 'downgraded-pending') fake.docs.set(PLAN, pending!); else fake.docs.delete(PLAN);
+    if (partial === 'orphan-reservation') fake.docs.delete(AUDIT);
+    if (partial === 'orphan-receipt') fake.docs.delete(RESERVATION);
+    expect(await resolveWriterIdentityByEmail(fake.db, OWNER, { env: ENV })).toEqual({ kind: 'invalid' });
+    expect(await writerConsolidationSessionAllowed(fake.db, { userId: ID1, email: 'historical@example.test' }, { env: ENV })).toBe(false);
+    expect(await writerConsolidationSessionAllowed(fake.db, { userId: ID2, email: OWNER }, { env: ENV })).toBe(false);
+  });
+  it('never reissues or consumes pending authority while any prior activation receipt remains', async () => {
+    const issued = await store.issue(actor);
+    fake.docs.set(`${AUDIT}_older`, { planId: writerIdentityConsolidationId(OWNER) });
+    expect(await store.status(actor)).toMatchObject({ status: 'unavailable', canIssue: false });
+    expect(await store.isActive(issued.token)).toBe(false);
+    expect(await store.consume(issued.token, '$argon2id$new', NEW_PASSWORD)).toBeNull();
+    await expect(store.issue(actor)).rejects.toMatchObject({ code: 'blocked' });
+    fake.docs.delete(PLAN);
+    await expect(store.issue(actor)).rejects.toMatchObject({ code: 'blocked' });
+    expect(fake.docs.get(`users/${ID2}`)?.passwordHash).toBe(user(ID2).passwordHash);
+  });
 });
 
 describe('noncanonical ownership is never silently stranded', () => {
+  it('uses the reviewed sole purchase owner when an authenticated empty duplicate initiates recovery, without moving history', async () => {
+    for (let n = 3; n <= 21; n++) {
+      const id = `user_writer${String(n).padStart(4, '0')}`; fake.docs.set(`users/${id}`, user(id));
+    }
+    const rows = [...fake.docs.entries()].filter(([key]) => key.startsWith('users/'))
+      .map(([key, data]) => ({ id: key.slice(6), data })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const priorReview = fake.docs.get(REVIEW)!;
+    fake.docs.set(REVIEW, { ...priorReview, memberUserIds: rows.map(row => row.id), cohortSha256: writerIdentityCohortSha256(rows),
+      dependencyProof: { ...priorReview.dependencyProof, result: 'canonical-owned-records-only', preservedOwnerUserId: ID2 } });
+    fake.docs.set('reader_licenses/preserved-license', { userId: ID2, articleId: 'preserved-piece', token: 'private-unchanged-license' });
+    for (let n = 0; n < 16; n++) fake.docs.set(`transactions/preserved-${n}`, {
+      id: `preserved-${n}`, ...(n % 2 ? { buyer: { userId: ID2 } } : { userId: ID2 }), amount: 300 + n, status: 'CONFIRMED',
+    });
+    const purchases = structuredClone([...fake.docs.entries()].filter(([key]) => key.startsWith('reader_licenses/') || key.startsWith('transactions/')));
+    const initiatingActor = { ...actor, id: ID1 };
+    const initiatingUser = structuredClone(fake.docs.get(`users/${ID1}`));
+    expect(await store.status(initiatingActor)).toEqual({ status: 'ready', memberCount: 21, canIssue: true });
+    expect(fake.docs.has(PLAN)).toBe(false);
+    expect(await store.status(actor)).toEqual({ status: 'ready', memberCount: 21, canIssue: true });
+    const issued = await store.issue(initiatingActor);
+    expect(fake.docs.get(PLAN)?.canonicalUserId).toBe(actor.id);
+    const consumed = await store.consume(issued.token, '$argon2id$new-owner-password', NEW_PASSWORD);
+    expect(consumed?.user.id).toBe(actor.id);
+    expect(fake.docs.get(`users/${ID1}`)).toEqual(initiatingUser);
+    for (const [key, value] of purchases) expect(fake.docs.get(key)).toEqual(value);
+    expect(await resolveWriterIdentityByEmail(fake.db, OWNER, { env: ENV })).toMatchObject({ kind: 'active', user: { id: actor.id } });
+  });
+  it('vetoes new alias ownership even when the reviewed sole owner was selected for an empty initiating duplicate', async () => {
+    const review = fake.docs.get(REVIEW)!;
+    fake.docs.set(REVIEW, { ...review, dependencyProof: { ...review.dependencyProof,
+      result: 'canonical-owned-records-only', preservedOwnerUserId: ID2 } });
+    fake.docs.set('reader_licenses/preserved', { userId: ID2, articleId: 'preserved-piece' });
+    const issued = await store.issue({ ...actor, id: ID1 });
+    fake.docs.set('reader_profiles/new-alias-ownership', { userId: ID1 });
+    expect(await store.consume(issued.token, '$argon2id$new-owner-password', NEW_PASSWORD)).toBeNull();
+    expect(fake.docs.get(`users/${ID2}`)?.passwordHash).toBe(user(ID2).passwordHash);
+    expect(fake.docs.get(`users/${ID1}`)).toEqual(user(ID1));
+  });
+  it.each([
+    { result: 'canonical-owned-records-only' },
+    { result: 'canonical-owned-records-only', preservedOwnerUserId: 'user_outside000' },
+    { result: 'no-owned-records', preservedOwnerUserId: ID2 },
+    { result: 'unreviewed-owned-records', preservedOwnerUserId: ID2 },
+  ])('rejects incomplete, mismatched or non-exact ownership proof %#', async proof => {
+    const review = fake.docs.get(REVIEW)!;
+    fake.docs.set(REVIEW, { ...review, dependencyProof: { ...review.dependencyProof, ...proof } });
+    expect((await store.status(actor)).canIssue).toBe(false);
+    await expect(store.issue(actor)).rejects.toMatchObject({ code: 'blocked' });
+  });
+  it('revalidates the preserved owner against the pending canonical actor at consumption', async () => {
+    const review = fake.docs.get(REVIEW)!;
+    fake.docs.set(REVIEW, { ...review, dependencyProof: { ...review.dependencyProof,
+      result: 'canonical-owned-records-only', preservedOwnerUserId: ID2 } });
+    const issued = await store.issue(actor);
+    fake.docs.get(REVIEW)!.dependencyProof.preservedOwnerUserId = ID1;
+    expect(await store.consume(issued.token, '$argon2id$new-owner-password', NEW_PASSWORD)).toBeNull();
+    expect(fake.docs.get(`users/${ID2}`)?.passwordHash).toBe(user(ID2).passwordHash);
+  });
+  it('batches all 20 observed aliases into bounded in-queries and one getAll with at most four concurrent reads', async () => {
+    const members = Array.from({ length: 21 }, (_, index) => `user_writer${String(index + 1).padStart(4, '0')}`);
+    const allowed = await fake.db.runTransaction(tx => checkWriterIdentityDependencies(fake.db, members, members[0], tx));
+    expect(allowed).toBe(true);
+    const predicates = fake.queries.filter(query => query.filters.some(([, op]) => op === 'in'));
+    expect(predicates).toHaveLength(28);
+    expect(predicates.every(query => query.max === 1 && query.filters.every(([, op, ids]) => op === 'in' && Array.isArray(ids) && ids.length === 10))).toBe(true);
+    expect(fake.batches).toEqual([40]); expect(fake.queries).toHaveLength(29);
+    expect(fake.maxConcurrentReads()).toBeLessThanOrEqual(4); expect(fake.maxConcurrentReads()).toBeGreaterThan(1);
+  });
+  it('also supports nontransactional batched checks and preserves the final short chunk', async () => {
+    const members = Array.from({ length: WRITER_CONSOLIDATION_MAX_MEMBERS }, (_, index) => `user_writer${String(index + 1).padStart(4, '0')}`);
+    expect(await checkWriterIdentityDependencies(fake.db, members, members[0])).toBe(true);
+    const sizes = fake.queries.filter(query => query.filters.some(([, op]) => op === 'in'))
+      .map(query => (query.filters[0][2] as string[]).length);
+    expect(sizes.filter(size => size === 10)).toHaveLength(42); expect(sizes.filter(size => size === 1)).toHaveLength(14);
+    expect(fake.batches).toEqual([62]); expect(fake.maxConcurrentReads()).toBeLessThanOrEqual(4);
+  });
+  it('does not miss ownership in the second or final short batch', async () => {
+    const members = Array.from({ length: WRITER_CONSOLIDATION_MAX_MEMBERS }, (_, index) => `user_writer${String(index + 1).padStart(4, '0')}`);
+    for (const id of [members[15], members[members.length - 1]]) {
+      fake.docs.set('reader_licenses/late-alias', { userId: id });
+      expect(await checkWriterIdentityDependencies(fake.db, members, members[0])).toBe(false);
+    }
+  });
   it.each([
     ['reader_licenses', 'userId'], ['reader_subscriptions', 'userId'], ['subscription_activations', 'userId'],
     ['manual_access', 'boundUserId'], ['manual_access', 'claimedUserId'], ['manual_access_phone_reservations', 'boundUserId'],
     ['manual_access_entitlements', 'userId'], ['reader_profiles', 'userId'], ['piece_reviews', 'userId'],
-    ['transactions', 'userId'], ['mpesa_callback_intents', 'userId'],
+    ['transactions', 'userId'], ['mpesa_callback_intents', 'userId'], ['mpesa_payment_intents', 'userId'],
   ])('blocks %s.%s ownership at issuance and at consumption', async (collection, field) => {
     fake.docs.set(`${collection}/owned`, { [field]: ID1 });
     await expect(store.issue(actor)).rejects.toMatchObject({ code: 'blocked' });
