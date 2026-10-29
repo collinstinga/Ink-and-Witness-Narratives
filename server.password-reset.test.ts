@@ -210,7 +210,11 @@ describe('reader password-reset routes', () => {
       error: 'This reset link expired, was already used, or was replaced. Open the latest reset email or request a new link.'
     });
     expect(storeMocks.applyPasswordResetUser).not.toHaveBeenCalled();
-    expect(response.headers.get('set-cookie')).toBeNull();
+    // The unrelated invalid session cookie is expired by the global auth
+    // middleware. A rejected reset must never issue a new signed-in session.
+    expect(response.headers.get('set-cookie')).toContain('iw_session=;');
+    expect(response.headers.get('set-cookie')).toContain('Expires=Thu, 01 Jan 1970');
+    expect(response.headers.get('set-cookie')).not.toContain(`sess_${'c'.repeat(64)}`);
   });
 
   it('returns the same public response for an existing and a nonexistent reader', async () => {
