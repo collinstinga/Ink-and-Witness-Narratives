@@ -101,6 +101,8 @@ import { isAffiliateNotificationCronAuthorized, parseAffiliateNotificationRuntim
 import { affiliateNotificationWebhookModeEnabled, registerAffiliateNotificationRolloutRoutes } from "./src/server/affiliateNotificationRolloutRoutes.js";
 import { registerAffiliateNotificationScheduledRoutes } from "./src/server/affiliateNotificationScheduledRoutes.js";
 import { registerAffiliateFinancialAdjustmentRoutes } from "./src/server/affiliateFinancialAdjustmentRoutes.js";
+import { ReaderAccountAdminError, registerReaderAccountAdminRoutes } from "./src/server/readerAccountAdmin.js";
+import { registerAffiliatePayoutStatusRoutes } from "./src/server/affiliatePayoutStatus.js";
 import { registerWriterIdentityConsolidationRoutes } from "./src/server/writerIdentityConsolidationRoutes.js";
 import { registerAffiliateNotificationOwnerOperatorRoutes } from "./src/server/affiliateNotificationOwnerOperatorRoutes.js";
 import { AffiliateNotificationEligibilityOverflowError, readAffiliateNotificationEligibility } from "./src/server/affiliateNotificationEligibilityRead.js";
@@ -3412,6 +3414,28 @@ export async function createApp() {
     }
   });
 
+  // Private pending/history view. Never mix unapproved text into a public cache
+  // or accept a reader identity supplied by the browser.
+  app.get('/api/articles/:id/comments/mine', commentReadLimiter, requireAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+    try {
+      if (!isSafePublicIdentifier(req.params.id)) return res.status(400).json({ error: 'Invalid piece identifier.' });
+      const access = await requireReaderArticleAccess(req, req.params.id);
+      if (!('user' in access)) return res.status(access.status).json({ error: access.error });
+      const readerHash = `account_${crypto.createHash('sha256').update(access.user.id).digest('hex').slice(0, 40)}`;
+      const comments = await store.getFreshReaderComments(access.article.id, readerHash);
+      return res.json(comments.map(comment => ({
+        id: comment.id, articleId: comment.articleId, articleTitle: comment.articleTitle,
+        readerName: comment.readerName, content: comment.content, createdAt: comment.createdAt,
+        updatedAt: comment.updatedAt, status: comment.status,
+      })));
+    } catch {
+      return res.status(503).json({ error: 'Your comment history is temporarily unavailable.' });
+    }
+  });
+
   // Post a comment as a signed-in reader with access to the piece. Identity and
   // ownership are derived from the secure session, never from browser fields.
   app.post("/api/articles/:id/comments", publicWriteLimiter, commentWriteLimiter, publicWriteValidators.comment, requireAuth, async (req: Request, res: Response) => {
@@ -3432,7 +3456,8 @@ export async function createApp() {
         content,
         access.user.name || 'Reader',
         undefined,
-        readerHash
+        readerHash,
+        req.body.submissionId
       );
       res.status(201).json({
         success: true,
@@ -3634,6 +3659,9 @@ export async function createApp() {
         }
       });
     } catch (err: any) {
+      if (err instanceof ReaderAccountAdminError) {
+        return res.status(err.statusCode).json({ success: false, error: err.message });
+      }
       console.error("[Auth] Login error:", err);
       return res.status(500).json({ success: false, error: "An unexpected error occurred during sign-in." });
     }
@@ -7113,6 +7141,12 @@ ${currentDraft || prompt}
   registerAffiliateFinancialAdjustmentRoutes(app, {
     requireAdminAuth, noStore: noStoreNotificationRuntime,
     rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
+  });
+  registerReaderAccountAdminRoutes(app, {
+    getDb, requireAdminAuth, writeGuard: publicWriteLimiter,
+  });
+  registerAffiliatePayoutStatusRoutes(app, {
+    getDb, requireFreshAffiliateAuth, rateLimiter: affiliateAnalyticsReadLimiter,
   });
   registerWriterIdentityConsolidationRoutes(app, {
     requireAdminAuth, sameOrigin: requireSameOriginPublicWrite,

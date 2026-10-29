@@ -11,6 +11,7 @@ import { normalizeAffiliateConversionSourceClick } from './affiliateConversionCo
 import { hashPassword, generateSecureToken } from './auth.js';
 import { resolveWriterIdentityByEmail, resolveWriterIdentityForSessionCreation,
   writerConsolidationSessionAllowed } from './writerIdentityConsolidation.js';
+import { getReaderAccountSessionGeneration, readerAccountSessionAllowed } from './readerAccountAdmin.js';
 import {
   ImageValidationError,
   sanitizeImageDataUrl,
@@ -294,7 +295,7 @@ function normalizePersistedComment(value: unknown, documentId?: string): PieceCo
     !readerName || readerName.length > 120 ||
     !content || content.length > 3_000 ||
     !Number.isFinite(Date.parse(createdAt)) ||
-    !['approved', 'hidden', 'deleted'].includes(status || '')
+    !['pending', 'approved', 'hidden', 'deleted'].includes(status || '')
   ) return null;
   return {
     id,
@@ -7460,7 +7461,26 @@ export const store = {
     return comments;
   },
 
-  async addComment(articleId: string, content: string, readerName: string, readerEmail?: string, readerHash?: string): Promise<PieceComment> {
+  async getFreshReaderComments(articleId: string, readerHash: string): Promise<PieceComment[]> {
+    if (!articleId || !readerHash || !/^account_[A-Za-z0-9_-]{1,80}$/.test(readerHash)) {
+      throw new Error('A verified reader account is required.');
+    }
+    // A separate, bounded private query keeps pending comments out of shared
+    // public caches. The caller derives the ownership hash from its session.
+    const snapshot = await getDb().collection('comments')
+      .where('articleId', '==', articleId)
+      .where('readerHash', '==', readerHash)
+      .orderBy('createdAt', 'desc')
+      .limit(20)
+      .get();
+    return snapshot.docs
+      .map(document => normalizePersistedComment(document.data(), document.id))
+      .filter((comment): comment is PieceComment => Boolean(
+        comment && comment.articleId === articleId && comment.readerHash === readerHash && comment.status !== 'deleted'
+      ));
+  },
+
+  async addComment(articleId: string, content: string, readerName: string, readerEmail?: string, readerHash?: string, submissionId?: string): Promise<PieceComment> {
     const cleanContent = (content || '').trim();
     if (!cleanContent) {
       throw new Error("Comment content cannot be empty.");
@@ -7475,7 +7495,13 @@ export const store = {
     }
     const createdAtMs = Date.now();
     const effectiveReaderHash = readerHash || `anon_${crypto.randomBytes(18).toString('base64url')}`;
-    const dedupeMaterial = `${articleId}\u0000${effectiveReaderHash}\u0000${cleanContent}`;
+    if (submissionId !== undefined && !/^[A-Za-z0-9_-]{16,80}$/.test(submissionId)) {
+      throw new Error('Invalid comment submission identifier.');
+    }
+    // New clients give each intentional submission its own ID. A retry uses the
+    // same ID, while a subsequent comment (even with identical text) is distinct.
+    // Retain the short content-based retry guard for older clients.
+    const dedupeMaterial = `${articleId}\u0000${effectiveReaderHash}\u0000${submissionId ? `submission:${submissionId}` : `content:${cleanContent}`}`;
     const lockId = crypto.createHash('sha256').update(dedupeMaterial, 'utf8').digest('hex');
     const comment: PieceComment = {
       id: `comm_${createdAtMs}_${crypto.randomBytes(8).toString('hex')}`,
@@ -7486,7 +7512,7 @@ export const store = {
       readerHash: effectiveReaderHash,
       content: cleanContent,
       createdAt: new Date(createdAtMs).toISOString(),
-      status: 'approved'
+      status: 'pending'
     };
 
     const db = getDb();
@@ -7523,6 +7549,7 @@ export const store = {
         ) {
           return { comment: existing, created: false };
         }
+        if (existing && submissionId) throw new Error('This submission was already used for a different comment. Please submit again.');
       }
       transaction.create(commentRef, sanitizeForFirestore(comment));
       transaction.set(lockRef, {
@@ -7534,7 +7561,7 @@ export const store = {
         // submission history indefinitely.
         expiresAt: new Date(createdAtMs + COMMENT_DEDUPLICATION_WINDOW_MS)
       }, { merge: false });
-      transaction.set(articleRef, { commentsCount: FieldValue.increment(1) }, { merge: true });
+      // Public counts change only when the writer explicitly approves a comment.
       return { comment, created: true };
     });
 
@@ -7548,10 +7575,6 @@ export const store = {
     updatePublicCommentCache(comment);
     bumpCommentsMutationVersion(articleId);
     writeJsonFileSync(COMMENTS_FILE, cachedComments);
-    if (art) {
-      art.commentsCount = Math.max(0, Number(art.commentsCount) || 0) + 1;
-      writeJsonFileSync(ARTICLES_FILE, cachedArticles);
-    }
 
     // Track event
     this.recordInteractionEvent({
@@ -7921,6 +7944,10 @@ export const store = {
         .doc(getActiveReaderSessionPointerId(user.id)!);
       let previousDocumentId: string | null = null;
       await db.runTransaction(async transaction => {
+        // Suspension/credential checks share the session-creation transaction:
+        // a login racing a suspension cannot issue a newly valid session.
+        const generation = await getReaderAccountSessionGeneration(db, user, transaction);
+        if (generation) session.readerAccountGeneration = generation;
         const previous = await transaction.get(pointerRef);
         const storedPreviousDocumentId = previous.exists
           ? (previous.data() as { sessionDocumentId?: unknown }).sessionDocumentId
@@ -7969,6 +7996,10 @@ export const store = {
     const verifiedAt = cachedAuthSessionVerifiedAt.get(documentId) || 0;
     const cacheTtl = cached?.role === 'client' ? READER_SESSION_CACHE_TTL_MS : AUTH_SESSION_CACHE_TTL_MS;
     if (cached && cached.expiresAt > now && now - verifiedAt < cacheTtl) {
+      if (cached.role === 'client' && !await readerAccountSessionAllowed(getDb(), cached)) {
+        cachedAuthSessions.delete(documentId); cachedAuthSessionVerifiedAt.delete(documentId);
+        return null;
+      }
       if (cached.role === 'admin' && !await writerConsolidationSessionAllowed(getDb(), cached)) {
         cachedAuthSessions.delete(documentId); cachedAuthSessionVerifiedAt.delete(documentId);
         return null;
@@ -7987,12 +8018,31 @@ export const store = {
     }
 
     const pendingLookup = authSessionLookupPromises.get(documentId);
-    if (pendingLookup) return pendingLookup;
+    if (pendingLookup) {
+      const pendingSession = await pendingLookup;
+      if (!pendingSession) return null;
+      // Sharing the document lookup must not share an earlier authorization
+      // decision. A suspension can commit while the first request is still
+      // resolving its active-session pointer and a later request joins it.
+      const stillAllowed = pendingSession.role === 'client'
+        ? await readerAccountSessionAllowed(getDb(), pendingSession)
+        : await writerConsolidationSessionAllowed(getDb(), pendingSession);
+      if (!stillAllowed) {
+        cachedAuthSessions.delete(documentId);
+        cachedAuthSessionVerifiedAt.delete(documentId);
+        return null;
+      }
+      return pendingSession;
+    }
 
     const lookup = (async (): Promise<AuthSession | null> => {
       const storedValue = await getFirestoreDoc<Record<string, unknown>>('sessions', documentId);
       const storedSession = normalizeAuthSessionRecord(storedValue);
       if (storedSession) {
+        if (storedSession.role === 'client' && !await readerAccountSessionAllowed(getDb(), storedSession)) {
+          cachedAuthSessions.delete(documentId); cachedAuthSessionVerifiedAt.delete(documentId);
+          return null;
+        }
         if (storedSession.role === 'admin' && !await writerConsolidationSessionAllowed(getDb(), storedSession)) {
           cachedAuthSessions.delete(documentId); cachedAuthSessionVerifiedAt.delete(documentId);
           return null;
@@ -8067,6 +8117,7 @@ export const store = {
         return null;
       }
       if (legacySession.role === 'admin' && !await writerConsolidationSessionAllowed(db, legacySession)) return null;
+      if (legacySession.role === 'client' && !await readerAccountSessionAllowed(db, legacySession)) return null;
       if (legacySession.expiresAt <= Date.now()) {
         cachedAuthSessions.delete(documentId);
         cachedAuthSessionVerifiedAt.delete(documentId);

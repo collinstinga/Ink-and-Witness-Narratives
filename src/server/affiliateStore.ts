@@ -3098,7 +3098,9 @@ export const affiliateStore = {
         });
       }
       const audit = walletAudit(actor, 'payout_processed', 'payout', payoutId,
-        { status: payout.status }, { status: next.status, amountKes: total, paymentReference: action === 'mark_paid' ? reference : null });
+        { status: payout.status },
+        { status: next.status, amountKes: total, paymentReference: action === 'mark_paid' ? reference : null,
+          ...(action === 'mark_paid' ? { confirmationMethod: 'writer_confirmed', paidAt: now, payoutMethod: payout.payoutMethod } : {}) });
       // This create is both the immutable audit and a shared global receipt
       // claim. Concurrent payouts cannot commit the same canonical reference.
       if (action === 'mark_paid') audit.id = `aud_payout_receipt_${crypto.createHash('sha256').update(reference).digest('hex')}`;

@@ -337,7 +337,7 @@ export interface PieceComment {
   content: string;
   createdAt: string;
   updatedAt?: string;
-  status: 'approved' | 'hidden' | 'deleted';
+  status: 'pending' | 'approved' | 'hidden' | 'deleted';
   isReported?: boolean;
   reportedReason?: string;
 }
@@ -2045,6 +2045,26 @@ export interface UserRecord extends User {
   passwordHash: string;
 }
 
+/** Writer-only directory fields; never includes credentials or session details. */
+export interface ReaderAccountAdminItem {
+  id: string;
+  name: string;
+  email: string;
+  createdAt: string;
+  status: 'active' | 'suspended' | 'unavailable';
+  revision: number;
+  statusUpdatedAt?: string;
+  suspensionReason?: string;
+}
+
+export interface ReaderAccountAdminPage {
+  totalReaderAccounts: number;
+  matchingReaderAccounts: number;
+  readers: ReaderAccountAdminItem[];
+  nextCursor?: string;
+  pageSize: number;
+}
+
 export interface AuthSession {
   storageVersion: 2;
   userId: string;
@@ -2057,6 +2077,8 @@ export interface AuthSession {
   activeReaderSession?: true;
   /** Server-owned generation after explicit writer identity recovery. */
   writerIdentityGeneration?: string;
+  /** Rotated by reader suspension/reactivation; never returned to a browser. */
+  readerAccountGeneration?: string;
 }
 
 export interface AuthResponse {

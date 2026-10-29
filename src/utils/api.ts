@@ -33,6 +33,8 @@ import {
   AffiliateDirectCostSummary,
   ReaderLicense,
   UserLibraryResponse,
+  ReaderAccountAdminPage,
+  ReaderAccountAdminItem,
   HomepageConfig,
   NewsletterAdminSummary,
   NewsletterAudience,
@@ -68,6 +70,7 @@ import {
   LiteraryCircleComplimentaryAccessStatus
 } from '../types.js';
 import { clearReferral, getActiveReferral } from './affiliateReferral.js';
+import { validAffiliatePayoutStatusIds, type AffiliatePayoutStatusItem } from './affiliateDashboardRefresh.js';
 
 // Safe Writer Studio security DTOs deliberately contain no account IDs,
 // recovery capabilities, backup locations, password hashes or provider receipts.
@@ -2244,17 +2247,28 @@ export const api = {
 
   // Reader Engagement: Comments
   async getPieceComments(articleId: string): Promise<PieceComment[]> {
-    const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`, { credentials: 'include' });
+    const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`, { credentials: 'include', cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to get comments');
     return res.json();
   },
 
-  async submitPieceComment(articleId: string, content: string): Promise<PieceComment> {
+  async getMyPieceComments(articleId: string): Promise<PieceComment[]> {
+    const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments/mine`, {
+      credentials: 'include', cache: 'no-store'
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || 'Your pending comments could not be loaded.');
+    }
+    return res.json();
+  },
+
+  async submitPieceComment(articleId: string, content: string, submissionId?: string): Promise<PieceComment> {
     const res = await fetch(`/api/articles/${encodeURIComponent(articleId)}/comments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ content })
+      body: JSON.stringify({ content, ...(submissionId ? { submissionId } : {}) })
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -2300,7 +2314,9 @@ export const api = {
     const query = new URLSearchParams({ limit: '100' });
     if (cursor) query.set('cursor', cursor);
     const res = await fetch(`/api/admin/comments?${query.toString()}`, {
-      headers: { 'x-admin-token': activeToken || '' }
+      headers: { 'x-admin-token': activeToken || '' },
+      credentials: 'include',
+      cache: 'no-store'
     });
     if (!res.ok) throw new Error('Failed to fetch comments');
     return res.json();
@@ -2715,6 +2731,16 @@ export const api = {
     );
   },
 
+  async getAffiliatePayoutStatuses(ids: string[]): Promise<{ success: true; payouts: AffiliatePayoutStatusItem[] }> {
+    if (!validAffiliatePayoutStatusIds(ids)) throw new Error('Choose up to 10 distinct payout identifiers.');
+    const token = getAffiliateToken();
+    if (!token) throw new Error('Please log in to view payout status.');
+    const query = new URLSearchParams({ ids: ids.join(',') });
+    return safeFetchJson(`/api/affiliate/payouts/status?${query}`, {
+      cache: 'no-store', headers: { 'x-affiliate-token': token },
+    }, 'Payment status could not be refreshed. Use Refresh to check the saved payment record.');
+  },
+
   async getAffiliateLinks(): Promise<{
     success: boolean;
     affiliateCode: string;
@@ -2918,6 +2944,28 @@ export const api = {
       },
       'Failed to run partner notification operations.'
     );
+  },
+
+  async getAdminReaderAccounts(options: { cursor?: string; pageSize?: number; email?: string; signal?: AbortSignal } = {}): Promise<{
+    success: true; directory: ReaderAccountAdminPage;
+  }> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set('cursor', options.cursor);
+    if (options.pageSize !== undefined) query.set('pageSize', String(options.pageSize));
+    if (options.email) query.set('email', options.email);
+    return safeFetchJson(`/api/admin/readers${query.size ? `?${query}` : ''}`, {
+      cache: 'no-store', signal: options.signal, headers: { 'x-admin-token': getWriterToken() || '' },
+    }, 'Reader accounts could not be loaded.');
+  },
+
+  async setAdminReaderAccountStatus(id: string, request: { status: 'active' | 'suspended'; expectedRevision: number; reason?: string }): Promise<{
+    success: true; reader: ReaderAccountAdminItem; changed: boolean;
+  }> {
+    return safeFetchJson(`/api/admin/readers/${encodeURIComponent(id)}/status`, {
+      method: 'PATCH', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify(request),
+    }, 'Account status was not confirmed. Refresh the directory before trying again.');
   },
 
   async getWriterAccountSecurity(options: { signal?: AbortSignal } = {}): Promise<{

@@ -255,8 +255,11 @@ describe('durable reader comments', () => {
 
     expect(firestore.documents.get(firestore.keyFor('comments', saved.id))).toMatchObject({
       id: saved.id,
-      content: 'Persist me'
+      content: 'Persist me',
+      status: 'pending'
     });
+    expect(store.getComments(article.id)).toEqual([]);
+    expect(await store.getFreshComments(article.id)).toEqual([]);
 
     vi.resetModules();
     const { store: nextInstance } = await import('./store.js');
@@ -266,7 +269,7 @@ describe('durable reader comments', () => {
     ]);
   }, 60_000);
 
-  it('atomically deduplicates simultaneous matching comments and increments the count once', async () => {
+  it('atomically deduplicates simultaneous legacy retries without incrementing the public count', async () => {
     const { store } = await import('./store.js');
     await store.init();
 
@@ -277,10 +280,74 @@ describe('durable reader comments', () => {
 
     expect(second.id).toBe(first.id);
     expect([...firestore.documents.keys()].filter(key => key.startsWith('comments/'))).toHaveLength(1);
-    expect(firestore.documents.get(firestore.keyFor('articles', article.id))?.commentsCount).toBe(1);
+    expect(firestore.documents.get(firestore.keyFor('articles', article.id))?.commentsCount || 0).toBe(0);
+    expect(first.status).toBe('pending');
     expect(store.getComments(article.id, true)).toHaveLength(1);
     const lock = [...firestore.documents.entries()].find(([key]) => key.startsWith('comment_submission_locks/'))?.[1];
     expect(lock?.expiresAt).toBeInstanceOf(Date);
+  }, 60_000);
+
+  it('allows several distinct comments by the same reader on the same piece', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const first = await store.addComment(article.id, 'My first thought', 'Reader', undefined, 'account_reader_1');
+    const second = await store.addComment(article.id, 'Another thought', 'Reader', undefined, 'account_reader_1');
+    expect(first.id).not.toBe(second.id);
+    expect(store.getComments(article.id, true)).toHaveLength(2);
+    expect(store.getComments(article.id)).toEqual([]);
+    expect(firestore.documents.get(firestore.keyFor('articles', article.id))?.commentsCount || 0).toBe(0);
+  }, 60_000);
+
+  it('treats fresh intentional submissions separately, including identical text, but deduplicates one attempt', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const args = [article.id, 'Beautiful', 'Reader', undefined, 'account_reader_1'] as const;
+    const first = await store.addComment(...args, 'submission-one-12345');
+    const retry = await store.addComment(...args, 'submission-one-12345');
+    const second = await store.addComment(...args, 'submission-two-12345');
+    expect(retry.id).toBe(first.id);
+    expect(second.id).not.toBe(first.id);
+    expect(store.getComments(article.id, true)).toHaveLength(2);
+    await expect(store.addComment(article.id, 'Changed retry text', 'Reader', undefined, 'account_reader_1', 'submission-one-12345'))
+      .rejects.toThrow('already used for a different comment');
+    await expect(store.addComment(...args, 'short')).rejects.toThrow('Invalid comment submission');
+  }, 60_000);
+
+  it('publishes only on explicit writer approval and updates the count exactly once', async () => {
+    const { store } = await import('./store.js');
+    await store.init();
+    const saved = await store.addComment(article.id, 'Please review me', 'Reader', undefined, 'account_reader_1');
+    const otherPending = await store.addComment(article.id, 'A second thought awaiting its own approval', 'Reader', undefined, 'account_reader_1');
+    expect(saved.status).toBe('pending');
+    expect(await store.getFreshComments(article.id)).toEqual([]);
+    await store.updateCommentStatus(saved.id, 'approved');
+    await store.updateCommentStatus(saved.id, 'approved');
+    expect(firestore.documents.get(firestore.keyFor('articles', article.id))?.commentsCount).toBe(1);
+    expect(store.getComments(article.id)).toEqual([expect.objectContaining({ id: saved.id, status: 'approved' })]);
+    expect(await store.getFreshComments(article.id, false, { maxAgeMs: 15_000 })).toEqual([expect.objectContaining({ id: saved.id, status: 'approved' })]);
+    expect((await store.getFreshReaderComments(article.id, 'account_reader_1')).find(comment => comment.id === otherPending.id)?.status).toBe('pending');
+    await store.updateCommentStatus(saved.id, 'hidden');
+    expect(firestore.documents.get(firestore.keyFor('articles', article.id))?.commentsCount).toBe(0);
+    expect(store.getComments(article.id)).toEqual([]);
+  }, 60_000);
+
+  it('loads only the signed-in reader own recent comments without polluting the public cache', async () => {
+    const entries: PieceComment[] = [
+      { ...remoteComment('comm_pending_mine', 'My pending comment'), status: 'pending' },
+      { ...remoteComment('comm_hidden_mine', 'My hidden comment'), status: 'hidden' },
+      { ...remoteComment('comm_deleted_mine', 'My deleted comment'), status: 'deleted' },
+      { ...remoteComment('comm_pending_other', 'Another reader private comment'), status: 'pending', readerHash: 'account_reader_2' },
+      { ...remoteComment('comm_pending_other_piece', 'Different piece'), status: 'pending', articleId: 'other-piece' },
+    ];
+    for (const comment of entries) firestore.documents.set(firestore.keyFor('comments', comment.id), structuredClone(comment) as any);
+    const { store } = await import('./store.js');
+    await store.init();
+    const mine = await store.getFreshReaderComments(article.id, 'account_reader_1');
+    expect(mine.map(comment => comment.id).sort()).toEqual(['comm_hidden_mine', 'comm_pending_mine']);
+    expect(firestore.state.lastQueryLimit).toBe(20);
+    expect(store.getComments(article.id)).toEqual([]);
+    await expect(store.getFreshReaderComments(article.id, '')).rejects.toThrow('verified reader account');
+    await expect(store.getFreshReaderComments(article.id, 'browser-spoofed')).rejects.toThrow('verified reader account');
   }, 60_000);
 
   it('does not let an older in-flight refresh erase a newly committed comment', async () => {
@@ -318,6 +385,7 @@ describe('durable reader comments', () => {
     const entries: PieceComment[] = [
       { ...remoteComment('comm_old', 'Old approved'), createdAt: '2026-10-08T08:00:00.000Z' },
       { ...remoteComment('comm_hidden', 'Newest hidden'), createdAt: '2026-10-08T12:00:00.000Z', status: 'hidden' },
+      { ...remoteComment('comm_pending', 'Newest pending'), createdAt: '2026-10-08T13:00:00.000Z', status: 'pending' },
       { ...remoteComment('comm_new', 'New approved'), createdAt: '2026-10-08T11:00:00.000Z' }
     ];
     for (const comment of entries) {

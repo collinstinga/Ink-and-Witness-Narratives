@@ -51,7 +51,6 @@ import {
   Article,
   AuthorProfile,
   PieceSocialProof,
-  PieceComment,
   ReaderArticleProgress,
   ReaderReactionType,
   User
@@ -61,6 +60,7 @@ import { chooseNarrationVoice, cleanTextForNarration, splitNarrationText } from 
 import { SafeMarkdown } from './common/SafeMarkdown.js';
 import { ArticleCard } from './ArticleCard.js';
 import { BookChapterNavigation } from './BookChapterNavigation.js';
+import { ReaderComments } from './ReaderComments.js';
 import type { ChapterBookContext } from '../utils/bookCatalogue.js';
 
 const EMPTY_ARTICLES: Article[] = [];
@@ -243,10 +243,6 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const [reviewText, setReviewText] = useState('');
   const [reviewSaving, setReviewSaving] = useState(false);
   const [reviewNotice, setReviewNotice] = useState('');
-  const [pieceComments, setPieceComments] = useState<PieceComment[]>([]);
-  const [commentText, setCommentText] = useState('');
-  const [commentSaving, setCommentSaving] = useState(false);
-  const [commentNotice, setCommentNotice] = useState('');
   const [selectionDraft, setSelectionDraft] = useState<{
     blockId: string;
     startOffset: number;
@@ -532,18 +528,6 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   }, [isOpen, currentUser?.id, onSessionResolved]);
 
   useEffect(() => {
-    if (!isOpen || !article?.id) {
-      setPieceComments([]);
-      return;
-    }
-    let active = true;
-    void api.getPieceComments(article.id)
-      .then(comments => { if (active) setPieceComments(comments); })
-      .catch(() => { if (active) setPieceComments([]); });
-    return () => { active = false; };
-  }, [isOpen, article?.id]);
-
-  useEffect(() => {
     if (!isOpen || !article?.id || !effectiveUnlocked || !currentUser || currentUser.role !== 'client') {
       setReadingProgress(null);
       latestProgressRef.current = null;
@@ -793,24 +777,6 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       showToast(error?.message || 'Notification preference could not be saved.');
     } finally {
       setFollowSaving(false);
-    }
-  };
-
-  const handleCommentSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!article || commentText.trim().length < 2) return;
-    setCommentSaving(true);
-    setCommentNotice('');
-    try {
-      const comment = await api.submitPieceComment(article.id, commentText.trim());
-      setPieceComments(previous => [comment, ...previous.filter(item => item.id !== comment.id)]);
-      setCommentText('');
-      setCommentNotice('Comment posted.');
-    } catch (error: any) {
-      if (isReaderAuthError(error)) onOpenAuth?.('signin');
-      setCommentNotice(error?.message || 'Comment could not be posted.');
-    } finally {
-      setCommentSaving(false);
     }
   };
 
@@ -2401,61 +2367,13 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
               </form>
             )}
 
-            <div className="space-y-4 border-t border-slate-800 pt-5" aria-labelledby="reader-comments-title">
-              <div>
-                <h5 id="reader-comments-title" className="text-sm font-semibold text-white">Reader comments</h5>
-                <p className="mt-1 text-[11px] text-slate-500">Comments show a reader name only; account emails and identities stay private.</p>
-              </div>
-
-              {pieceComments.length > 0 ? (
-                <div className="space-y-2">
-                  {pieceComments.slice(0, 20).map(comment => (
-                    <article key={comment.id} className="rounded-xl border border-slate-800 bg-slate-950/55 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-xs font-semibold text-sky-200">{comment.readerName || 'Reader'}</p>
-                        <time className="text-[9px] font-mono text-slate-600" dateTime={comment.createdAt}>
-                          {new Date(comment.createdAt).toLocaleDateString()}
-                        </time>
-                      </div>
-                      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{comment.content}</p>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="rounded-xl border border-dashed border-slate-800 px-3 py-4 text-center text-xs text-slate-500">No reader comments yet.</p>
-              )}
-
-              {effectiveUnlocked && (
-                <form onSubmit={handleCommentSubmit} className="space-y-2">
-                  <label htmlFor="reader-comment-input" className="text-xs font-semibold text-slate-300">Add a comment</label>
-                  <textarea
-                    id="reader-comment-input"
-                    value={commentText}
-                    onChange={event => setCommentText(event.target.value)}
-                    minLength={2}
-                    maxLength={3000}
-                    rows={3}
-                    placeholder="Share a thoughtful response to this piece…"
-                    className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500"
-                  />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[11px] text-slate-500" role="status">
-                      {commentNotice || (currentUser?.role === 'client'
-                        ? 'Posting as your signed-in reader account.'
-                        : 'A reader session is required; submitting will securely re-check your sign-in.')}
-                    </p>
-                    <button
-                      type="submit"
-                      disabled={commentSaving || commentText.trim().length < 2}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-4 py-2 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50"
-                    >
-                      <MessageCircle className="h-4 w-4" />
-                      {commentSaving ? 'Posting…' : 'Post comment'}
-                    </button>
-                  </div>
-                </form>
-              )}
-            </div>
+            <ReaderComments
+              key={`${article.id}:${currentUser?.id || 'guest'}`}
+              articleId={article.id}
+              readerId={currentUser?.role === 'client' ? currentUser.id : undefined}
+              canComment={effectiveUnlocked}
+              onSignIn={() => onOpenAuth?.('signin')}
+            />
 
             {socialLoading && <p className="text-xs text-slate-500">Loading reader responses…</p>}
           </section>

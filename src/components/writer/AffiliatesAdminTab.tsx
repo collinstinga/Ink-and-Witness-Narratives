@@ -57,6 +57,8 @@ import {
 } from './LiteraryCircleAdminPanel.js';
 import { LiteraryCircleResourcesAdmin } from './LiteraryCircleResourcesAdmin.js';
 import { resolveAffiliateSettingsDraft } from './affiliateSettingsDraft.js';
+import { AffiliatePayoutProcessForm, type WriterPayoutAction } from './AffiliatePayoutProcessForm.js';
+import { AffiliatePayoutReceipt } from '../affiliate/AffiliatePayoutReceipt.js';
 
 const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
 const LiteraryCircleAnalyticsAdmin = React.lazy(() => import('./LiteraryCircleAnalyticsAdmin.js'));
@@ -117,9 +119,6 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   const [savingEditAff, setSavingEditAff] = useState(false);
 
   // Payout Process Form
-  const [payoutAction, setPayoutAction] = useState<'approve' | 'pay' | 'reject'>('approve');
-  const [payoutRef, setPayoutRef] = useState('');
-  const [payoutNotes, setPayoutNotes] = useState('');
   const [processingPayout, setProcessingPayout] = useState(false);
 
   // Settings State
@@ -532,8 +531,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
     }
   };
 
-  const handleProcessPayout = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleProcessPayout = async (payoutAction: WriterPayoutAction, payoutRef?: string, payoutNotes?: string) => {
     if (!showPayoutProcessModal) return;
 
     setProcessingPayout(true);
@@ -541,17 +539,13 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       await api.processAdminAffiliatePayout(
         showPayoutProcessModal.id,
         payoutAction,
-        payoutRef.trim() || undefined,
-        payoutNotes.trim() || undefined
+        payoutRef,
+        payoutNotes
       );
-      setSuccessMsg(`Payout request for KES ${showPayoutProcessModal.amountKes.toLocaleString()} marked as ${payoutAction === 'pay' ? 'Paid' : payoutAction === 'approve' ? 'Approved (not yet paid)' : 'Rejected'}.`);
+      setSuccessMsg(`Payout request for KES ${showPayoutProcessModal.amountKes.toLocaleString()} marked as ${payoutAction === 'pay' ? 'Paid — off-site transfer confirmed by writer. The partner dashboard now has the receipt and updated balance' : payoutAction === 'approve' ? 'Approved (not yet paid)' : 'Rejected'}.`);
       setShowPayoutProcessModal(null);
-      setPayoutRef('');
-      setPayoutNotes('');
-      loadSummary(true);
+      void loadSummary(true);
       setTimeout(() => setSuccessMsg(''), 4000);
-    } catch (err: any) {
-      alert(`Failed to process payout: ${err.message}`);
     } finally {
       setProcessingPayout(false);
     }
@@ -820,7 +814,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
           }`}
         >
           <Wallet className="w-3.5 h-3.5" />
-          <span>Payout Requests ({summary?.payouts?.filter(p => p.status === 'pending')?.length || 0} pending)</span>
+          <span>Payout Requests ({summary?.payouts?.filter(p => p.status === 'PENDING')?.length || 0} pending)</span>
         </button>
 
         <button
@@ -946,7 +940,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
               </div>
 
               {/* Pending Payout Requests Banner */}
-              {(summary?.payouts?.filter(p => p.status === 'pending')?.length || 0) > 0 && (
+              {(summary?.payouts?.filter(p => p.status === 'PENDING')?.length || 0) > 0 && (
                 <div className="p-4 rounded-xl bg-amber-950/60 border border-amber-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
@@ -954,7 +948,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                     </div>
                     <div>
                       <p className="text-xs font-mono font-semibold text-amber-300">
-                        {summary?.payouts?.filter(p => p.status === 'pending')?.length} Affiliate Payout Request(s) Pending Review
+                        {summary?.payouts?.filter(p => p.status === 'PENDING')?.length} Affiliate Payout Request(s) Pending Review
                       </p>
                       <p className="text-[11px] text-amber-400/80">
                         Affiliates have reached their minimum payout threshold and are awaiting disbursement.
@@ -1530,7 +1524,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                             )}
                           </td>
                           <td className="p-3 text-cyan-300">
-                            {payout.paymentReference || <span className="text-slate-500">None</span>}
+                            <AffiliatePayoutReceipt payout={payout} />
                           </td>
                           <td className="p-3 text-center">
                             <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${
@@ -1547,11 +1541,10 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                               <button
                                 onClick={() => {
                                   setShowPayoutProcessModal(payout);
-                                  setPayoutAction(payout.status === 'PENDING' ? 'approve' : 'pay');
                                 }}
                                 className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-mono font-bold text-xs cursor-pointer"
                               >
-                                Disburse / Pay
+                                Manage payout
                               </button>
                             )}
                           </td>
@@ -2173,12 +2166,12 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
       {/* PROCESS PAYOUT MODAL */}
       {showPayoutProcessModal && (
         <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-          <div className="w-full max-w-md bg-[#0a0f1d] border border-emerald-700/80 rounded-2xl p-6 shadow-2xl space-y-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="writer-payout-dialog-title" className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-[#0a0f1d] border border-emerald-700/80 rounded-2xl p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-serif font-bold text-white">
-                Disburse Affiliate Payout
+              <h3 id="writer-payout-dialog-title" className="text-base font-serif font-bold text-white">
+                Review / record off-site payout
               </h3>
-              <button onClick={() => setShowPayoutProcessModal(null)} className="p-1 text-slate-400 hover:text-white">
+              <button disabled={processingPayout} aria-label="Close payout review" onClick={() => setShowPayoutProcessModal(null)} className="p-1 text-slate-400 hover:text-white disabled:opacity-40">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -2204,87 +2197,8 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
               </div>
             </div>
 
-            <form onSubmit={handleProcessPayout} className="space-y-3">
-              <div>
-                <label className="block text-xs font-mono text-slate-300 mb-1">Action</label>
-                <p className="mb-2 text-[11px] leading-relaxed text-slate-400">Approve the reserved amount first. Approval does not send money. Confirm paid only after independently verifying the actual transfer and receipt.</p>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    disabled={showPayoutProcessModal.status !== 'PENDING'}
-                    onClick={() => setPayoutAction('approve')}
-                    className={`py-2 rounded-xl border text-xs font-mono font-bold disabled:opacity-40 ${payoutAction === 'approve' ? 'bg-cyan-950 border-cyan-600 text-cyan-300' : 'bg-slate-900 border-slate-800 text-slate-400'}`}
-                  >Approve request</button>
-                  <button
-                    type="button"
-                    disabled={!['APPROVED', 'PROCESSING'].includes(showPayoutProcessModal.status)}
-                    onClick={() => setPayoutAction('pay')}
-                    className={`py-2 rounded-xl border text-xs font-mono font-bold disabled:opacity-40 ${
-                      payoutAction === 'pay' ? 'bg-emerald-950 border-emerald-600 text-emerald-300' : 'bg-slate-900 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Confirm Paid
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPayoutAction('reject')}
-                    className={`py-2 rounded-xl border text-xs font-mono font-bold ${
-                      payoutAction === 'reject' ? 'bg-rose-950 border-rose-600 text-rose-300' : 'bg-slate-900 border-slate-800 text-slate-400'
-                    }`}
-                  >
-                    Reject Request
-                  </button>
-                </div>
-              </div>
-
-              {payoutAction === 'pay' && (
-                <div>
-                  <label className="block text-xs font-mono text-slate-300 mb-1">
-                    Safaricom B2C Code / Bank Reference Number
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    minLength={4}
-                    maxLength={128}
-                    value={payoutRef}
-                    onChange={(e) => setPayoutRef(e.target.value)}
-                    placeholder="e.g. QK82910482"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-cyan-300 font-mono focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-mono text-slate-300 mb-1">Author Notes (Optional)</label>
-                <input
-                  type="text"
-                  value={payoutNotes}
-                  onChange={(e) => setPayoutNotes(e.target.value)}
-                  placeholder="e.g. Sent via M-Pesa B2C"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-sans focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div className="pt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowPayoutProcessModal(null)}
-                  className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-300 font-mono text-xs cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={processingPayout}
-                  className={`flex-1 py-2 rounded-xl text-slate-950 font-mono font-bold text-xs cursor-pointer disabled:opacity-50 ${
-                    payoutAction === 'pay' ? 'bg-emerald-500 hover:bg-emerald-400' : 'bg-rose-500 hover:bg-rose-400 text-white'
-                  }`}
-                >
-                  {processingPayout ? 'Processing...' : payoutAction === 'pay' ? 'Confirm Disbursement' : payoutAction === 'approve' ? 'Approve Reserved Payout' : 'Reject Request'}
-                </button>
-              </div>
-            </form>
+            <AffiliatePayoutProcessForm key={showPayoutProcessModal.id} payout={showPayoutProcessModal}
+              onProcess={handleProcessPayout} onCancel={() => setShowPayoutProcessModal(null)} />
           </div>
         </div>
       )}

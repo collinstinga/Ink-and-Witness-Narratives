@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { 
   Users, 
   KeyRound, 
@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { ReaderLicense, Article, ManualAccessGrant } from '../../types.js';
 import { api } from '../../utils/api.js';
+const ReaderAccountDirectory = lazy(() => import('./ReaderAccountDirectory.js').then(module => ({ default: module.ReaderAccountDirectory })));
 
 interface WriterReadersProps {
   articles: Article[];
@@ -254,6 +255,9 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
 
   return (
     <div id="writer-readers-view" className="space-y-8">
+      <Suspense fallback={<p role="status" className="text-slate-400">Loading reader account controls…</p>}>
+        <ReaderAccountDirectory />
+      </Suspense>
       
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800/80 pb-6">

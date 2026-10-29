@@ -104,6 +104,8 @@ function normalizeSessionFields(record: Record<string, unknown>): AuthSession | 
   if (record.activeReaderSession === true && record.role !== 'client') return null;
   if (record.writerIdentityGeneration !== undefined && (record.role !== 'admin'
     || typeof record.writerIdentityGeneration !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(record.writerIdentityGeneration))) return null;
+  if (record.readerAccountGeneration !== undefined && (record.role !== 'client'
+    || typeof record.readerAccountGeneration !== 'string' || !/^[a-f0-9]{64}$/.test(record.readerAccountGeneration))) return null;
 
   return {
     storageVersion: AUTH_SESSION_STORAGE_VERSION,
@@ -114,7 +116,8 @@ function normalizeSessionFields(record: Record<string, unknown>): AuthSession | 
     createdAt,
     expiresAt,
     ...(record.activeReaderSession === true ? { activeReaderSession: true as const } : {}),
-    ...(typeof record.writerIdentityGeneration === 'string' ? { writerIdentityGeneration: record.writerIdentityGeneration } : {})
+    ...(typeof record.writerIdentityGeneration === 'string' ? { writerIdentityGeneration: record.writerIdentityGeneration } : {}),
+    ...(typeof record.readerAccountGeneration === 'string' ? { readerAccountGeneration: record.readerAccountGeneration } : {})
   };
 }
 

@@ -47,6 +47,7 @@ const dbMocks = vi.hoisted(() => {
   });
 
   const db = {
+    getAll: vi.fn(async (...refs: MockDocumentRef[]) => Promise.all(refs.map(ref => ref.get()))),
     collection: vi.fn((collectionName: string) => ({
       doc: vi.fn((id: string) => documentRef(collectionName, id)),
       where: vi.fn((_field: string, _operator: string, userId: string) => ({
@@ -127,7 +128,7 @@ vi.mock('./affiliateStore.js', () => ({
   }
 }));
 
-import { createSignedAuthSessionToken, getAuthSessionDocumentId } from './sessionSecurity.js';
+import { createSignedAuthSessionToken, getAuthSessionDocumentId, getActiveReaderSessionPointerId } from './sessionSecurity.js';
 
 describe('lazy hashed primary sessions', () => {
   let store: typeof import('./store.js').store;
@@ -166,7 +167,7 @@ describe('lazy hashed primary sessions', () => {
     identityMocks.session.mockReset().mockResolvedValue(true);
     identityMocks.create.mockReset().mockImplementation(async (_db, user) => ({ user }));
     for (const key of Array.from(dbMocks.documents.keys())) {
-      if (key.startsWith('sessions/') || key.startsWith('active_reader_sessions/')) dbMocks.documents.delete(key);
+      if (['sessions/', 'active_reader_sessions/', 'users/', 'reader_account_security/'].some(prefix => key.startsWith(prefix))) dbMocks.documents.delete(key);
     }
     dbMocks.getFirestoreDoc.mockClear();
     dbMocks.setFirestoreDoc.mockClear();
@@ -231,14 +232,16 @@ describe('lazy hashed primary sessions', () => {
   });
 
   it('persists a new session only under its hash and never stores the bearer token', async () => {
-    const token = await store.createAuthSession({
-      id: 'created_user',
-      role: 'client',
+    const user = {
+      id: 'user_created_reader123',
+      role: 'client' as const,
       email: 'created@example.test',
       name: 'Created User',
       passwordHash: 'not-used',
       createdAt: new Date().toISOString()
-    });
+    };
+    dbMocks.documents.set(dbMocks.keyFor('users', user.id), user);
+    const token = await store.createAuthSession(user);
     const documentId = getAuthSessionDocumentId(token)!;
 
     expect(dbMocks.setFirestoreDoc).not.toHaveBeenCalled();
@@ -251,6 +254,78 @@ describe('lazy hashed primary sessions', () => {
     expect(saved).not.toHaveProperty('sessionId');
     expect(JSON.stringify(saved)).not.toContain(token);
     expect(dbMocks.documents.has(dbMocks.keyFor('sessions', token))).toBe(false);
+  });
+
+  it('blocks warm reader sessions on suspension and never revives them on reactivation', async () => {
+    const { readerAccountSecurityId } = await import('./readerAccountAdmin.js');
+    const user = { id: 'user_suspend_reader123', role: 'client' as const, email: 'reader@example.test',
+      name: 'Reader', passwordHash: '$argon2id$synthetic-current', createdAt: new Date().toISOString() };
+    dbMocks.documents.set(dbMocks.keyFor('users', user.id), user);
+    const token = await store.createAuthSession(user);
+    expect(await store.getAuthSession(token)).toMatchObject({ userId: user.id });
+    const securityKey = dbMocks.keyFor('reader_account_security', readerAccountSecurityId(user.id));
+    const security = { schemaVersion: 1, userId: user.id, status: 'suspended', revision: 1,
+      sessionGeneration: 'a'.repeat(64), updatedAt: new Date().toISOString(), updatedBy: 'user_writer_admin123', reason: 'Writer review' };
+    dbMocks.documents.set(securityKey, security);
+    expect(await store.getAuthSession(token)).toBeNull();
+    dbMocks.documents.set(securityKey, { ...security, status: 'active', revision: 2, sessionGeneration: 'b'.repeat(64) });
+    expect(await store.getAuthSession(token)).toBeNull();
+    const replacement = await store.createAuthSession(user);
+    expect(await store.getAuthSession(replacement)).toMatchObject({ userId: user.id, readerAccountGeneration: 'b'.repeat(64) });
+    expect(dbMocks.documents.get(dbMocks.keyFor('users', user.id))).toEqual(user);
+  });
+
+  it('cannot create a reader session from a credential superseded during login', async () => {
+    const user = { id: 'user_racing_reader123', role: 'client' as const, email: 'reader@example.test',
+      name: 'Reader', passwordHash: '$argon2id$verified-old', createdAt: new Date().toISOString() };
+    dbMocks.documents.set(dbMocks.keyFor('users', user.id), { ...user, passwordHash: '$argon2id$new-current' });
+    await expect(store.createAuthSession(user)).rejects.toThrow('Sign-in changed');
+    expect([...dbMocks.documents.keys()].some(key => key.startsWith('sessions/'))).toBe(false);
+  });
+
+  it('rechecks a reader joining an in-flight lookup after suspension commits', async () => {
+    const { readerAccountSecurityId } = await import('./readerAccountAdmin.js');
+    const user = { id: 'user_pending_reader123', role: 'client' as const, email: 'pending-reader@example.test',
+      name: 'Reader', passwordHash: '$argon2id$synthetic-current', createdAt: new Date().toISOString() };
+    const token = createSignedAuthSessionToken(process.env.SESSION_SIGNING_SECRET);
+    const documentId = getAuthSessionDocumentId(token)!;
+    const pointerId = getActiveReaderSessionPointerId(user.id)!;
+    dbMocks.documents.set(dbMocks.keyFor('users', user.id), user);
+    dbMocks.documents.set(dbMocks.keyFor('sessions', documentId), {
+      ...activeRecord(user.id), role: 'client', email: user.email, activeReaderSession: true,
+    });
+    dbMocks.documents.set(dbMocks.keyFor('active_reader_sessions', pointerId), { sessionDocumentId: documentId });
+    let releasePointer!: () => void;
+    let markPointerReached!: () => void;
+    const pointerGate = new Promise<void>(resolve => { releasePointer = resolve; });
+    const pointerReached = new Promise<void>(resolve => { markPointerReached = resolve; });
+    const originalLookup = dbMocks.getFirestoreDoc.getMockImplementation()!;
+    dbMocks.getFirestoreDoc.mockImplementation(async (collectionName, id) => {
+      if (collectionName === 'active_reader_sessions' && id === pointerId) {
+        markPointerReached();
+        await pointerGate;
+      }
+      return dbMocks.documents.get(dbMocks.keyFor(collectionName, id)) ?? null;
+    });
+    try {
+      const earlierRequest = store.getAuthSession(token);
+      await pointerReached; // First request has already read the active account.
+      dbMocks.documents.set(dbMocks.keyFor('reader_account_security', readerAccountSecurityId(user.id)), {
+        schemaVersion: 1, userId: user.id, status: 'suspended', revision: 1,
+        sessionGeneration: 'c'.repeat(64), updatedAt: new Date().toISOString(),
+        updatedBy: 'user_writer_admin123', reason: 'Synthetic suspension committed',
+      });
+      // This request begins after suspension, but the older lookup is pending.
+      const laterRequest = store.getAuthSession(token);
+      releasePointer();
+      expect(await earlierRequest).toMatchObject({ userId: user.id });
+      expect(await laterRequest).toBeNull();
+      expect(await store.getAuthSession(token)).toBeNull();
+      expect(dbMocks.getFirestoreDoc.mock.calls.filter(([collectionName]) => collectionName === 'sessions')).toHaveLength(2);
+    } finally {
+      releasePointer();
+      dbMocks.getFirestoreDoc.mockImplementation(originalLookup);
+    }
   });
 
   it('atomically migrates a matching legacy session when it is next used', async () => {

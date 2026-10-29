@@ -306,7 +306,8 @@ export const publicWriteValidators = {
   }, { maxBytes: 1_024 }),
 
   comment: validateJsonBody({
-    content: { kind: 'string', required: true, minLength: 1, maxLength: 3_000, normalize: 'trim' }
+    content: { kind: 'string', required: true, minLength: 1, maxLength: 3_000, normalize: 'trim' },
+    submissionId: { kind: 'string', minLength: 16, maxLength: 80, pattern: /^[A-Za-z0-9_-]{16,80}$/, normalize: 'trim' }
   }, { maxBytes: 8_192 }),
 
   commentReport: validateJsonBody({

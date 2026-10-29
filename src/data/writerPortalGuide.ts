@@ -118,6 +118,8 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
       summary: 'Each manual grant is for one phone number plus one piece, claimed by one reader account.',
       keywords: ['reader', 'manual', 'grant', 'phone', 'token', 'activation', 'password', 'reset', 'licenses'],
       steps: [
+        'Open Readers & Licenses → Reader accounts to see the registered reader total, names, email addresses and account status. This counts accounts, not visits or purchases; writer accounts are excluded.',
+        'Find the intended reader by exact email, choose Suspend account, review the account details and confirm. Suspension blocks sign-in and current sessions without deleting purchases, grants or history. Reactivate account restores eligibility, but the reader must sign in again.',
         'Open Readers & Licenses → Grant Piece Access. Select the intended piece and phone number, then create the one-time code.',
         'Share the activation code privately with the intended reader. They must sign in to their reader account before claiming that piece with the matching phone number.',
         'Successful activation consumes the code and binds access to that reader account and piece. The same phone can receive a separate grant for a different piece; an already consumed code cannot transfer access.',
@@ -131,7 +133,7 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
       summary: 'Comments and verified-reader reviews have separate moderation areas.',
       keywords: ['comments', 'reviews', 'testimonial', 'rating', 'feature', 'moderation', 'bookmark', 'progress'],
       steps: [
-        'Use Comments to review discussions and apply the moderation controls shown for a comment.',
+        'Use Comments → Awaiting approval to review new reader comments. A reader can submit multiple comments; each new comment stays private until you select Review & publish, then Confirm public publication for the exact comment. Saving a piece does not approve comments.',
         'Use Reader Experience for verified-reader reviews. Publish makes a review public, Feature selects it as social proof and Hide removes it from public display.',
         'Check the correct piece and current status before moderating. Reader identities and private account details must not be copied into public testimonials.',
         'Readers use their own authenticated accounts for bookmarks, highlights and reading progress. A writer session or a phone number alone is not a reader sign-in.',
@@ -222,7 +224,8 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
       steps: [
         'Use Commissions Ledger and Payout Requests to reconcile earnings and requests before making a payout.',
         'In Payout Requests, change Minimum affiliate payout request (KES) and use Save payout minimum. Program Rules contains the wider programme settings.',
-        'Approval reserves/reviews a request; it is not proof that money was transferred. Mark earnings paid only after an actual verified or manually confirmed payout with the required reference.',
+        'Approval reserves/reviews a request; it is not proof that money was transferred. Pay the affiliate off-site first, open the payout confirmation form, enter the actual M-Pesa transaction code and confirm that the transfer is complete. The system records a writer-confirmed off-site payout; it does not send money or claim Safaricom verified the code.',
+        'After recording the payment, the affiliate sees Paid, the amount, confirmation code and date in Payout Requests. Their visible payout dashboard refreshes periodically and on return; they can also refresh manually. An exact retry does not pay or deduct the wallet twice.',
         'Check Audit Log for administrative changes. Refunds, reversals or disputed paid commissions need the supported reviewed workflow; do not rewrite balances or historical transactions to force a result.',
       ],
       notes: ['This demo never approves or pays a request. A payout request is not an automatic M-Pesa disbursement.'],

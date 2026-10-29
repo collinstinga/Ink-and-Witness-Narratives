@@ -33,8 +33,8 @@ describe('reproducible synthetic CI browser runtime', () => {
     expect(workflow).not.toContain('CHROME_PATH:');
     expect(workflow).not.toMatch(/continue-on-error|retry|retries/);
   });
-  it('keeps all three real component suites and bounded allowlisted diagnostic artifacts', () => {
-    for (const name of ['financial-controls', 'writer-security', 'chapter-books']) {
+  it('keeps all four real component suites and bounded allowlisted diagnostic artifacts', () => {
+    for (const name of ['financial-controls', 'writer-security', 'chapter-books', 'reader-controls']) {
       expect(workflow).toContain(`node scripts/qa/${name}.cjs`);
       const source = readFileSync(new URL(`./${name}.cjs`, import.meta.url), 'utf8');
       expect(source).toContain('launchFixtureBrowser(output)');
@@ -52,6 +52,7 @@ describe('reproducible synthetic CI browser runtime', () => {
       'data/financial-controls-qa/*.json', 'data/financial-controls-qa/*.png',
       'data/writer-security-qa/*.json', 'data/writer-security-qa/*.png',
       'data/chapter-books-qa/*.json', 'data/chapter-books-qa/*.png',
+      'data/reader-controls-qa/*.json', 'data/reader-controls-qa/*.png',
     ]);
   });
 });

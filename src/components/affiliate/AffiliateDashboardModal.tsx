@@ -72,6 +72,9 @@ import { AFFILIATE_TERMS_CHECKBOXES, AFFILIATE_TERMS_VERSION } from '../../data/
 import { validateAffiliatePasswordForInput } from '../../utils/affiliatePasswordPolicy.js';
 import { selectLiteraryCircleOnboardingPieces } from '../../utils/literaryCircleOnboarding.js';
 import { PortalGuideLoadBoundary, PortalGuideLoading } from '../guides/PortalGuideLoadBoundary.js';
+import { AffiliatePayoutReceipt } from './AffiliatePayoutReceipt.js';
+import { AFFILIATE_DASHBOARD_REFRESH_INTERVAL_MS, affiliatePayoutStatusChanged, shouldRefreshAffiliateDashboard,
+  unfinishedAffiliatePayoutIds } from '../../utils/affiliateDashboardRefresh.js';
 
 const AffiliateNotificationPreferencesPanel = React.lazy(
   () => import('./AffiliateNotificationPreferencesPanel.js'),
@@ -103,6 +106,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [financialRefreshError, setFinancialRefreshError] = useState('');
 
   // Terms acceptance for existing affiliates who haven't accepted yet
   const [termsChecked, setTermsChecked] = useState<Record<string, boolean>>({});
@@ -173,6 +177,11 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
   // Real-time sale notification & 1-second coin drop sound
   const previousSalesCountRef = React.useRef<number | null>(null);
   const dashboardRequestIdRef = useRef(0);
+  const dashboardRequestsInFlightRef = useRef(new Set<number>());
+  const payoutStatusRequestInFlightRef = useRef(false);
+  const lastDashboardAttemptAtRef = useRef(0);
+  const backgroundDashboardRefreshRef = useRef<() => Promise<void>>(async () => {});
+  const backgroundPayoutStatusRefreshRef = useRef<() => Promise<void>>(async () => {});
   const knownSaleIdsRef = React.useRef<Set<string>>(new Set());
   const [newSaleAlert, setNewSaleAlert] = useState<{
     show: boolean;
@@ -236,16 +245,21 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
     }
   };
 
-  const loadDashboard = async (isManualRefresh = false) => {
+  const loadDashboard = async (isManualRefresh = false, isBackgroundRefresh = false) => {
     const requestId = ++dashboardRequestIdRef.current;
-    if (isManualRefresh) setRefreshing(true);
-    else setLoading(true);
-    setError('');
+    dashboardRequestsInFlightRef.current.add(requestId);
+    lastDashboardAttemptAtRef.current = Date.now();
+    if (!isBackgroundRefresh) {
+      if (isManualRefresh) setRefreshing(true);
+      else setLoading(true);
+      setError('');
+    }
 
     try {
       const res = await api.getAffiliateDashboard();
       if (requestId !== dashboardRequestIdRef.current) return;
       setData(res);
+      setFinancialRefreshError('');
 
       // Detect new sales in real-time and trigger 1-second coin drop notification
       if (res && Array.isArray(res.sales)) {
@@ -276,7 +290,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       }
       
       // Initialize profile form values
-      if (res.affiliate) {
+      if (res.affiliate && !isBackgroundRefresh) {
         setProfileName(res.affiliate.name || '');
         setProfilePhone(res.affiliate.phone || '');
         setProfilePayoutMethod(res.affiliate.payoutMethod || 'mpesa');
@@ -295,14 +309,42 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
       if (requestId !== dashboardRequestIdRef.current) return;
       if (err.message && err.message.includes('expired')) {
         onLogout();
+      } else if (isBackgroundRefresh) {
+        setFinancialRefreshError('Payment status could not be refreshed. The displayed balance may be older; use Refresh to check the saved payment record.');
       } else {
         setError(err.message || 'Failed to load affiliate dashboard');
       }
     } finally {
+      dashboardRequestsInFlightRef.current.delete(requestId);
       if (requestId === dashboardRequestIdRef.current) {
         setLoading(false);
         setRefreshing(false);
       }
+    }
+  };
+  backgroundDashboardRefreshRef.current = () => loadDashboard(true, true);
+  backgroundPayoutStatusRefreshRef.current = async () => {
+    const ids = unfinishedAffiliatePayoutIds(data?.payouts || []);
+    if (!ids.length || payoutStatusRequestInFlightRef.current) return;
+    const dashboardVersion = dashboardRequestIdRef.current;
+    payoutStatusRequestInFlightRef.current = true;
+    lastDashboardAttemptAtRef.current = Date.now();
+    try {
+      const result = await api.getAffiliatePayoutStatuses(ids);
+      if (dashboardVersion !== dashboardRequestIdRef.current) return;
+      if (affiliatePayoutStatusChanged(data?.payouts || [], result.payouts)) {
+        // Load the complete, coherent wallet ONCE after a real status/receipt
+        // change. Unchanged probes never re-read the commission history.
+        await loadDashboard(true, true);
+      } else {
+        setFinancialRefreshError('');
+      }
+    } catch (err) {
+      if (dashboardVersion !== dashboardRequestIdRef.current) return;
+      if (err instanceof Error && /expired|log in/i.test(err.message)) onLogout();
+      else setFinancialRefreshError('Payment status could not be refreshed. The displayed balance may be older; use Refresh to check the saved payment record.');
+    } finally {
+      payoutStatusRequestInFlightRef.current = false;
     }
   };
 
@@ -359,14 +401,37 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
 
   useEffect(() => {
     if (isOpen) {
-      // Fresh financial reads are explicit: open, successful actions, or Refresh.
-      // A hidden repeating ledger poll wastes the shared Spark read allowance.
+      // Opening, successful actions and manual Refresh always load a fresh snapshot.
       void loadDashboard();
     } else {
       setShowPortalGuide(false);
     }
     return () => { dashboardRequestIdRef.current += 1; };
   }, [isOpen]);
+
+  const hasUnfinishedPayout = unfinishedAffiliatePayoutIds(data?.payouts || []).length > 0;
+  useEffect(() => {
+    if (!isOpen) return;
+    const refreshIfDue = () => {
+      if (!shouldRefreshAffiliateDashboard({ visible: document.visibilityState === 'visible',
+        inFlight: dashboardRequestsInFlightRef.current.size > 0 || payoutStatusRequestInFlightRef.current,
+        lastAttemptAt: lastDashboardAttemptAtRef.current, now: Date.now() })) return;
+      if (hasUnfinishedPayout) void backgroundPayoutStatusRefreshRef.current();
+      else void backgroundDashboardRefreshRef.current();
+    };
+    // Only visible unfinished requests get recurring exact-ID status probes.
+    // No full-ledger polling. Without unfinished requests, returning to the
+    // window refreshes once, with the same one-minute bound.
+    const interval = hasUnfinishedPayout ? window.setInterval(refreshIfDue, AFFILIATE_DASHBOARD_REFRESH_INTERVAL_MS) : undefined;
+    window.addEventListener('focus', refreshIfDue);
+    document.addEventListener('visibilitychange', refreshIfDue);
+    refreshIfDue();
+    return () => {
+      if (interval !== undefined) window.clearInterval(interval);
+      window.removeEventListener('focus', refreshIfDue);
+      document.removeEventListener('visibilitychange', refreshIfDue);
+    };
+  }, [isOpen, hasUnfinishedPayout, activeTab]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1775,6 +1840,8 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
               {/* TAB 4: PAYOUTS & BALANCE */}
               {activeTab === 'payouts' && (
                 <div className="space-y-6 animate-in fade-in">
+                  <p className="text-xs text-slate-400">Off-site payouts appear here when the writer records the completed payment and its M-Pesa code or transfer reference. Pending request statuses are checked automatically while this window is visible, at most once a minute. The balance refreshes when a status changes. You can also use Refresh.</p>
+                  {financialRefreshError ? <p role="alert" className="rounded-xl border border-amber-800 bg-amber-950/20 p-3 text-xs text-amber-200">{financialRefreshError}</p> : null}
                   {/* Balance & Request Banner */}
                   <div className="p-6 rounded-2xl bg-gradient-to-r from-slate-900 via-emerald-950/20 to-slate-900 border border-emerald-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-5">
                     <div className="space-y-1">
@@ -1848,13 +1915,7 @@ export const AffiliateDashboardModal: React.FC<AffiliateDashboardModalProps> = (
                                   )}
                                 </td>
                                 <td className="p-3 text-cyan-300">
-                                  {payout.paymentReference ? (
-                                    <span className="px-2 py-0.5 bg-cyan-950/80 rounded border border-cyan-800">
-                                      {payout.paymentReference}
-                                    </span>
-                                  ) : (
-                                    <span className="text-slate-500 text-[11px]">Processing...</span>
-                                  )}
+                                  <AffiliatePayoutReceipt payout={payout} />
                                 </td>
                                 <td className="p-3 text-center">
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold ${

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   MessageSquare, 
   Check, 
@@ -22,6 +22,28 @@ interface WriterCommentsProps {
   onPreviewPiece?: (article: Article) => void;
 }
 
+export function CommentPublicationConfirmation({ comment, busy, onConfirm, onCancel }: {
+  comment: PieceComment;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const confirmationRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    confirmationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    confirmationRef.current?.focus({ preventScroll: true });
+  }, [comment.id]);
+  return <section ref={confirmationRef} tabIndex={-1} aria-labelledby="publish-comment-title" className="rounded-2xl border border-emerald-800 bg-slate-950 p-5 space-y-3">
+    <h3 id="publish-comment-title" className="font-semibold text-white">Publish this comment publicly?</h3>
+    <p className="text-xs text-slate-300">This will show {comment.readerName}&apos;s name and the comment to all readers. Account email and private ownership details will not be displayed.</p>
+    <blockquote className="whitespace-pre-wrap rounded-xl border border-slate-800 p-3 text-sm text-slate-200">{comment.content}</blockquote>
+    <div className="flex flex-wrap gap-3">
+      <button type="button" disabled={busy} onClick={onConfirm} className="rounded-xl bg-emerald-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Confirm public publication</button>
+      <button type="button" disabled={busy} onClick={onCancel} className="rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-200 disabled:opacity-50">Cancel publication</button>
+    </div>
+  </section>;
+}
+
 export const WriterComments: React.FC<WriterCommentsProps> = ({
   articles,
   onPreviewPiece
@@ -30,15 +52,18 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedArticleId, setSelectedArticleId] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'hidden' | 'reported'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'approved' | 'hidden' | 'reported'>('all');
+  const [publishCommentId, setPublishCommentId] = useState<string | null>(null);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const moderationBusyRef = useRef(false);
 
   const fetchComments = async () => {
+    if (moderationBusyRef.current || loadingMore) return;
     try {
       setLoading(true);
       setError(null);
@@ -54,7 +79,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
   };
 
   const loadMoreComments = async () => {
-    if (!nextCursor || loadingMore) return;
+    if (!nextCursor || loadingMore || moderationBusyRef.current) return;
     try {
       setLoadingMore(true);
       setError(null);
@@ -82,21 +107,27 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
   }, []);
 
   const handleUpdateStatus = async (commentId: string, status: 'approved' | 'hidden') => {
+    if (moderationBusyRef.current || loading || loadingMore) return;
+    moderationBusyRef.current = true;
     try {
       setActionLoadingId(commentId);
       const updated = await api.updateAdminCommentStatus(commentId, status);
       setComments(prev => prev.map(c => c.id === commentId ? updated : c));
-      setSuccessMessage(`Comment marked as ${status}.`);
+      setPublishCommentId(null);
+      setSuccessMessage(status === 'approved' ? 'Comment published publicly.' : 'Comment hidden from public readers.');
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (err: any) {
       setError(err.message || 'Failed to update comment status.');
     } finally {
+      moderationBusyRef.current = false;
       setActionLoadingId(null);
     }
   };
 
   const handleDelete = async (commentId: string) => {
+    if (moderationBusyRef.current || loading || loadingMore) return;
     if (!window.confirm('Are you sure you want to permanently delete this comment?')) return;
+    moderationBusyRef.current = true;
     try {
       setActionLoadingId(commentId);
       await api.deleteAdminComment(commentId);
@@ -106,6 +137,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
     } catch (err: any) {
       setError(err.message || 'Failed to delete comment.');
     } finally {
+      moderationBusyRef.current = false;
       setActionLoadingId(null);
     }
   };
@@ -127,6 +159,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
     const matchesStatus = 
       statusFilter === 'all' ||
       (statusFilter === 'reported' && c.isReported) ||
+      (statusFilter === 'pending' && c.status === 'pending') ||
       (statusFilter === 'approved' && c.status === 'approved') ||
       (statusFilter === 'hidden' && c.status === 'hidden');
 
@@ -136,7 +169,9 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
   const totalCount = comments.length;
   const approvedCount = comments.filter(c => c.status === 'approved').length;
   const hiddenCount = comments.filter(c => c.status === 'hidden').length;
+  const pendingCount = comments.filter(c => c.status === 'pending').length;
   const reportedCount = comments.filter(c => c.isReported).length;
+  const publishComment = comments.find(comment => comment.id === publishCommentId && comment.status !== 'approved' && comment.status !== 'deleted');
 
   return (
     <div id="writer-comments-container" className="space-y-6">
@@ -152,19 +187,21 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
             Monograph Comments &amp; Moderation
           </h2>
           <p className="text-xs text-slate-400 mt-1 font-sans">
-            Review, approve, hide, or moderate comments submitted by readers across all published monographs.
+            Every new reader comment waits here until you confirm public publication. Readers can submit more than one comment on a piece.
           </p>
         </div>
 
         <button
           onClick={fetchComments}
-          disabled={loading}
+          disabled={loading || loadingMore || actionLoadingId !== null}
           className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 text-xs font-mono flex items-center gap-2 cursor-pointer transition-colors"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           <span>Refresh</span>
         </button>
       </div>
+
+      {publishComment && <CommentPublicationConfirmation comment={publishComment} busy={loading || loadingMore || actionLoadingId !== null} onConfirm={() => handleUpdateStatus(publishComment.id, 'approved')} onCancel={() => setPublishCommentId(null)} />}
 
       {/* Notifications */}
       {successMessage && (
@@ -182,10 +219,15 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
       )}
 
       {/* Stats Summary Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <p className="text-xs text-slate-500">Counts below cover the loaded comments. Load older comments to review more history.</p>
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800">
           <p className="text-xs font-mono text-slate-400">Total Comments</p>
           <p className="text-xl sm:text-2xl font-bold text-white mt-1 font-mono">{totalCount}</p>
+        </div>
+        <div className="p-4 rounded-2xl bg-sky-950/30 border border-sky-800/40">
+          <p className="text-xs font-mono text-sky-400">Awaiting Approval</p>
+          <p className="text-xl sm:text-2xl font-bold text-sky-300 mt-1 font-mono">{pendingCount}</p>
         </div>
         <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-800/40">
           <p className="text-xs font-mono text-emerald-400">Approved (Live)</p>
@@ -246,6 +288,9 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
             >
               All
             </button>
+            <button type="button" onClick={() => setStatusFilter('pending')} className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors cursor-pointer ${statusFilter === 'pending' ? 'bg-sky-950 text-sky-300 border border-sky-800/80 font-bold' : 'text-slate-400 hover:text-white'}`}>
+              Pending
+            </button>
             <button
               type="button"
               onClick={() => setStatusFilter('approved')}
@@ -298,7 +343,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
         ) : (
           filteredComments.map((comment) => {
             const article = articleById.get(comment.articleId);
-            const isProcessing = actionLoadingId === comment.id;
+            const isProcessing = loading || loadingMore || actionLoadingId !== null;
 
             return (
               <div
@@ -346,7 +391,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
                       ) : (
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-950 text-amber-300 border border-amber-800/60 flex items-center gap-1">
                           <EyeOff className="w-2.5 h-2.5" />
-                          Hidden
+                          {comment.status === 'pending' ? 'Awaiting approval' : comment.status === 'deleted' ? 'Deleted' : 'Hidden'}
                         </span>
                       )}
 
@@ -384,18 +429,18 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
 
                   {/* Right: Moderation Actions */}
                   <div className="flex sm:flex-col items-center gap-2 shrink-0">
-                    {comment.status === 'hidden' ? (
+                    {comment.status !== 'approved' && comment.status !== 'deleted' ? (
                       <button
                         type="button"
-                        onClick={() => handleUpdateStatus(comment.id, 'approved')}
+                        onClick={() => setPublishCommentId(comment.id)}
                         disabled={isProcessing}
                         className="px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800/80 text-emerald-300 text-xs font-mono font-medium flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
                         title="Approve and make visible to readers"
                       >
                         <Check className="w-3.5 h-3.5" />
-                        <span>Approve</span>
+                        <span>Review &amp; publish</span>
                       </button>
-                    ) : (
+                    ) : comment.status === 'approved' ? (
                       <button
                         type="button"
                         onClick={() => handleUpdateStatus(comment.id, 'hidden')}
@@ -406,7 +451,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
                         <EyeOff className="w-3.5 h-3.5" />
                         <span>Hide</span>
                       </button>
-                    )}
+                    ) : null}
 
                     <button
                       type="button"
@@ -432,7 +477,7 @@ export const WriterComments: React.FC<WriterCommentsProps> = ({
           <button
             type="button"
             onClick={loadMoreComments}
-            disabled={loadingMore}
+            disabled={loadingMore || actionLoadingId !== null}
             className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-900/70 text-xs font-mono flex items-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingMore ? 'animate-spin' : ''}`} />

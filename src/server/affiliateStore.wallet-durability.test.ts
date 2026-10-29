@@ -232,6 +232,29 @@ describe('atomic affiliate wallet and payout preservation', () => {
     expect(snapshot()).toEqual(before);
   });
 
+  it('records an off-site M-Pesa receipt, writer confirmation and payment time with the same atomic wallet commit', async () => {
+    const requested = await affiliateStore.requestPayout(account.id, 750);
+    await affiliateStore.processPayout(requested.id, 'approve', undefined, 'Approved for off-site transfer', 'Writer');
+    const approved = affiliateStore.getAffiliateDashboard(account.id)!;
+    expect(approved.payouts[0]).toMatchObject({ status: 'APPROVED', amountKes: 750 });
+    expect(approved.commissionPaidKes).toBe(0);
+    const paid = await affiliateStore.processPayout(requested.id, 'mark_paid', ' qk82910482 ', 'Transferred and checked off-site', 'Writer');
+    expect(paid).toMatchObject({ status: 'PAID', amountKes: 750, paymentReference: 'QK82910482',
+      confirmationMethod: 'writer_confirmed', notes: 'Transferred and checked off-site' });
+    expect(Number.isFinite(Date.parse(paid.paidAt!))).toBe(true);
+    const dashboard = affiliateStore.getAffiliateDashboard(account.id)!;
+    expect(dashboard).toMatchObject({ commissionPaidKes: 750, availableBalanceKes: 1_250 });
+    expect(dashboard.payouts[0]).toEqual(paid);
+    const audit = [...mock.documents.entries()].find(([key]) => key.startsWith('affiliate_audit/aud_payout_receipt_'))?.[1];
+    expect(audit).toMatchObject({ actor: 'Writer', action: 'payout_processed', targetId: paid.id,
+      newValue: { status: 'PAID', amountKes: 750, paymentReference: 'QK82910482', confirmationMethod: 'writer_confirmed', payoutMethod: 'mpesa', paidAt: paid.paidAt } });
+    const committed = snapshot();
+    await affiliateStore.processPayout(paid.id, 'mark_paid', 'QK82910482', 'Retry after connection dropped', 'Writer');
+    expect(snapshot()).toEqual(committed);
+    expect(durableAccount().totalCommissionEarnedKes).toBe(2_000);
+    expect(mock.documents.get('reader_licenses/preserved')).toEqual({ readerId: 'reader_1', pieceId: 'piece_1', paid: true });
+  });
+
   it('approves and reverses fresh commission balances atomically without reducing historical earnings', async () => {
     mock.documents.set('affiliate_commissions/com_pending', commission('com_pending', { status: 'PENDING', commissionAmountKes: 500 }));
     mock.documents.set(`affiliates/${account.id}`, { ...durableAccount(), balancePendingKes: 500, totalCommissionEarnedKes: 2_500 });
