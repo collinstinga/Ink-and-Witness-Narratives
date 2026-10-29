@@ -9,6 +9,7 @@ import {
   normalizeManualAccessPhone
 } from './manualAccessSecurity.js';
 import { getAuthSessionDocumentId } from './sessionSecurity.js';
+import { readerAccountSecurityId } from './readerAccountAdmin.js';
 
 type FakeRef = {
   collectionName: string;
@@ -106,6 +107,7 @@ const firestoreMock = vi.hoisted(() => {
   let failNextTransactionCommit = false;
   const transactionRuns = vi.fn();
   const transactionWrites = vi.fn();
+  const getAllReads = vi.fn();
   const getAllFirestoreDocs = vi.fn(async (collectionName: string) => {
     if (collectionName === 'users') return structuredClone(users);
     if (collectionName === 'articles') return structuredClone(articles);
@@ -116,6 +118,7 @@ const firestoreMock = vi.hoisted(() => {
     documents,
     transactionRuns,
     transactionWrites,
+    getAllReads,
     getAllFirestoreDocs,
     shouldFailTransaction() {
       const shouldFail = failNextTransactionCommit;
@@ -128,6 +131,7 @@ const firestoreMock = vi.hoisted(() => {
     resetObservations() {
       transactionRuns.mockClear();
       transactionWrites.mockClear();
+      getAllReads.mockClear();
       failNextTransactionCommit = false;
     }
   };
@@ -201,6 +205,10 @@ function makeQuery(
 }
 
 const db = {
+  async getAll(...references: FakeRef[]) {
+    firestoreMock.getAllReads(references.map(reference => reference.key));
+    return references.map(makeDocumentSnapshot);
+  },
   collection(collectionName: string) {
     const query = makeQuery(collectionName);
     return {
@@ -352,6 +360,7 @@ describe('single-use manual access transactions', () => {
         || key.startsWith('reader_licenses/')
         || key.startsWith('sessions/')
         || key.startsWith('active_reader_sessions/')
+        || key.startsWith('users/')
       ) {
         firestoreMock.documents.delete(key);
       }
@@ -375,20 +384,29 @@ describe('single-use manual access transactions', () => {
   });
 
   it('keeps only one active reader session and fails closed if its pointer disappears', async () => {
-    const first = await store.createAuthSession(users[0] as any);
+    // Session identities use the real current account shape. The older IDs in
+    // the manual-grant fixtures remain unchanged to cover legacy entitlements.
+    const sessionReader = { ...users[0], id: 'user_session_reader_one', role: 'client' as const };
+    firestoreMock.documents.set(`users/${sessionReader.id}`, clone(sessionReader));
+    const first = await store.createAuthSession(sessionReader);
     const firstId = getAuthSessionDocumentId(first);
     expect(firstId).toBeTruthy();
     expect(firestoreMock.documents.has(`sessions/${firstId}`)).toBe(true);
 
-    const second = await store.createAuthSession(users[0] as any);
+    const second = await store.createAuthSession(sessionReader);
     const secondId = getAuthSessionDocumentId(second);
     expect(secondId).not.toBe(firstId);
     expect(firestoreMock.documents.has(`sessions/${firstId}`)).toBe(false);
     await expect(store.getAuthSession(first)).resolves.toBeNull();
     await expect(store.getAuthSession(second)).resolves.toMatchObject({
-      userId: users[0].id,
+      userId: sessionReader.id,
       activeReaderSession: true
     });
+    expect(firestoreMock.getAllReads).toHaveBeenCalledWith([
+      `users/${sessionReader.id}`,
+      `reader_account_security/${readerAccountSecurityId(sessionReader.id)}`
+    ]);
+    expect(firestoreMock.getAllReads).toHaveBeenCalledTimes(1);
 
     const pointerKey = Array.from(firestoreMock.documents.keys())
       .find(key => key.startsWith('active_reader_sessions/'));
@@ -398,6 +416,8 @@ describe('single-use manual access transactions', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(future);
     try {
       await expect(store.getAuthSession(second)).resolves.toBeNull();
+      expect(firestoreMock.getAllReads).toHaveBeenCalledTimes(2);
+      expect(firestoreMock.documents.get(`users/${sessionReader.id}`)).toEqual(sessionReader);
     } finally {
       nowSpy.mockRestore();
     }
