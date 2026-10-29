@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import http, { Server } from 'http';
 import { AddressInfo } from 'net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   process.env.NODE_ENV = 'test';
@@ -93,19 +93,12 @@ describe('reader password-reset routes', () => {
   let baseUrl: string;
   const token = `pr1_${'A'.repeat(43)}`;
 
-  beforeAll(async () => {
-    const app = await createApp();
-    server = http.createServer(app);
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const address = server.address() as AddressInfo;
-    baseUrl = `http://127.0.0.1:${address.port}`;
-  }, 60_000);
-
-  afterAll(async () => {
+  afterEach(async () => {
+    if (!server?.listening) return;
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     storeMocks.getFreshUserByEmail.mockImplementation(async (email: string) =>
       email === reader.email ? { ...reader } : null
@@ -119,7 +112,14 @@ describe('reader password-reset routes', () => {
       user: { ...reader, passwordHash: '$argon2id$mock-password-hash' },
       resetAt: '2026-09-30T10:00:00.000Z'
     });
-  });
+    // Each case represents an independent client/app lifetime. Keep the real
+    // five-request limiter intact rather than sharing its bucket across cases.
+    const app = await createApp();
+    server = http.createServer(app);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${address.port}`;
+  }, 60_000);
 
   it('serves the single-use reset form and maps the friendly production URL to it', async () => {
     const response = await fetch(`${baseUrl}/api/auth/password-reset?token=${token}`);
