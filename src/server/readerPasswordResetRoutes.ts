@@ -95,7 +95,7 @@ export function registerReaderPasswordResetRoutes(app: Pick<Express, 'get' | 'po
     }));
     try {
       if (!await options.service.isActive(token)) return res.status(410).type('html').send(readerPasswordResetPage('', '', {
-        title: 'Reset link unavailable', message: 'This link has expired, has already been used, or was replaced by a newer request. Open the latest reset email or request a new link.',
+        title: 'Reset link unavailable', message: 'This password reset link has expired or has already been used, or was replaced by a newer request. Open the latest reset email or request a new link.',
       }));
       return res.type('html').send(readerPasswordResetPage(token));
     } catch { return res.status(503).type('html').send(readerPasswordResetPage('', '', {

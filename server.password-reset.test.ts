@@ -66,13 +66,13 @@ vi.mock('./src/server/store.js', () => ({
 }));
 vi.mock('./src/server/passwordResetStore.js', () => ({ passwordResetStore: passwordResetMocks }));
 vi.mock('./src/server/auth.js', () => authMocks);
-vi.mock('./src/server/newsletterEmail.js', () => ({
+vi.mock('./src/server/newsletterEmail.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./src/server/newsletterEmail.js')>(),
   buildNewsletterCampaignEmail: vi.fn(() => ({ subject: '', html: '', text: '' })),
   buildNewsletterConfirmationEmail: vi.fn(() => ({ subject: '', html: '', text: '' })),
   buildReaderPasswordResetEmail: newsletterEmailMocks.buildReaderPasswordResetEmail,
   isRetryableNewsletterProviderError: vi.fn(() => false),
   isNewsletterProviderConfigured: vi.fn(() => true),
-  NewsletterProviderConfigurationError: class NewsletterProviderConfigurationError extends Error {},
   sendNewsletterEmail: newsletterEmailMocks.sendNewsletterEmail
 }));
 vi.mock('./src/server/mpesa.js', () => ({
@@ -86,6 +86,7 @@ vi.mock('./src/server/mpesa.js', () => ({
 }));
 
 import { createApp } from './server.js';
+import { NewsletterProviderConfigurationError, NewsletterProviderError } from './src/server/newsletterEmail.js';
 
 describe('reader password-reset routes', () => {
   let server: Server;
@@ -141,11 +142,12 @@ describe('reader password-reset routes', () => {
     });
   });
 
-  it('consumes a valid form token, updates the reader, and clears the old session cookie', async () => {
+  it('consumes the same-origin URL-encoded fetch used by the reset form and clears the old reader session', async () => {
     const response = await fetch(`${baseUrl}/api/auth/password-reset`, {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
         origin: baseUrl,
         cookie: `iw_session=sess_${'a'.repeat(64)}`
       },
@@ -155,11 +157,12 @@ describe('reader password-reset routes', () => {
         confirmPassword: 'NewReaderPassword9!'
       })
     });
-    const body = await response.text();
+    const body = await response.json();
 
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toContain('no-store');
-    expect(body).toContain('Password updated');
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(body).toEqual({ success: true, message: 'Password updated. Sign in with your new password.' });
     expect(authMocks.hashPassword).toHaveBeenCalledWith('NewReaderPassword9!');
     expect(passwordResetMocks.consume).toHaveBeenCalledWith(
       token,
@@ -193,7 +196,7 @@ describe('reader password-reset routes', () => {
 
     const response = await fetch(`${baseUrl}/api/auth/password-reset`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', origin: baseUrl, cookie: `iw_session=sess_${'c'.repeat(64)}` },
       body: JSON.stringify({
         token,
         password: 'NewReaderPassword9!',
@@ -204,7 +207,7 @@ describe('reader password-reset routes', () => {
     expect(response.status).toBe(410);
     expect(await response.json()).toEqual({
       success: false,
-      error: 'This password reset link has expired or has already been used. Request a new link.'
+      error: 'This reset link expired, was already used, or was replaced. Open the latest reset email or request a new link.'
     });
     expect(storeMocks.applyPasswordResetUser).not.toHaveBeenCalled();
     expect(response.headers.get('set-cookie')).toBeNull();
@@ -213,7 +216,7 @@ describe('reader password-reset routes', () => {
   it('returns the same public response for an existing and a nonexistent reader', async () => {
     const requestReset = (email: string) => fetch(`${baseUrl}/api/auth/password-reset/request`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', origin: baseUrl },
       body: JSON.stringify({ email })
     });
 
@@ -245,17 +248,20 @@ describe('reader password-reset routes', () => {
     });
   });
 
-  it('invalidates the issued capability when email delivery fails without revealing the account', async () => {
-    const deliveryEmail = 'delivery-failure@example.test';
+  it.each([
+    ['rejected-422', new NewsletterProviderError('Definite provider rejection', 422)],
+    ['unconfigured', new NewsletterProviderConfigurationError('Missing email configuration')]
+  ])('invalidates an undelivered capability only after definite rejection (%s), without revealing the account', async (label, failure) => {
+    const deliveryEmail = `delivery-${label}@example.test`;
     storeMocks.getFreshUserByEmail.mockImplementationOnce(async () => ({
       ...reader,
       email: deliveryEmail
     }));
-    newsletterEmailMocks.sendNewsletterEmail.mockRejectedValueOnce(new Error('provider unavailable'));
+    newsletterEmailMocks.sendNewsletterEmail.mockRejectedValueOnce(failure);
 
     const response = await fetch(`${baseUrl}/api/auth/password-reset/request`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', origin: baseUrl },
       body: JSON.stringify({ email: deliveryEmail })
     });
 
@@ -264,7 +270,31 @@ describe('reader password-reset routes', () => {
       success: true,
       message: 'If a reader account exists for that email, a password reset link has been sent.'
     });
-    expect(passwordResetMocks.discard).toHaveBeenCalledWith(token);
+    expect(passwordResetMocks.discard).toHaveBeenCalledExactlyOnceWith(token);
+    expect(passwordResetMocks.issue).toHaveBeenCalledOnce();
+    expect(newsletterEmailMocks.sendNewsletterEmail).toHaveBeenCalledOnce();
+    expect(passwordResetMocks.consume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['provider-503', new NewsletterProviderError('Provider response uncertain', 503)],
+    ['network-timeout', new Error('Network response lost after possible acceptance')]
+  ])('keeps a one-use reset link usable after ambiguous delivery (%s) without resending or revealing the account', async (label, failure) => {
+    const deliveryEmail = `delivery-${label}@example.test`;
+    storeMocks.getFreshUserByEmail.mockImplementationOnce(async () => ({ ...reader, email: deliveryEmail }));
+    newsletterEmailMocks.sendNewsletterEmail.mockRejectedValueOnce(failure);
+    const response = await fetch(`${baseUrl}/api/auth/password-reset/request`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin: baseUrl },
+      body: JSON.stringify({ email: deliveryEmail })
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ success: true,
+      message: 'If a reader account exists for that email, a password reset link has been sent.' });
+    expect(passwordResetMocks.issue).toHaveBeenCalledOnce();
+    expect(newsletterEmailMocks.sendNewsletterEmail).toHaveBeenCalledOnce();
+    expect(passwordResetMocks.discard).not.toHaveBeenCalled();
+    expect(passwordResetMocks.consume).not.toHaveBeenCalled();
+    expect(storeMocks.applyPasswordResetUser).not.toHaveBeenCalled();
   });
 
   it('lets an authenticated writer send the reset link without choosing the reader password', async () => {
