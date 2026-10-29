@@ -83,7 +83,7 @@ export const ReaderAccountDirectory: React.FC = () => {
   return <section aria-labelledby="reader-account-directory-title" className="bg-slate-900/50 border border-slate-700 rounded-2xl p-4 sm:p-6 mb-6">
     <h3 id="reader-account-directory-title" className="text-xl font-serif text-slate-100 mb-4">Reader accounts</h3>
     <form className="flex flex-wrap gap-3 mb-5" onSubmit={event => { event.preventDefault(); setNotice(''); void load({ email: email.trim().toLowerCase() || undefined }); }}>
-      <label className="flex-1 min-w-0"><span className="block text-sm text-slate-400 mb-1">Find an exact email address</span><input type="email" value={email} onChange={event => setEmail(event.target.value)} maxLength={254} placeholder="reader@example.com" className="w-full bg-slate-950 border border-slate-600 rounded-lg px-3 py-2" /></label>
+      <label className="w-full sm:w-auto sm:flex-1 min-w-0"><span className="block text-sm text-slate-400 mb-1">Find an exact email address</span><input type="email" value={email} onChange={event => setEmail(event.target.value)} maxLength={254} placeholder="reader@example.com" className="w-full bg-slate-950 border border-slate-600 rounded-lg px-3 py-2" /></label>
       <button type="submit" disabled={loading || saving} className="self-end bg-cyan-700 rounded-lg px-4 py-2 disabled:opacity-50">Find reader</button>
       <button type="button" disabled={loading || saving} onClick={() => { setEmail(''); setNotice(''); void load({}); }} className="self-end border border-slate-600 rounded-lg px-4 py-2 disabled:opacity-50">Show all</button>
     </form>
