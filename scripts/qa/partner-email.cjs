@@ -88,7 +88,7 @@ let phase = 'setup';
         }
         unexpected.push(`${request.method()} ${url.pathname}`); return route.abort();
       });
-      await page.goto(origin);
+      await page.goto(origin, { waitUntil: 'domcontentloaded' });
       await page.getByRole('heading', { name: 'Email your partners' }).waitFor();
       await page.waitForFunction(() => !document.querySelector('select').disabled);
       assert.equal(await page.getByRole('button', { name: 'Send partner email' }).isDisabled(), true);
@@ -101,6 +101,8 @@ let phase = 'setup';
       await page.getByText('1 will receive this email', { exact: false }).waitFor();
       assert.equal(creates.length, 0); assert.equal(sends.length, 0);
       assert.deepEqual(previews[0].affiliateIds, ['partner-one']);
+      phase = `${width}:message-revision`;
+      assert.equal(await page.getByLabel('Message', { exact: true }).count(), 1, 'The message label must remain stable after editing');
       await page.getByLabel('Message', { exact: true }).fill('A revised synthetic message.');
       assert.equal(await page.getByRole('button', { name: 'Send partner email' }).isDisabled(), true);
       await page.getByLabel('Send to').selectOption('all');

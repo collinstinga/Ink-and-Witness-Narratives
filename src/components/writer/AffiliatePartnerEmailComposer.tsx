@@ -175,7 +175,10 @@ export default function AffiliatePartnerEmailComposer({ service = defaultService
         <fieldset disabled={locked || !overview} className="space-y-3 disabled:opacity-60">
           <legend className="mb-3 text-sm font-semibold text-white">2. Message</legend>
           <label className="block text-xs text-slate-300">Subject<input required maxLength={200} value={draft.subject} onChange={event => update({ subject: event.target.value })} className="mt-1.5 min-h-11 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-white" /></label>
-          <label className="block text-xs text-slate-300">Message<textarea required maxLength={12000} rows={8} value={draft.body} onChange={event => update({ body: event.target.value })} placeholder="Write your update to the Literary Circle…" className="mt-1.5 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm leading-relaxed text-white" /></label>
+          <div>
+            <label htmlFor="partner-email-message" className="block text-xs text-slate-300">Message</label>
+            <textarea id="partner-email-message" required maxLength={12000} rows={8} value={draft.body} onChange={event => update({ body: event.target.value })} placeholder="Write your update to the Literary Circle…" className="mt-1.5 w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm leading-relaxed text-white" />
+          </div>
         </fieldset>
         <div className="flex flex-wrap gap-3">
           <button type="button" disabled={locked || !overview} onClick={() => void checkRecipients()} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-violet-400/40 px-4 text-sm font-semibold text-violet-100 disabled:opacity-40">{busy === 'preview' ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <Eye aria-hidden="true" className="h-4 w-4" />}Preview recipients</button>

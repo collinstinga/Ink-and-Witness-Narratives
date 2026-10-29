@@ -15,6 +15,8 @@ describe('simple manual partner email', () => {
     for (const label of ['Email your partners', 'All eligible partners', 'Choose individual partners', 'Subject',
       'Message', 'Preview recipients', 'Send partner email', 'Delivery history']) expect(html).toContain(label);
     expect(html).toContain('Reader newsletter subscribers are separate');
+    expect(html).toMatch(/<label[^>]+for="partner-email-message"[^>]*>Message<\/label>/);
+    expect(html).toMatch(/<textarea[^>]+id="partner-email-message"/);
     expect(html).toMatch(/<button[^>]+disabled[^>]*><svg[^]*?Send partner email/);
     expect(html).not.toMatch(/SecurityCredential|API_KEY|signed review|held intents|dispatch batch/);
     for (const fn of Object.values(service)) expect(fn).not.toHaveBeenCalled();
