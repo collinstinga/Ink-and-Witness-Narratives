@@ -118,7 +118,8 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
       summary: 'Each manual grant is for one phone number plus one piece, claimed by one reader account.',
       keywords: ['reader', 'manual', 'grant', 'phone', 'token', 'activation', 'password', 'reset', 'licenses'],
       steps: [
-        'Open Readers & Licenses → Reader accounts to see the registered reader total, names, email addresses and account status. This counts accounts, not visits or purchases; writer accounts are excluded.',
+        'Open Readers & Licenses → Reader accounts to see the registered reader total, names, email addresses and account status. Show all clears an email filter; Load more accounts expands the list until all matching accounts are visible. This counts accounts, not visits or purchases; writer accounts are excluded.',
+        'To give an existing reader a specific piece directly, select Grant piece access on their account, choose a published piece, check the email and confirm. No phone number or activation code is needed: complimentary access belongs only to that account and piece, appears in their library and does not create a sale or commission.',
         'Find the intended reader by exact email, choose Suspend account, review the account details and confirm. Suspension blocks sign-in and current sessions without deleting purchases, grants or history. Reactivate account restores eligibility, but the reader must sign in again.',
         'Open Readers & Licenses → Grant Piece Access. Select the intended piece and phone number, then create the one-time code.',
         'Share the activation code privately with the intended reader. They must sign in to their reader account before claiming that piece with the matching phone number.',

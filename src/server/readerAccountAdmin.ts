@@ -51,6 +51,17 @@ async function assertAdmin(db: Firestore, actor: Actor, transaction?: Transactio
     || (actor.email !== undefined && (!canonicalEmail(actor.email)
       || canonicalEmail(current.email) !== canonicalEmail(actor.email)))) throw new ReaderAccountAdminError(403, 'Writer authentication is required.');
 }
+/** Reuse the same fresh role/identity checks for reader-management actions. */
+export { assertAdmin as assertReaderAccountAdmin };
+export async function assertActiveReaderAccount(db: Firestore, userId: string, transaction: Transaction): Promise<void> {
+  const securityId = readerAccountSecurityId(userId);
+  const user = await transaction.get(db.collection('users').doc(userId));
+  assertReader(userId, user.exists ? user.data() : null);
+  const security = await transaction.get(db.collection(READER_ACCOUNT_SECURITY_COLLECTION).doc(securityId));
+  if (normalizeSecurity(userId, security.exists ? security.data() : null)?.status === 'suspended') {
+    throw new ReaderAccountAdminError(409, 'Reactivate this reader account before granting a piece.');
+  }
+}
 function item(id: string, value: Record<string, any>, security: Security | null): ReaderAccountAdminItem {
   return { id, name: clean(value.name, 160) || 'Name not recorded', email: clean(value.email, 254),
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : '', status: security?.status || 'active',

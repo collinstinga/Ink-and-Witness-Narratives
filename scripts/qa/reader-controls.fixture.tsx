@@ -34,7 +34,7 @@ function Lab() {
       <button type="button" onClick={() => setTab('writer')}>Writer comments lab</button>
       <button type="button" onClick={() => setTab('payout')}>Off-site payout lab</button>
     </nav>
-    {tab === 'directory' && <section data-testid="directory-lab"><ReaderAccountDirectory /></section>}
+    {tab === 'directory' && <section data-testid="directory-lab"><ReaderAccountDirectory articles={[piece, { ...piece, id: 'synthetic-draft', title: 'Synthetic Private Draft', status: 'draft' }]} /></section>}
     {tab === 'reader' && <section data-testid="reader-comments-lab"><ReaderComments articleId={piece.id} readerId="synthetic-reader" canComment /></section>}
     {tab === 'writer' && <section data-testid="writer-comments-lab"><WriterComments articles={[piece]} /></section>}
     {tab === 'payout' && <section data-testid="payout-lab" className="max-w-2xl space-y-4">

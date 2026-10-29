@@ -40,11 +40,14 @@ let phase = 'setup';
     for (const width of [390, 1280]) {
       const context = await browser.newContext({ viewport: { width, height: 1000 }, serviceWorkers: 'block' });
       const page = await context.newPage();
-      const errors = [], unexpected = [], readerWrites = [], commentWrites = [], moderationWrites = [], payoutWrites = [];
+      const errors = [], unexpected = [], readerReads = [], readerWrites = [], grantWrites = [], commentWrites = [], moderationWrites = [], payoutWrites = [];
       const readers = [
-        { id: 'synthetic-reader', name: 'Synthetic Reader One', email: 'reader-one@example.invalid', createdAt: '2026-10-01T12:00:00.000Z', status: 'active', revision: 0 },
-        { id: 'synthetic-reader-two', name: 'Synthetic Reader Two', email: 'reader-two@example.invalid', createdAt: '2026-10-02T12:00:00.000Z', status: 'active', revision: 0 },
+        { id: 'user_synthetic_reader_one', name: 'Synthetic Reader One', email: 'reader-one@example.invalid', createdAt: '2026-10-01T12:00:00.000Z', status: 'active', revision: 0 },
+        { id: 'user_synthetic_reader_two', name: 'Synthetic Reader Two', email: 'reader-two@example.invalid', createdAt: '2026-10-02T12:00:00.000Z', status: 'active', revision: 0 },
+        ...Array.from({ length: 24 }, (_, index) => ({ id: `user_synthetic_reader_${index + 3}`, name: `Synthetic Reader ${index + 3}`,
+          email: `reader-${index + 3}@example.invalid`, createdAt: '2026-10-03T12:00:00.000Z', status: 'active', revision: 0 })),
       ];
+      const grants = new Map();
       const comments = [];
       let releasePayout;
       const payoutGate = new Promise(resolve => { releasePayout = resolve; });
@@ -58,15 +61,28 @@ let phase = 'setup';
         if (!url.pathname.startsWith('/api/')) return route.continue();
         const send = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
         if (request.method() === 'GET' && url.pathname === '/api/admin/readers') {
+          readerReads.push(Object.fromEntries(url.searchParams));
+          assert.equal(url.searchParams.get('pageSize'), '25');
           const filtered = url.searchParams.has('email') ? readers.filter(reader => reader.email === url.searchParams.get('email')) : readers;
-          return send({ success: true, directory: { totalReaderAccounts: readers.length, matchingReaderAccounts: filtered.length, readers: filtered, pageSize: 25 } });
+          assert.ok(!url.searchParams.has('cursor') || url.searchParams.get('cursor') === 'synthetic-page-two');
+          const offset = url.searchParams.has('cursor') ? 25 : 0;
+          return send({ success: true, directory: { totalReaderAccounts: readers.length, matchingReaderAccounts: filtered.length,
+            readers: filtered.slice(offset, offset + 25), pageSize: 25, ...(filtered.length > offset + 25 ? { nextCursor: 'synthetic-page-two' } : {}) } });
         }
-        if (request.method() === 'PATCH' && url.pathname === '/api/admin/readers/synthetic-reader/status') {
+        if (request.method() === 'PATCH' && url.pathname === '/api/admin/readers/user_synthetic_reader_one/status') {
           const body = request.postDataJSON(); readerWrites.push(body);
           assert.equal(body.expectedRevision, readers[0].revision);
           assert.ok(['suspended', 'active'].includes(body.status));
           Object.assign(readers[0], { status: body.status, revision: readers[0].revision + 1 });
           return send({ success: true, reader: readers[0], changed: true });
+        }
+        if (request.method() === 'POST' && url.pathname === '/api/admin/readers/user_synthetic_reader_one/piece-access') {
+          const body = request.postDataJSON(); grantWrites.push(body);
+          assert.deepEqual(body, { articleId: 'synthetic-piece' });
+          assert.equal(readers[0].status, 'active');
+          const changed = !grants.has(body.articleId);
+          if (changed) grants.set(body.articleId, { articleId: body.articleId, createdAt: '2026-10-29T12:00:00.000Z' });
+          return send({ success: true, grant: grants.get(body.articleId), changed });
         }
         if (request.method() === 'GET' && url.pathname === '/api/articles/synthetic-piece/comments') return send(comments.filter(comment => comment.status === 'approved'));
         if (request.method() === 'GET' && url.pathname === '/api/articles/synthetic-piece/comments/mine') return send(comments);
@@ -106,9 +122,27 @@ let phase = 'setup';
       await page.goto(origin, { waitUntil: 'networkidle', timeout: 30000 });
       const directory = page.getByTestId('directory-lab');
       await directory.getByText('Synthetic Reader One', { exact: true }).waitFor();
-      assert.equal(await directory.locator('strong').textContent(), '2');
+      assert.equal(await directory.locator('strong').textContent(), '26');
       assert.ok(await directory.getByText('reader-one@example.invalid', { exact: true }).isVisible());
       assert.ok(await directory.getByText('reader-two@example.invalid', { exact: true }).isVisible());
+      assert.equal(await directory.locator('article').count(), 25);
+      assert.equal(readerReads.length, 1, 'No automatic full-directory scan');
+      await directory.getByLabel('Find an exact email address', { exact: true }).fill('reader-one@example.invalid');
+      await directory.getByRole('button', { name: 'Find reader', exact: true }).click();
+      await directory.getByText(/Loaded 1 of 1 matching accounts/).waitFor();
+      assert.equal(await directory.locator('strong').textContent(), '26', 'Filtering preserves the total account count');
+      await directory.getByRole('button', { name: 'Show all', exact: true }).click();
+      await directory.getByText(/Loaded 25 of 26 matching accounts/).waitFor();
+      await directory.getByRole('button', { name: 'Load more accounts', exact: true }).click();
+      await directory.getByText('Synthetic Reader 26', { exact: true }).waitFor();
+      assert.equal(await directory.locator('article').count(), 26);
+      assert.ok(await directory.getByText('Synthetic Reader One', { exact: true }).isVisible(), 'Appending preserves earlier accounts');
+      assert.equal(await directory.getByRole('button', { name: 'Load more accounts', exact: true }).isDisabled(), true);
+      await directory.getByRole('button', { name: 'Refresh accounts', exact: true }).click();
+      await directory.getByText(/Loaded 25 of 26 matching accounts/).waitFor();
+      assert.equal(await directory.locator('article').count(), 25, 'Refresh starts with the first bounded page');
+      await directory.getByRole('button', { name: 'Load more accounts', exact: true }).click();
+      await directory.getByText('Synthetic Reader 26', { exact: true }).waitFor();
       await directory.getByRole('button', { name: 'Suspend account', exact: true }).first().click();
       let dialog = page.getByRole('dialog');
       assert.equal(readerWrites.length, 0);
@@ -120,11 +154,35 @@ let phase = 'setup';
       await dialog.getByRole('button', { name: 'Confirm status change', exact: true }).click();
       await directory.getByRole('status').filter({ hasText: 'Reader suspended' }).waitFor();
       assert.equal(readerWrites.length, 1); assert.equal(readerWrites[0].status, 'suspended');
+      const firstReader = directory.locator('article').filter({ hasText: 'reader-one@example.invalid' });
+      assert.equal(await firstReader.getByRole('button', { name: 'Grant piece access', exact: true }).isDisabled(), true);
       await directory.getByRole('button', { name: 'Reactivate account', exact: true }).click();
       dialog = page.getByRole('dialog'); await dialog.getByRole('checkbox').check();
       await dialog.getByRole('button', { name: 'Confirm status change', exact: true }).click();
       await directory.getByRole('status').filter({ hasText: 'They must sign in again' }).waitFor();
       assert.equal(readerWrites.length, 2); assert.equal(readerWrites[1].expectedRevision, 1);
+      phase = `account_piece_grant_${width}`;
+      await firstReader.getByRole('button', { name: 'Grant piece access', exact: true }).click();
+      dialog = page.getByRole('dialog');
+      assert.ok(await dialog.getByText('reader-one@example.invalid', { exact: true }).isVisible());
+      assert.equal(await dialog.getByRole('button', { name: 'Confirm piece access', exact: true }).isDisabled(), true);
+      assert.equal(await dialog.getByRole('option', { name: 'Synthetic Private Draft', exact: true }).count(), 0);
+      await dialog.getByLabel('Published piece', { exact: true }).selectOption('synthetic-piece');
+      assert.equal(await dialog.getByRole('button', { name: 'Confirm piece access', exact: true }).isDisabled(), true);
+      await dialog.getByRole('checkbox').check();
+      assert.equal(grantWrites.length, 0);
+      await dialog.screenshot({ path: path.join(output, `piece-grant-${width}.png`) });
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click(); assert.equal(grantWrites.length, 0);
+      for (let index = 0; index < 2; index++) {
+        await firstReader.getByRole('button', { name: 'Grant piece access', exact: true }).click();
+        dialog = page.getByRole('dialog');
+        await dialog.getByLabel('Published piece', { exact: true }).selectOption('synthetic-piece');
+        await dialog.getByRole('checkbox').check();
+        await dialog.getByRole('button', { name: 'Confirm piece access', exact: true }).evaluate(button => { button.click(); button.click(); });
+        await directory.getByRole('status').filter({ hasText: index === 0 ? 'account-bound access granted' : 'no duplicate grant was created' }).waitFor();
+        assert.equal(grantWrites.length, index + 1, 'Repeated taps cannot duplicate a request');
+      }
+      assert.equal(grants.size, 1);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.screenshot({ path: path.join(output, `directory-${width}.png`), fullPage: true });
 
@@ -196,7 +254,9 @@ let phase = 'setup';
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.screenshot({ path: path.join(output, `payout-${width}.png`), fullPage: true });
       assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
-      results.push({ width, exactReaderCount: 2, explicitSuspendAndReactivate: true, cancelDoesNotWrite: true,
+      results.push({ width, exactReaderCount: 26, boundedExplicitDirectoryPages: true, appendPreservesEarlierAccounts: true,
+        refreshResetsFirstPage: true, accountBoundPieceGrant: true, explicitGrantConfirmation: true, idempotentRegrant: true,
+        explicitSuspendAndReactivate: true, cancelDoesNotWrite: true,
         sameReaderMultipleComments: true, distinctIntentionalSubmissionIds: true, privatePendingOnly: true,
         explicitWriterPublication: true, secondCommentStillPending: true, payoutCodeAndAcknowledgementRequired: true,
         oneInflightPayoutWrite: true, writerConfirmedReceipt: true, noOverflow: true, errors: 0 });

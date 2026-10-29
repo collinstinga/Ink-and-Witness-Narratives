@@ -12,6 +12,7 @@ import { hashPassword, generateSecureToken } from './auth.js';
 import { resolveWriterIdentityByEmail, resolveWriterIdentityForSessionCreation,
   writerConsolidationSessionAllowed } from './writerIdentityConsolidation.js';
 import { getReaderAccountSessionGeneration, readerAccountSessionAllowed } from './readerAccountAdmin.js';
+import { hasReaderAccountPieceAccess, listReaderAccountPieceAccess } from './readerAccountPieceAccess.js';
 import {
   ImageValidationError,
   sanitizeImageDataUrl,
@@ -3984,10 +3985,14 @@ export const store = {
     const activeSubscriptionPromise = user
       ? preloadedActiveSubscription || subscriptionStore.getActiveReaderSubscription(user.id)
       : Promise.resolve(null);
+    const accountPieceGrantsPromise = user
+      ? listReaderAccountPieceAccess(getDb(), user.id)
+      : Promise.resolve([]);
     if (user) {
       await Promise.all([
         loadReaderLicensesForUser(user),
         manualEntitlementsPromise,
+        accountPieceGrantsPromise,
         activeSubscriptionPromise
       ]);
     }
@@ -4056,6 +4061,14 @@ export const store = {
       }
     }
 
+    for (const grant of await accountPieceGrantsPromise) {
+      const article = publishedArticles.find(piece => piece.id === grant.articleId);
+      if (!article || seenArticles.has(article.id)) continue;
+      seenArticles.add(article.id);
+      results.push({ articleId: article.id, receipt: 'COMPLIMENTARY ACCESS', createdAt: grant.createdAt,
+        expiresAt: 253402300799999, articleTitle: article.title, accessSource: 'MANUAL_GRANT' });
+    }
+
     const activeSubscription = await activeSubscriptionPromise;
     if (activeSubscription) {
       const subscriptionExpiry = Date.parse(activeSubscription.expiresAt);
@@ -4091,6 +4104,8 @@ export const store = {
     if (await subscriptionStore.hasActiveSubscription(user.id)) {
       return true;
     }
+
+    if (await hasReaderAccountPieceAccess(getDb(), user.id, articleId)) return true;
 
     const entitlementArticles = articleId === 'all' ? ['all'] : [articleId, 'all'];
     const entitlementSnapshots = await Promise.all(entitlementArticles.map(entitledArticleId => {

@@ -102,6 +102,7 @@ import { affiliateNotificationWebhookModeEnabled, registerAffiliateNotificationR
 import { registerAffiliateNotificationScheduledRoutes } from "./src/server/affiliateNotificationScheduledRoutes.js";
 import { registerAffiliateFinancialAdjustmentRoutes } from "./src/server/affiliateFinancialAdjustmentRoutes.js";
 import { ReaderAccountAdminError, registerReaderAccountAdminRoutes } from "./src/server/readerAccountAdmin.js";
+import { registerReaderAccountPieceAccessRoutes } from "./src/server/readerAccountPieceAccess.js";
 import { registerAffiliatePayoutStatusRoutes } from "./src/server/affiliatePayoutStatus.js";
 import { registerWriterIdentityConsolidationRoutes } from "./src/server/writerIdentityConsolidationRoutes.js";
 import { registerAffiliateNotificationOwnerOperatorRoutes } from "./src/server/affiliateNotificationOwnerOperatorRoutes.js";
@@ -7143,6 +7144,9 @@ ${currentDraft || prompt}
     rateLimiter: affiliateNotificationRuntimeLimiter, getDb,
   });
   registerReaderAccountAdminRoutes(app, {
+    getDb, requireAdminAuth, writeGuard: publicWriteLimiter,
+  });
+  registerReaderAccountPieceAccessRoutes(app, {
     getDb, requireAdminAuth, writeGuard: publicWriteLimiter,
   });
   registerAffiliatePayoutStatusRoutes(app, {

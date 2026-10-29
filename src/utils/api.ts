@@ -2968,6 +2968,25 @@ export const api = {
     }, 'Account status was not confirmed. Refresh the directory before trying again.');
   },
 
+  async grantReaderAccountPieceAccess(userId: string, request: { articleId: string }): Promise<{
+    success: true; grant: { articleId: string; createdAt: string }; changed: boolean;
+  }> {
+    if (typeof userId !== 'string' || !/^user_[A-Za-z0-9_-]{8,120}$/.test(userId)) {
+      throw new Error('Choose a valid registered reader account.');
+    }
+    const articleId = request?.articleId;
+    if (typeof articleId !== 'string' || articleId === 'all' || articleId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(articleId)) {
+      throw new Error('Choose a valid piece for this reader.');
+    }
+    // The account is selected in the route, not a caller-supplied email/phone.
+    // Pick the single writable field: never forward an arbitrary request object.
+    return safeFetchJson(`/api/admin/readers/${encodeURIComponent(userId)}/piece-access`, {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'x-admin-token': getWriterToken() || '' },
+      body: JSON.stringify({ articleId }),
+    }, 'Piece access was not confirmed. Refresh the reader account before retrying; no automatic retry was sent.');
+  },
+
   async getWriterAccountSecurity(options: { signal?: AbortSignal } = {}): Promise<{
     success: true; security: WriterAccountSecurityStatus;
   }> {

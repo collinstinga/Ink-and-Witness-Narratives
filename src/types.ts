@@ -2065,6 +2065,12 @@ export interface ReaderAccountAdminPage {
   pageSize: number;
 }
 
+/** Complimentary access belongs to this reader account, not a phone or sale. */
+export interface ReaderAccountPieceAccessGrant {
+  articleId: string;
+  createdAt: string;
+}
+
 export interface AuthSession {
   storageVersion: 2;
   userId: string;

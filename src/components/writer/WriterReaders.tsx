@@ -256,7 +256,7 @@ export const WriterReaders: React.FC<WriterReadersProps> = ({ articles }) => {
   return (
     <div id="writer-readers-view" className="space-y-8">
       <Suspense fallback={<p role="status" className="text-slate-400">Loading reader account controls…</p>}>
-        <ReaderAccountDirectory />
+        <ReaderAccountDirectory articles={articles} />
       </Suspense>
       
       {/* Header */}

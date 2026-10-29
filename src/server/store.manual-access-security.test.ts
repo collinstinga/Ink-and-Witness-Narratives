@@ -10,6 +10,7 @@ import {
 } from './manualAccessSecurity.js';
 import { getAuthSessionDocumentId } from './sessionSecurity.js';
 import { readerAccountSecurityId } from './readerAccountAdmin.js';
+import { grantReaderAccountPieceAccess } from './readerAccountPieceAccess.js';
 
 type FakeRef = {
   collectionName: string;
@@ -361,6 +362,8 @@ describe('single-use manual access transactions', () => {
         || key.startsWith('sessions/')
         || key.startsWith('active_reader_sessions/')
         || key.startsWith('users/')
+        || key.startsWith('reader_piece_access/')
+        || key.startsWith('reader_piece_access_audit/')
       ) {
         firestoreMock.documents.delete(key);
       }
@@ -421,6 +424,37 @@ describe('single-use manual access transactions', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it('makes a writer account-bound piece grant readable and visible in the library without creating a sale or bearer', async () => {
+    const writer = { ...users[0], id: 'user_direct_writer001', role: 'admin', email: 'direct-writer@example.test' };
+    const reader = { ...users[0], id: 'user_direct_reader001', role: 'client', email: 'direct-reader@example.test' };
+    const another = { ...reader, id: 'user_direct_reader002' };
+    for (const user of [writer, reader, another]) firestoreMock.documents.set(`users/${user.id}`, clone(user));
+    firestoreMock.documents.set(`articles/${articles[0].id}`, clone(articles[0]));
+    const originalRows = clone([...firestoreMock.documents]);
+    const granted = await grantReaderAccountPieceAccess(db as any, writer, reader.id, { articleId: articles[0].id });
+    expect(granted.changed).toBe(true);
+    await expect(store.isArticlePurchasedByUser(articles[0].id, reader)).resolves.toBe(true);
+    await expect(store.isArticlePurchasedByUser(articles[1].id, reader)).resolves.toBe(false);
+    // Even the same email cannot transfer a grant to another account ID.
+    await expect(store.isArticlePurchasedByUser(articles[0].id, another)).resolves.toBe(false);
+    const userLookup = vi.spyOn(store, 'getUserById').mockReturnValue(reader as any);
+    try {
+      const library = await store.getUserPurchases(reader.id);
+      expect(library).toContainEqual(expect.objectContaining({ articleId: articles[0].id,
+        accessSource: 'MANUAL_GRANT', receipt: 'COMPLIMENTARY ACCESS' }));
+      expect(library.find(piece => piece.articleId === articles[0].id)).not.toHaveProperty('token');
+      expect(library.filter(piece => piece.articleId === articles[0].id)).toHaveLength(1);
+    } finally { userLookup.mockRestore(); }
+    for (const [key, value] of originalRows) expect(firestoreMock.documents.get(key)).toEqual(value);
+    const additions = [...firestoreMock.documents.keys()].filter(key => !originalRows.some(([old]) => old === key));
+    expect(additions).toHaveLength(2);
+    expect(additions.every(key => key.startsWith('reader_piece_access/') || key.startsWith('reader_piece_access_audit/'))).toBe(true);
+    const writes = firestoreMock.transactionWrites.mock.calls.length;
+    await expect(grantReaderAccountPieceAccess(db as any, writer, reader.id, { articleId: articles[0].id }))
+      .resolves.toMatchObject({ changed: false });
+    expect(firestoreMock.transactionWrites).toHaveBeenCalledTimes(writes);
   });
 
   it('binds one phone/piece grant to one account, consumes its code, and allows another piece', async () => {
