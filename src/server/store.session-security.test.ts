@@ -9,8 +9,8 @@ vi.mock('./writerIdentityConsolidation.js', () => ({
 type MockDocumentRef = {
   collectionName: string;
   id: string;
-  get: ReturnType<typeof vi.fn>;
-  delete: ReturnType<typeof vi.fn>;
+  get: () => Promise<{ exists: boolean; data: () => unknown }>;
+  delete: () => Promise<void>;
 };
 
 const dbMocks = vi.hoisted(() => {

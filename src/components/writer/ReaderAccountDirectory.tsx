@@ -91,7 +91,7 @@ export const ReaderAccountDirectory: React.FC = () => {
     {selected ? <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="reader-status-confirm-title" onKeyDown={event => {
       if (event.key === 'Escape' && !saving) { event.preventDefault(); setSelected(null); }
       if (event.key === 'Tab') {
-        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled])'));
+        const controls = Array.from((event.currentTarget as HTMLDivElement).querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled])'));
         const first = controls[0]; const last = controls[controls.length - 1];
         if (!first) { event.preventDefault(); return; }
         if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last.focus(); }

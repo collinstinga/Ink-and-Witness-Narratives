@@ -13,6 +13,8 @@ export function validateWriterPayoutConfirmation(action: WriterPayoutAction, ref
 }
 
 interface Props {
+  /** Reserved React identity; consumed by React, not received by this component. */
+  key?: string;
   payout: AffiliatePayoutRequest;
   onProcess: (action: WriterPayoutAction, paymentReference?: string, notes?: string) => Promise<void>;
   onCancel: () => void;

@@ -37,6 +37,8 @@ export function ReaderCommentList({ comments, privateView = false }: { comments:
 }
 
 export function ReaderComments({ articleId, readerId, canComment, onSignIn }: {
+  /** Reserved React identity; consumed by React, not received by this component. */
+  key?: string;
   articleId: string;
   readerId?: string;
   canComment: boolean;
