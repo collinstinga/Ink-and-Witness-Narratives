@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   process.env.NODE_ENV = 'test';
+  // Exercise the deployed API path without creating a development Vite watcher
+  // for every isolated app. All persistence and email services remain mocked.
+  process.env.VERCEL = '1';
   process.env.SESSION_SIGNING_SECRET = 'password-reset-route-test-secret-with-32-plus-characters';
   delete process.env.PUBLIC_BASE_URL;
   delete process.env.APP_BASE_URL;
