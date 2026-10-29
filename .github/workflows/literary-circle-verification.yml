@@ -78,6 +78,18 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/qa/reader-controls.cjs 2>&1 | tee data/ci-browser-qa/reader-controls.log
+      - name: Verify reader password reset with synthetic services only
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && steps.browser_setup.conclusion == 'success' }}
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          node scripts/qa/reader-password-reset.cjs 2>&1 | tee data/ci-browser-qa/reader-password-reset.log
+      - name: Verify simple partner email on mobile and desktop with synthetic services only
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && steps.browser_setup.conclusion == 'success' }}
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          node scripts/qa/partner-email.cjs 2>&1 | tee data/ci-browser-qa/partner-email.log
       - name: Preserve synthetic browser proof and failure diagnostics
         if: ${{ !cancelled() && steps.browser_setup.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
@@ -96,3 +108,7 @@ jobs:
             data/chapter-books-qa/*.png
             data/reader-controls-qa/*.json
             data/reader-controls-qa/*.png
+            data/reader-password-reset-qa/*.json
+            data/reader-password-reset-qa/*.png
+            data/partner-email-qa/*.json
+            data/partner-email-qa/*.png

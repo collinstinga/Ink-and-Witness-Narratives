@@ -495,6 +495,7 @@ export function WriterReaderExperience({ articles }: { articles: Article[] }) {
 
       <section className="rounded-2xl border border-slate-800 bg-[#0b1120] p-5">
         <div className="mb-4 flex items-center gap-2"><BookMarked className="h-4 w-4 text-amber-400" /><h2 className="font-serif text-lg font-bold text-white">Verified Reviews &amp; Public Testimonials</h2></div>
+        <p className="mb-4 text-xs leading-relaxed text-slate-400">The latest 250 responses are shown. Readers may leave several independent responses; each has its own publication decision. Their latest rating contributes only one vote per reader and piece. Publish makes a response public before purchase; Feature also places it among curated testimonials.</p>
         <div className="space-y-3">
           {reviews.length === 0 && <p className="text-xs text-slate-500">No verified reader reviews yet.</p>}
           {reviews.map(review => {

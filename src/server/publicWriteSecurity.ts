@@ -310,6 +310,12 @@ export const publicWriteValidators = {
     submissionId: { kind: 'string', minLength: 16, maxLength: 80, pattern: /^[A-Za-z0-9_-]{16,80}$/, normalize: 'trim' }
   }, { maxBytes: 8_192 }),
 
+  review: validateJsonBody({
+    rating: { kind: 'number', required: true, min: 1, max: 5, integer: true },
+    review: { kind: 'string', required: true, minLength: 10, maxLength: 2_000, normalize: 'trim' },
+    submissionId: { kind: 'string', minLength: 16, maxLength: 80, pattern: /^[A-Za-z0-9_-]{16,80}$/, normalize: 'trim' }
+  }, { maxBytes: 8_192 }),
+
   commentReport: validateJsonBody({
     reason: { kind: 'string', maxLength: 500, normalize: 'trim' }
   }, { maxBytes: 2_048 }),

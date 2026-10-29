@@ -40,7 +40,13 @@ let phase = 'setup';
     for (const width of [390, 1280]) {
       const context = await browser.newContext({ viewport: { width, height: 1000 }, serviceWorkers: 'block' });
       const page = await context.newPage();
-      const errors = [], unexpected = [], readerReads = [], readerWrites = [], grantWrites = [], commentWrites = [], moderationWrites = [], payoutWrites = [];
+      const errors = [], unexpected = [], readerReads = [], readerWrites = [], grantWrites = [], commentWrites = [], moderationWrites = [], payoutWrites = [], reviewWrites = [];
+      let ownCommentReads = 0, ambiguousReview = true;
+      const approvedReview = { id: 'synthetic-legacy-approved', articleId: 'synthetic-piece', rating: 5,
+        review: 'Previously approved original response.', status: 'approved', featured: true, verifiedReader: true,
+        createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' };
+      const originalApprovedReview = structuredClone(approvedReview);
+      const reviewRecords = new Map([[approvedReview.id, approvedReview]]);
       const readers = [
         { id: 'user_synthetic_reader_one', name: 'Synthetic Reader One', email: 'reader-one@example.invalid', createdAt: '2026-10-01T12:00:00.000Z', status: 'active', revision: 0 },
         { id: 'user_synthetic_reader_two', name: 'Synthetic Reader Two', email: 'reader-two@example.invalid', createdAt: '2026-10-02T12:00:00.000Z', status: 'active', revision: 0 },
@@ -85,7 +91,25 @@ let phase = 'setup';
           return send({ success: true, grant: grants.get(body.articleId), changed });
         }
         if (request.method() === 'GET' && url.pathname === '/api/articles/synthetic-piece/comments') return send(comments.filter(comment => comment.status === 'approved'));
-        if (request.method() === 'GET' && url.pathname === '/api/articles/synthetic-piece/comments/mine') return send(comments);
+        if (request.method() === 'GET' && url.pathname === '/api/articles/synthetic-piece/comments/mine') { ownCommentReads++; return send(comments); }
+        if (request.method() === 'GET' && url.pathname === '/api/pieces/synthetic-piece/social-proof') {
+          return send({ articleId: 'synthetic-piece', reactionCounts: { this_hurt: 0, felt_seen: 0, beautiful: 0, reread: 0, damn: 0 },
+            verifiedReviewCount: 1, averageRating: 5, completedReadCount: 1, purchaseCount: 1, viewCount: 2,
+            testimonials: [approvedReview], reviews: [...reviewRecords.values(), {
+              ...approvedReview, id: 'synthetic-hidden', status: 'hidden', review: 'PRIVATE HIDDEN REVIEW NEVER PUBLIC',
+            }, { ...approvedReview, id: 'synthetic-pending', status: 'pending', review: 'PRIVATE PENDING REVIEW NEVER PUBLIC' }],
+          });
+        }
+        if (request.method() === 'POST' && url.pathname === '/api/pieces/synthetic-piece/reviews') {
+          const body = request.postDataJSON(); reviewWrites.push(body);
+          assert.deepEqual(Object.keys(body).sort(), ['rating', 'review', 'submissionId']);
+          assert.match(body.submissionId, /^[A-Za-z0-9_-]{16,80}$/);
+          const id = `synthetic-response-${body.submissionId}`;
+          if (!reviewRecords.has(id)) reviewRecords.set(id, { ...approvedReview, id, rating: body.rating, review: body.review,
+            status: 'pending', featured: false, createdAt: '2026-10-29T12:00:00.000Z', updatedAt: '2026-10-29T12:00:00.000Z' });
+          if (ambiguousReview) { ambiguousReview = false; return send({ error: 'Synthetic uncertain review response. Retry the same response.' }, 503); }
+          return send({ success: true, review: reviewRecords.get(id), message: 'Your verified response awaits writer approval.' }, 201);
+        }
         if (request.method() === 'POST' && url.pathname === '/api/articles/synthetic-piece/comments') {
           const body = request.postDataJSON(); commentWrites.push(body);
           assert.deepEqual(Object.keys(body).sort(), ['content', 'submissionId']);
@@ -221,6 +245,52 @@ let phase = 'setup';
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.screenshot({ path: path.join(output, `comments-${width}.png`), fullPage: true });
 
+      phase = `locked_public_discussion_${width}`;
+      const ownReadsBeforeLocked = ownCommentReads;
+      await page.getByRole('button', { name: 'Locked public reader lab', exact: true }).click();
+      const modal = page.locator('#article-reader-modal');
+      const publicDiscussion = modal.getByRole('region', { name: 'Reader responses before purchase', exact: true });
+      await publicDiscussion.getByText('Previously approved original response.', { exact: false }).waitFor();
+      await publicDiscussion.getByText('A repeated but intentional synthetic thought.', { exact: true }).waitFor();
+      assert.equal(ownCommentReads, ownReadsBeforeLocked, 'Anonymous locked reader must not request private pending history');
+      assert.equal(await modal.locator('#reader-comment-input, #reader-review-text, .protected-reader-content').count(), 0);
+      assert.equal(await modal.getByText(/PRIVATE HIDDEN REVIEW|PRIVATE PENDING REVIEW/).count(), 0);
+      assert.equal(await modal.getByText(/Awaiting writer approval/).count(), 0);
+      assert.equal(await modal.evaluate(element => {
+        const discussion = element.querySelector('[aria-label="Reader responses before purchase"]');
+        const paywall = element.querySelector('#paywall-unlock-modal-btn');
+        return Boolean(discussion && paywall && (discussion.compareDocumentPosition(paywall) & Node.DOCUMENT_POSITION_FOLLOWING));
+      }), true, 'Approved discussion precedes purchase without unlocking content');
+      await page.screenshot({ path: path.join(output, `locked-discussion-${width}.png`), fullPage: true });
+      await modal.getByRole('button', { name: 'Close reader', exact: true }).click();
+
+      phase = `multiple_verified_reviews_${width}`;
+      const reviewLab = page.getByTestId('verified-review-lab');
+      await reviewLab.getByText('Previously approved original response.', { exact: false }).waitFor();
+      const reviewText = 'A fresh independent synthetic response.';
+      await reviewLab.getByLabel('Your review or testimonial', { exact: true }).fill(reviewText);
+      await reviewLab.getByRole('form', { name: 'Submit a verified reader response', exact: true }).evaluate(form => {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      });
+      await reviewLab.getByRole('status').filter({ hasText: 'Synthetic uncertain review response' }).waitFor();
+      assert.equal(reviewWrites.length, 1, 'Repeated taps send only one review attempt');
+      await reviewLab.getByRole('button', { name: 'Submit Review', exact: true }).click();
+      await reviewLab.getByRole('status').filter({ hasText: 'without replacing your previous review' }).waitFor();
+      assert.equal(reviewWrites.length, 2); assert.deepEqual(reviewWrites[0], reviewWrites[1], 'An ambiguous retry preserves the exact intent');
+      await reviewLab.getByLabel('Your review or testimonial', { exact: true }).fill(reviewText);
+      await reviewLab.getByRole('button', { name: 'Submit Review', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('#reader-review-text')?.value === '');
+      assert.equal(reviewWrites.length, 3);
+      assert.notEqual(reviewWrites[2].submissionId, reviewWrites[0].submissionId, 'A deliberate next response gets a new intent');
+      assert.equal(reviewRecords.size, 3, 'Two independent pending responses plus the preserved original');
+      assert.deepEqual(reviewRecords.get(approvedReview.id), originalApprovedReview);
+      assert.equal([...reviewRecords.values()].filter(review => review.status === 'pending').length, 2);
+      assert.equal(await reviewLab.getByText(reviewText, { exact: false }).count(), 0, 'Pending response text is not public proof');
+      assert.equal(await reviewLab.getByText(/PRIVATE HIDDEN REVIEW|PRIVATE PENDING REVIEW/).count(), 0);
+      assert.equal(await reviewLab.getByText('Previously approved original response.', { exact: false }).count(), 1);
+      await page.screenshot({ path: path.join(output, `multiple-reviews-${width}.png`), fullPage: true });
+
       phase = `offsite_payout_confirmation_${width}`;
       await page.getByRole('button', { name: 'Off-site payout lab', exact: true }).click();
       const payout = page.getByTestId('payout-lab');
@@ -259,6 +329,8 @@ let phase = 'setup';
         explicitSuspendAndReactivate: true, cancelDoesNotWrite: true,
         sameReaderMultipleComments: true, distinctIntentionalSubmissionIds: true, privatePendingOnly: true,
         explicitWriterPublication: true, secondCommentStillPending: true, payoutCodeAndAcknowledgementRequired: true,
+        publicApprovedDiscussionBeforePurchase: true, noLockedPrivateHistoryOrWriteForm: true,
+        repeatedReviewTapFenced: true, exactReviewIntentRetry: true, multipleIndependentPendingReviews: true, priorApprovedReviewPreserved: true,
         oneInflightPayoutWrite: true, writerConfirmedReceipt: true, noOverflow: true, errors: 0 });
       await context.close();
     }

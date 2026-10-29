@@ -71,6 +71,8 @@ import {
 } from '../types.js';
 import { clearReferral, getActiveReferral } from './affiliateReferral.js';
 import { validAffiliatePayoutStatusIds, type AffiliatePayoutStatusItem } from './affiliateDashboardRefresh.js';
+import type { AffiliatePartnerEmailInput, AffiliatePartnerEmailOverview, AffiliatePartnerEmailPreview,
+  AffiliatePartnerEmailCampaign, AffiliatePartnerEmailStep } from '../types/affiliatePartnerEmail.js';
 
 // Safe Writer Studio security DTOs deliberately contain no account IDs,
 // recovery capabilities, backup locations, password hashes or provider receipts.
@@ -1146,7 +1148,7 @@ export const api = {
     );
   },
 
-  async savePieceReview(articleId: string, rating: number, review: string): Promise<{
+  async savePieceReview(articleId: string, rating: number, review: string, submissionId?: string): Promise<{
     success: true;
     review: PieceReview;
     message: string;
@@ -1156,7 +1158,8 @@ export const api = {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating, review })
+        cache: 'no-store',
+        body: JSON.stringify({ rating, review, ...(submissionId ? { submissionId } : {}) })
       },
       'Review could not be saved.'
     );
@@ -2854,6 +2857,33 @@ export const api = {
       },
       'Failed to load Literary Circle promotional resources.'
     );
+  },
+
+  async getAdminAffiliateEmailOverview(options: { signal?: AbortSignal } = {}): Promise<AffiliatePartnerEmailOverview> {
+    return safeFetchJson('/api/admin/affiliates/email', {
+      cache: 'no-store', signal: options.signal, headers: getAdminHeaders(),
+    }, 'Partner email history could not be loaded.');
+  },
+
+  async previewAdminAffiliateEmail(input: AffiliatePartnerEmailInput): Promise<AffiliatePartnerEmailPreview> {
+    return safeFetchJson('/api/admin/affiliates/email/preview', {
+      method: 'POST', cache: 'no-store', headers: getAdminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(input),
+    }, 'The email audience could not be checked.');
+  },
+
+  async createAdminAffiliateEmail(input: AffiliatePartnerEmailInput & { requestId: string }): Promise<{ campaign: AffiliatePartnerEmailCampaign }> {
+    return safeFetchJson('/api/admin/affiliates/email/campaigns', {
+      method: 'POST', cache: 'no-store', headers: getAdminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(input),
+    }, 'The email draft could not be confirmed. Refresh delivery history before retrying.');
+  },
+
+  async sendAdminAffiliateEmail(id: string): Promise<AffiliatePartnerEmailStep> {
+    return safeFetchJson(`/api/admin/affiliates/email/campaigns/${encodeURIComponent(id)}/send`, {
+      method: 'POST', cache: 'no-store', headers: getAdminHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({}),
+    }, 'Email sending could not be confirmed. Refresh delivery history before continuing.');
   },
 
   async getAdminAffiliateNotificationSettings(): Promise<{

@@ -176,7 +176,7 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
         'Use Save draft first and Send test to a controlled recipient before reviewing the real audience and explicitly choosing Send newsletter.',
         'For an interrupted campaign, use its Resume delivery checkpoint instead of creating a duplicate campaign. Release emails are sent only when explicitly selected during publishing.',
       ],
-      notes: ['Reader opt-in and unsubscribe preferences remain authoritative. A draft or preview does not prove delivery; inspect campaign results. Partner Notifications is a separate system with its own delivery gate.'],
+      notes: ['Reader opt-in and unsubscribe preferences remain authoritative. A draft or preview does not prove delivery; inspect campaign results. Partner email has a separate affiliate audience. Automated Partner Notifications retain their own delivery gate.'],
     },
     {
       id: 'circle-membership',
@@ -258,12 +258,27 @@ export const WRITER_PORTAL_GUIDE: PortalGuideDefinition = {
       ],
     },
     {
+      id: 'partner-email',
+      title: 'Send a straightforward email to your partners',
+      summary: 'Choose the audience, write a subject and message, preview recipients, then send.',
+      keywords: ['partner email', 'affiliate', 'compose', 'message', 'send', 'recipients', 'history'],
+      steps: [
+        'Open Affiliates Control → Partner email. Select All eligible partners, or Choose individual partners and tick the names you need.',
+        'Enter the subject and message. The email preview appears beside the editor. Select Preview recipients to check how many partners qualify; no email is sent by this step.',
+        'Select Send partner email and confirm. The system sends individual messages in small batches. Only approved, active partners with accepted terms and announcement consent qualify; eligibility is checked again when sending.',
+        'Inspect Delivery history for accepted, failed, skipped or uncertain results. Provider acceptance does not guarantee inbox delivery. If sending pauses, choose Continue sending on that existing message; completed emails are not sent again.',
+        'After an uncertain response, refresh history before taking another action. A new message is a new campaign; do not create another copy to retry the existing one.',
+        'Advanced automated notifications are optional and separate. You do not need to prepare automated event templates or approve an automation review to send a manual partner email.',
+      ],
+      notes: ['Partners manage announcement consent in their dashboard. Reader Email Terminal subscribers remain a separate audience.'],
+    },
+    {
       id: 'partner-notifications',
       title: 'Distinguish partner notification previews from live delivery',
       summary: 'Saved notification templates do not mean automated emails are active.',
       keywords: ['partner notifications', 'automation', 'preview_only', 'delivery', 'inactivity', 'consent', 'pause'],
       steps: [
-        'Open Affiliates Control → Partner Notifications to review event templates, timing, eligibility and the delivery-mode/status notices.',
+        'Open Affiliates Control → Partner email → Show advanced automated notifications to review event templates, timing, eligibility and the delivery-mode/status notices.',
         'Use the preview and eligibility controls to inspect the intended message. Save preview settings stores configuration; it does not itself send or queue mail.',
         'Open Production notification review to inspect server mode and review expiry. When available, approve an explicit time-limited owner-only test review, then separately confirm its one controlled test. Refresh for the signed delivered receipt; provider acceptance alone is not delivery.',
         'A live review additionally requires the verified owner-test receipt and separately configured server gates. Review approval itself sends nothing. Prepare holds eligible records; Dispatch requires its own confirmation. Pause the production review to stop subsequent authorization. Changing saved templates requires a renewed review of that exact revision.',

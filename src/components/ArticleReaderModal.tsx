@@ -42,7 +42,6 @@ import {
   AlertCircle,
   Unlock,
   Shield,
-  Star,
   Music2,
   Bell,
   Highlighter
@@ -61,6 +60,7 @@ import { SafeMarkdown } from './common/SafeMarkdown.js';
 import { ArticleCard } from './ArticleCard.js';
 import { BookChapterNavigation } from './BookChapterNavigation.js';
 import { ReaderComments } from './ReaderComments.js';
+import { PublicReaderProof, ReaderReviewForm } from './ReaderReviews.js';
 import type { ChapterBookContext } from '../utils/bookCatalogue.js';
 
 const EMPTY_ARTICLES: Article[] = [];
@@ -239,10 +239,9 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   const [socialProof, setSocialProof] = useState<PieceSocialProof | null>(null);
   const [socialLoading, setSocialLoading] = useState(false);
   const [reactionSaving, setReactionSaving] = useState(false);
-  const [reviewRating, setReviewRating] = useState(5);
-  const [reviewText, setReviewText] = useState('');
-  const [reviewSaving, setReviewSaving] = useState(false);
-  const [reviewNotice, setReviewNotice] = useState('');
+  const socialProofRequestRef = useRef(0);
+  const socialProofArticleRef = useRef(article?.id);
+  socialProofArticleRef.current = article?.id;
   const [selectionDraft, setSelectionDraft] = useState<{
     blockId: string;
     startOffset: number;
@@ -501,19 +500,24 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
   }, [article?.content]);
 
   const refreshSocialProof = async (articleId: string) => {
+    if (articleId !== socialProofArticleRef.current) return;
+    const request = ++socialProofRequestRef.current;
     setSocialLoading(true);
+    setSocialProof(null);
     try {
-      setSocialProof(await api.getPieceSocialProof(articleId));
+      const result = await api.getPieceSocialProof(articleId);
+      if (request === socialProofRequestRef.current) setSocialProof(result);
     } catch {
-      setSocialProof(null);
+      if (request === socialProofRequestRef.current) setSocialProof(null);
     } finally {
-      setSocialLoading(false);
+      if (request === socialProofRequestRef.current) setSocialLoading(false);
     }
   };
 
   useEffect(() => {
     if (!isOpen || !article?.id) return;
     void refreshSocialProof(article.id);
+    return () => { socialProofRequestRef.current += 1; };
   }, [isOpen, article?.id, currentUser?.id]);
 
   useEffect(() => {
@@ -745,24 +749,6 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
       showToast(error?.message || 'Reaction could not be saved.');
     } finally {
       setReactionSaving(false);
-    }
-  };
-
-  const handleReviewSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!article) return;
-    setReviewSaving(true);
-    setReviewNotice('');
-    try {
-      const result = await api.savePieceReview(article.id, reviewRating, reviewText);
-      setReviewText('');
-      setReviewNotice(result.message);
-      await refreshSocialProof(article.id);
-    } catch (error: any) {
-      if (isReaderAuthError(error)) onOpenAuth?.('signin');
-      setReviewNotice(error?.message || 'Review could not be saved.');
-    } finally {
-      setReviewSaving(false);
     }
   };
 
@@ -1672,6 +1658,12 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
           )}
 
           {/* Article Body Content */}
+          {!effectiveUnlocked && <section aria-label="Reader responses before purchase" className="my-6 space-y-5 rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 sm:p-7">
+            <h4 className="font-display text-xl font-bold text-white">What readers say</h4>
+            <PublicReaderProof articleId={article.id} socialProof={socialProof} loading={socialLoading} />
+            <ReaderComments key={`${article.id}:${currentUser?.id || 'guest'}:public`} articleId={article.id} canComment={false} compact />
+            <p className="text-xs text-slate-400">Approved responses are public before purchase. Sign in, unlock and read the piece to submit your own verified response.</p>
+          </section>}
           <div className={`prose-editorial ${fontSizeClass} text-slate-200 space-y-6 max-w-none`}>
             <div className="space-y-6">
               {effectiveUnlocked && article.content ? (
@@ -2256,7 +2248,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
             </div>
           </div>
 
-          <section className="my-10 space-y-5 rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 sm:p-7" aria-labelledby="reader-response-title">
+          {effectiveUnlocked && <section className="my-10 space-y-5 rounded-3xl border border-slate-700/80 bg-slate-900/70 p-5 sm:p-7" aria-labelledby="reader-response-title">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-400">Reader response</p>
@@ -2273,21 +2265,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
               </button>
             </div>
 
-            {socialProof && (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {[
-                  ['Purchased', socialProof.purchaseCount],
-                  ['Views', socialProof.viewCount],
-                  ['Completed reads', socialProof.completedReadCount],
-                  ['Verified reviews', socialProof.verifiedReviewCount]
-                ].map(([label, value]) => (
-                  <div key={String(label)} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-center">
-                    <p className="font-display text-xl font-bold text-white">{Number(value).toLocaleString()}</p>
-                    <p className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{String(label)}</p>
-                  </div>
-                ))}
-              </div>
-            )}
+            <PublicReaderProof articleId={article.id} socialProof={socialProof} loading={socialLoading} />
 
             {effectiveUnlocked && (
               <div>
@@ -2313,58 +2291,9 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
               </div>
             )}
 
-            {socialProof && socialProof.verifiedReviewCount > 0 && (
-              <div className="space-y-3 border-t border-slate-800 pt-5">
-                <div className="flex items-center gap-2 text-sm text-amber-300">
-                  <Star className="h-4 w-4 fill-amber-400" />
-                  <span className="font-bold">{socialProof.averageRating.toFixed(1)} / 5</span>
-                  <span className="text-xs text-slate-500">from verified readers</span>
-                </div>
-                {socialProof.testimonials.length > 0 && (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {socialProof.testimonials.map(testimonial => (
-                      <blockquote key={testimonial.id} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
-                        <div className="mb-2 text-xs text-amber-400">{'★'.repeat(testimonial.rating)}{'☆'.repeat(5 - testimonial.rating)}</div>
-                        <p className="font-serif text-sm italic leading-relaxed text-slate-200">“{testimonial.review}”</p>
-                        <footer className="mt-2 text-[10px] font-mono uppercase tracking-wider text-emerald-400">Verified reader</footer>
-                      </blockquote>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
             {effectiveUnlocked && currentUser?.role === 'client' && (
-              <form onSubmit={handleReviewSubmit} className="space-y-3 border-t border-slate-800 pt-5">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-white">Leave a verified review</p>
-                    <p className="text-[11px] text-slate-500">Available after 80% reading progress. The writer decides which written testimonials appear publicly.</p>
-                  </div>
-                  <label className="flex items-center gap-2 text-xs text-slate-400">
-                    Rating
-                    <select value={reviewRating} onChange={event => setReviewRating(Number(event.target.value))} className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-amber-300">
-                      {[5, 4, 3, 2, 1].map(value => <option key={value} value={value}>{value} / 5</option>)}
-                    </select>
-                  </label>
-                </div>
-                <textarea
-                  value={reviewText}
-                  onChange={event => setReviewText(event.target.value)}
-                  minLength={10}
-                  maxLength={2000}
-                  rows={3}
-                  placeholder={readingProgress && (readingProgress.furthestPercent ?? readingProgress.percent) >= 80 ? 'Share what stayed with you…' : 'Continue reading to 80% to leave a review.'}
-                  disabled={!readingProgress || (readingProgress.furthestPercent ?? readingProgress.percent) < 80 || reviewSaving}
-                  className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-500 disabled:opacity-50"
-                />
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs text-slate-400" role="status">{reviewNotice}</p>
-                  <button type="submit" disabled={reviewSaving || reviewText.trim().length < 10 || !readingProgress || (readingProgress.furthestPercent ?? readingProgress.percent) < 80} className="rounded-xl bg-sky-600 px-4 py-2 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-50">
-                    {reviewSaving ? 'Saving…' : 'Submit Review'}
-                  </button>
-                </div>
-              </form>
+              <ReaderReviewForm key={`${article.id}:${currentUser.id}`} articleId={article.id} progressPercent={readingProgress?.furthestPercent ?? readingProgress?.percent ?? 0}
+                onSaved={() => { void refreshSocialProof(article.id); }} onSignIn={() => onOpenAuth?.('signin')} />
             )}
 
             <ReaderComments
@@ -2376,7 +2305,7 @@ export const ArticleReaderModal: React.FC<ArticleReaderModalProps> = ({
             />
 
             {socialLoading && <p className="text-xs text-slate-500">Loading reader responses…</p>}
-          </section>
+          </section>}
 
           {chapterBook && onReadArticle && (
             <BookChapterNavigation context={chapterBook} articleId={article.id} onReadArticle={onReadArticle} />

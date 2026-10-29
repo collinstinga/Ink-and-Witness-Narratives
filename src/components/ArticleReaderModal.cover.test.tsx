@@ -59,6 +59,19 @@ describe('article reader cover', () => {
     expect(renderReader(false)).not.toContain('id="reader-unlocked-cover"');
   });
 
+  it('shows public discussion before the locked purchase form without enabling private response writes', () => {
+    vi.stubGlobal('localStorage', { getItem: () => null });
+    const markup = renderReader(false);
+    expect(markup).toContain('Reader responses before purchase');
+    expect(markup).toContain('Verified reader reviews');
+    expect(markup).toContain('Reader comments');
+    expect(markup.indexOf('Reader responses before purchase')).toBeLessThan(markup.indexOf('paywall-unlock-modal-btn'));
+    expect(markup.match(/id="reader-comments-title"/g)).toHaveLength(1);
+    expect(markup).not.toContain('id="reader-comment-input"');
+    expect(markup).not.toContain('id="reader-review-text"');
+    expect(markup).not.toContain('protected-reader-content');
+  });
+
   it('hides estimated reading time when the writer disables it for a piece', () => {
     vi.stubGlobal('localStorage', { getItem: () => null });
     expect(renderReader(false, { ...article, showReadTime: false })).not.toContain('min read');

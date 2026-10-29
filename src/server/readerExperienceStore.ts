@@ -16,6 +16,7 @@ const PROFILE_COLLECTION = 'reader_profiles';
 const SOCIAL_COLLECTION = 'piece_social';
 const REACTION_COLLECTION = 'reader_piece_reactions';
 const REVIEW_COLLECTION = 'piece_reviews';
+const REVIEW_RATING_COLLECTION = 'reader_piece_review_ratings';
 const COLLECTIONS_COLLECTION = 'content_collections';
 const BUNDLES_COLLECTION = 'content_bundles';
 const MAX_PROGRESS_ITEMS = 100;
@@ -102,22 +103,22 @@ function emptyReactionCounts(): Record<ReaderReactionType, number> {
   };
 }
 
-function publicTestimonials(reviews: StoredReview[]): PieceReview[] {
+function reviewResponse(review: StoredReview): PieceReview {
+  return { id: review.id, articleId: review.articleId, rating: review.rating, review: review.review,
+    status: review.status, featured: review.featured === true, verifiedReader: true,
+    createdAt: review.createdAt, updatedAt: review.updatedAt };
+}
+
+function publicTestimonials(reviews: StoredReview[], articleId: string): PieceReview[] {
   return reviews
-    .filter(review => review.status === 'approved')
+    .filter(review => review && review.articleId === articleId && review.status === 'approved' && review.verifiedReader === true
+      && typeof review.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(review.id)
+      && Number.isInteger(review.rating) && review.rating >= 1 && review.rating <= 5
+      && typeof review.review === 'string' && review.review.length >= 10 && review.review.length <= 2000
+      && Number.isFinite(Date.parse(review.createdAt)) && Number.isFinite(Date.parse(review.updatedAt)))
     .sort((left, right) => Number(right.featured) - Number(left.featured) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
     .slice(0, 12)
-    .map(review => ({
-      id: review.id,
-      articleId: review.articleId,
-      rating: review.rating,
-      review: review.review,
-      status: review.status,
-      featured: review.featured,
-      verifiedReader: true,
-      createdAt: review.createdAt,
-      updatedAt: review.updatedAt
-    }));
+    .map(reviewResponse);
 }
 
 function normalizeProfile(userId: string, value: unknown): ReaderProfile {
@@ -517,22 +518,20 @@ export const readerExperienceStore = {
     const reactionPromise = userIdInput
       ? getDb().collection(REACTION_COLLECTION).doc(hashId(safeId(userIdInput), articleId)).get()
       : Promise.resolve(null);
-    const [socialSnapshot, reactionSnapshot] = await Promise.all([
+    const approvedQuery = getDb().collection(REVIEW_COLLECTION).where('articleId', '==', articleId).where('status', '==', 'approved');
+    const [socialSnapshot, reactionSnapshot, approvedReviews, featuredReviews] = await Promise.all([
       socialPromise,
-      reactionPromise
+      reactionPromise,
+      approvedQuery.orderBy('updatedAt', 'desc').limit(12).get(),
+      approvedQuery.where('featured', '==', true).orderBy('updatedAt', 'desc').limit(12).get()
     ]);
     const social = (socialSnapshot.exists ? socialSnapshot.data() : {}) as SocialRecord;
     const ratingTotal = Number(social.ratingTotal) || 0;
     const verifiedReviewCount = Math.max(0, Number(social.verifiedReviewCount) || 0);
-    let testimonials = Array.isArray(social.testimonials) ? social.testimonials.slice(0, 12) : null;
-    if (!testimonials) {
-      const legacyReviews = await getDb().collection(REVIEW_COLLECTION)
-        .where('articleId', '==', articleId)
-        .limit(100)
-        .get();
-      testimonials = publicTestimonials(legacyReviews.docs.map(document => document.data() as StoredReview));
-      await socialRef.set({ articleId, testimonials, updatedAt: new Date().toISOString() }, { merge: true });
-    }
+    // Approval is read from the source records, not a stale embedded social
+    // snapshot. Anonymous reads never backfill or mutate the database.
+    const reviews = publicTestimonials(approvedReviews.docs.map(document => ({ ...document.data(), id: document.id }) as StoredReview), articleId);
+    const testimonials = publicTestimonials(featuredReviews.docs.map(document => ({ ...document.data(), id: document.id }) as StoredReview), articleId);
     const currentReaction = reactionSnapshot?.exists
       ? reactionSnapshot.data()?.reaction as ReaderReactionType | undefined
       : undefined;
@@ -542,7 +541,8 @@ export const readerExperienceStore = {
       verifiedReviewCount,
       averageRating: verifiedReviewCount > 0 ? Math.round((ratingTotal / verifiedReviewCount) * 10) / 10 : 0,
       completedReadCount: Math.max(0, Number(social.completedReadCount) || 0),
-      testimonials
+      testimonials,
+      reviews
     };
   },
 
@@ -552,20 +552,31 @@ export const readerExperienceStore = {
     articleId: string;
     rating: unknown;
     review: unknown;
+    submissionId?: unknown;
   }): Promise<PieceReview> {
     const userId = safeId(input.userId);
     const articleId = safeId(input.articleId);
-    const rating = Math.round(clampNumber(input.rating, 1, 5));
+    if (typeof input.rating !== 'number' || !Number.isInteger(input.rating) || input.rating < 1 || input.rating > 5) throw new Error('Choose a rating from 1 to 5.');
+    const rating = input.rating;
     const reviewText = cleanText(input.review, 2_000);
     if (reviewText.length < 10) throw new Error('Review must contain at least 10 characters.');
+    if (input.submissionId !== undefined && (typeof input.submissionId !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(input.submissionId))) throw new Error('Invalid review submission identifier.');
+    const identity = hashId(userId, articleId);
+    // Legacy clients still get content-based retry protection. New clients use
+    // a fresh intent ID for each deliberate response, including identical text.
+    const intent = (input.submissionId as string | undefined) ?? `legacy:${hashId(String(rating), reviewText)}`;
     const profileRef = getDb().collection(PROFILE_COLLECTION).doc(hashId(userId));
-    const reviewRef = getDb().collection(REVIEW_COLLECTION).doc(hashId(userId, articleId));
+    const reviewRef = getDb().collection(REVIEW_COLLECTION).doc(`review_${hashId(userId, articleId, intent)}`);
+    const legacyRef = getDb().collection(REVIEW_COLLECTION).doc(identity);
+    const ratingRef = getDb().collection(REVIEW_RATING_COLLECTION).doc(identity);
     const socialRef = getDb().collection(SOCIAL_COLLECTION).doc(articleId);
     const now = new Date().toISOString();
     return getDb().runTransaction(async transaction => {
-      const [profileSnapshot, reviewSnapshot] = await Promise.all([
+      const [profileSnapshot, reviewSnapshot, legacySnapshot, ratingSnapshot] = await Promise.all([
         transaction.get(profileRef),
-        transaction.get(reviewRef)
+        transaction.get(reviewRef),
+        transaction.get(legacyRef),
+        transaction.get(ratingRef)
       ]);
       const profile = normalizeProfile(userId, profileSnapshot.exists ? profileSnapshot.data() : null);
       const articleProgress = profile.progress[articleId];
@@ -575,6 +586,24 @@ export const readerExperienceStore = {
         throw error;
       }
       const existing = reviewSnapshot.exists ? reviewSnapshot.data() as StoredReview : null;
+      if (existing) {
+        if (existing.userId !== userId || existing.articleId !== articleId || existing.rating !== rating || existing.review !== reviewText) {
+          const error = new Error('This review submission was already used for a different response.');
+          (error as any).statusCode = 409;
+          throw error;
+        }
+        // Retrying after publication must never reset the writer's decision.
+        return reviewResponse(existing);
+      }
+      const legacy = legacySnapshot.exists ? legacySnapshot.data() as StoredReview : null;
+      const anchor = ratingSnapshot.exists ? ratingSnapshot.data() as { version?: unknown; userId?: unknown; articleId?: unknown; rating?: unknown; createdAt?: unknown } : null;
+      if ((legacy && (legacy.userId !== userId || legacy.articleId !== articleId || !Number.isInteger(legacy.rating) || legacy.rating < 1 || legacy.rating > 5))
+        || (anchor && (anchor.version !== 1 || anchor.userId !== userId || anchor.articleId !== articleId || typeof anchor.rating !== 'number' || !Number.isInteger(anchor.rating) || anchor.rating < 1 || anchor.rating > 5))) {
+        const error = new Error('The previous rating could not be verified. Contact the writer before trying again.');
+        (error as any).statusCode = 503;
+        throw error;
+      }
+      const previousRating = anchor ? Number(anchor.rating) : legacy?.rating;
       const stored: StoredReview = {
         id: reviewRef.id,
         userId,
@@ -585,23 +614,27 @@ export const readerExperienceStore = {
         status: 'pending',
         featured: false,
         verifiedReader: true,
-        createdAt: existing?.createdAt || now,
+        createdAt: now,
         updatedAt: now
       };
-      transaction.set(reviewRef, sanitizeForFirestore(stored), { merge: false });
+      transaction.create(reviewRef, sanitizeForFirestore(stored));
+      transaction.set(ratingRef, { version: 1, userId, articleId, rating,
+        createdAt: typeof anchor?.createdAt === 'string' ? anchor.createdAt : legacy?.createdAt || now,
+        updatedAt: now }, { merge: false });
       transaction.set(socialRef, {
         articleId,
-        verifiedReviewCount: FieldValue.increment(existing ? 0 : 1),
-        ratingTotal: FieldValue.increment(rating - (existing?.rating || 0)),
+        // One rating contribution per reader/piece, even with several written
+        // responses. Adopt a legacy contribution without recounting history.
+        verifiedReviewCount: FieldValue.increment(previousRating === undefined ? 1 : 0),
+        ratingTotal: FieldValue.increment(rating - (previousRating || 0)),
         updatedAt: now
       }, { merge: true });
-      const { userId: _privateUserId, readerName: _privateReaderName, ...safeReview } = stored;
-      return safeReview;
+      return reviewResponse(stored);
     });
   },
 
   async listReviews(): Promise<StoredReview[]> {
-    const snapshot = await getDb().collection(REVIEW_COLLECTION).limit(250).get();
+    const snapshot = await getDb().collection(REVIEW_COLLECTION).orderBy('updatedAt', 'desc').limit(250).get();
     return snapshot.docs
       .map(document => document.data() as StoredReview)
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
@@ -610,26 +643,16 @@ export const readerExperienceStore = {
   async moderateReview(reviewIdInput: string, input: { status?: unknown; featured?: unknown }): Promise<StoredReview> {
     const reviewId = safeId(reviewIdInput);
     const ref = getDb().collection(REVIEW_COLLECTION).doc(reviewId);
-    const snapshot = await ref.get();
-    if (!snapshot.exists) throw new Error('Review not found.');
-    const existing = snapshot.data() as StoredReview;
-    const status = input.status === 'approved' || input.status === 'hidden' || input.status === 'pending'
-      ? input.status
-      : existing.status;
-    const featured = input.featured === true && status === 'approved';
-    const updated = { ...existing, status, featured, updatedAt: new Date().toISOString() };
-    await ref.set(sanitizeForFirestore(updated), { merge: false });
-    const reviewSnapshot = await getDb().collection(REVIEW_COLLECTION)
-      .where('articleId', '==', existing.articleId)
-      .limit(100)
-      .get();
-    const testimonials = publicTestimonials(reviewSnapshot.docs.map(document => document.data() as StoredReview));
-    await getDb().collection(SOCIAL_COLLECTION).doc(existing.articleId).set({
-      articleId: existing.articleId,
-      testimonials,
-      updatedAt: updated.updatedAt
-    }, { merge: true });
-    return updated;
+    return getDb().runTransaction(async transaction => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new Error('Review not found.');
+      const existing = snapshot.data() as StoredReview;
+      const status = input.status === 'approved' || input.status === 'hidden' || input.status === 'pending' ? input.status : existing.status;
+      const featured = input.featured === true && status === 'approved';
+      const updated = { ...existing, status, featured, updatedAt: new Date().toISOString() };
+      transaction.set(ref, sanitizeForFirestore(updated), { merge: false });
+      return updated;
+    });
   },
 
   async listCollections(includeUnpublished = false): Promise<ContentCollection[]> {

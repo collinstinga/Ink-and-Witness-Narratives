@@ -36,13 +36,14 @@ export function ReaderCommentList({ comments, privateView = false }: { comments:
   </div>;
 }
 
-export function ReaderComments({ articleId, readerId, canComment, onSignIn }: {
+export function ReaderComments({ articleId, readerId, canComment, onSignIn, compact = false }: {
   /** Reserved React identity; consumed by React, not received by this component. */
   key?: string;
   articleId: string;
   readerId?: string;
   canComment: boolean;
   onSignIn?: () => void;
+  compact?: boolean;
 }) {
   const [comments, setComments] = useState<PieceComment[]>([]);
   const [ownComments, setOwnComments] = useState<PieceComment[]>([]);
@@ -112,7 +113,13 @@ export function ReaderComments({ articleId, readerId, canComment, onSignIn }: {
     </div>
     {loadError && <p role="status" className="text-xs text-amber-300">{loadError}</p>}
     {comments.some(comment => comment.status === 'approved')
-      ? <ReaderCommentList comments={comments} />
+      ? <>
+        <ReaderCommentList comments={compact ? comments.filter(comment => comment.status === 'approved').slice(0, 2) : comments} />
+        {compact && comments.filter(comment => comment.status === 'approved').length > 2 && <details>
+          <summary className="cursor-pointer text-xs text-sky-300">More published comments</summary>
+          <ReaderCommentList comments={comments.filter(comment => comment.status === 'approved').slice(2)} />
+        </details>}
+      </>
       : <p className="rounded-xl border border-dashed border-slate-800 px-3 py-4 text-center text-xs text-slate-500">No published reader comments yet.</p>}
     {readerId && ownUnpublished.length > 0 && <section aria-label="Your unpublished comments" className="space-y-2">
       <h6 className="text-xs font-semibold text-amber-200">Your unpublished comments</h6>

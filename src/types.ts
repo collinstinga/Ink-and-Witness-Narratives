@@ -306,6 +306,8 @@ export interface PieceSocialProof {
   purchaseCount: number;
   viewCount: number;
   testimonials: PieceReview[];
+  /** Latest writer-approved responses; multiple texts still share one rating vote per reader/piece. */
+  reviews?: PieceReview[];
 }
 
 export interface ReaderHomeResponse {

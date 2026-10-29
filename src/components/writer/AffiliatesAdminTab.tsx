@@ -61,6 +61,7 @@ import { AffiliatePayoutProcessForm, type WriterPayoutAction } from './Affiliate
 import { AffiliatePayoutReceipt } from '../affiliate/AffiliatePayoutReceipt.js';
 
 const AffiliateNotificationsAdmin = React.lazy(() => import('./AffiliateNotificationsAdmin.js'));
+const AffiliatePartnerEmailComposer = React.lazy(() => import('./AffiliatePartnerEmailComposer.js'));
 const LiteraryCircleAnalyticsAdmin = React.lazy(() => import('./LiteraryCircleAnalyticsAdmin.js'));
 const AffiliateFinancialAdjustmentsAdmin = React.lazy(() => import('./AffiliateFinancialAdjustmentsAdmin.js'));
 const AffiliateCampaignEditor = React.lazy(() => import('./AffiliateCampaignEditor.js').then(module => ({ default: module.AffiliateCampaignEditor })));
@@ -82,6 +83,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
   articles
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<AdminSubTab>('overview');
+  const [showNotificationAutomation, setShowNotificationAutomation] = useState(false);
   const [summary, setSummary] = useState<AdminAffiliatesSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -251,14 +253,14 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
 
   useEffect(() => {
     if (
-      activeSubTab === 'notifications'
+      activeSubTab === 'notifications' && showNotificationAutomation
       && !notificationSettings
       && !notificationSettingsLoading
       && !notificationSettingsAttempted
     ) {
       void loadNotificationSettings();
     }
-  }, [activeSubTab, notificationSettings, notificationSettingsAttempted, notificationSettingsLoading]);
+  }, [activeSubTab, showNotificationAutomation, notificationSettings, notificationSettingsAttempted, notificationSettingsLoading]);
 
   const handleSaveNotificationSettings = async (
     nextSettings: LiteraryCircleNotificationSettings,
@@ -794,7 +796,7 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
           }`}
         >
           <BellRing className="w-3.5 h-3.5" />
-          <span>Partner Notifications</span>
+          <span>Partner email</span>
         </button>
 
         <button
@@ -1282,8 +1284,21 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
             )
           )}
 
-          {/* PREVIEW-ONLY LITERARY CIRCLE PARTNER NOTIFICATIONS */}
+          {/* Manual partner email is independent of the existing automated event configuration. */}
           {activeSubTab === 'notifications' && (
+            <div className="space-y-5">
+              <React.Suspense fallback={<p role="status" className="p-5 text-sm text-violet-200">Opening partner email…</p>}>
+                <AffiliatePartnerEmailComposer />
+              </React.Suspense>
+              <section className="rounded-2xl border border-slate-800 p-4">
+                <button type="button" aria-expanded={showNotificationAutomation} aria-controls="partner-email-automation"
+                  onClick={() => setShowNotificationAutomation(current => !current)}
+                  className="min-h-11 text-left text-sm font-semibold text-slate-200">
+                  {showNotificationAutomation ? 'Hide' : 'Show'} advanced automated notifications
+                </button>
+                <p className="text-xs leading-relaxed text-slate-400">Optional templates for new releases, commissions and other events. Manual emails above need no automation setup.</p>
+                {showNotificationAutomation && <div id="partner-email-automation" className="mt-4">
+          {(
             notificationSettingsLoading ? (
               <div role="status" className="flex min-h-48 items-center justify-center gap-2 rounded-2xl border border-violet-300/20 bg-violet-950/10 text-sm text-violet-200">
                 <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" />
@@ -1324,6 +1339,10 @@ export const AffiliatesAdminTab: React.FC<AffiliatesAdminTabProps> = ({
                 </button>
               </div>
             )
+          )}
+                </div>}
+              </section>
+            </div>
           )}
 
           {/* TAB 3: COMMISSIONS LEDGER */}
