@@ -48,6 +48,7 @@ let phase = 'setup';
       const page = await context.newPage();
       page.setDefaultTimeout(12000);
       const errors = [], unexpected = [], writes = [];
+      let securityReads = 0;
       const revision = '2026-11-02T00:00:00.000Z';
       let stored = { id: 'synthetic-piece', title: 'Synthetic piece', subtitle: '', excerpt: 'Public synthetic preview', content: 'Original synthetic text.',
         slug: 'synthetic-piece', category: 'Narratives', status: 'published', isPaid: true, priceKes: 100, prices: {}, tags: [],
@@ -78,6 +79,10 @@ let phase = 'setup';
           return send({ success: true, piecesCount: 1, timestamp: revision, snapshotFilename: 'synthetic.json' });
         }
         if (request.method() === 'GET') {
+          if (url.pathname === '/api/admin/account-security') {
+            securityReads++;
+            return send({ success: true, security: { status: 'active', memberCount: 1, canIssue: false } });
+          }
           if (url.pathname === '/api/admin/articles') return send([stored]);
           if (url.pathname === '/api/admin/stats') return send({});
           if (url.pathname === '/api/admin/transactions') return send({ transactions: [], count: 0, totalRevenueKes: 0 });
@@ -101,14 +106,36 @@ let phase = 'setup';
       assert.equal(await page.locator('#writer-editor-bar').count(), 0, 'No footer save or reserved sticky space');
       assert.equal(await page.getByRole('button', { name: /Save Draft|Update Published|Publish Live/, exact: true }).count(), 0);
       assert.equal(writes.length, 0, 'Mount must not save or snapshot');
+      assert.equal(securityReads, 0, 'Security remains closed and does not load before an explicit tap');
+      const security = page.getByRole('button', { name: 'Account security', exact: true });
+      assert.equal(await security.count(), 1, 'One security control is visible at each breakpoint');
+      const securityBox = await security.boundingBox();
+      assert.ok(securityBox.height <= 38 && securityBox.width <= 38, 'Security is a small header icon');
+      assert.equal(await page.locator('#writer-dashboard-root > main > div > header').isVisible(), width >= 768,
+        'The entire separate sticky toolbar, including its spacing, is absent on mobile');
       const guide = page.locator(width < 768 ? '#mobile-writer-guide-btn' : '#desktop-writer-guide-btn');
       const guideBox = await guide.boundingBox(), saveBox = await headerSave.boundingBox();
       assert.ok(guideBox.height <= 38 && guideBox.height >= 32 && saveBox.height <= 38);
       if (width < 768) {
         const header = await page.locator('#writer-dashboard-root > header').boundingBox();
         assert.ok(header.height <= 56, 'Mobile header must stay on one compact row');
-        await page.setViewportSize({ width: 320, height: 1000 });
-        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        for (const narrowWidth of [320, 360, 390, 414]) {
+          await page.setViewportSize({ width: narrowWidth, height: 1000 });
+          const mobileHeader = page.locator('#writer-dashboard-root > header');
+          const bounds = await mobileHeader.boundingBox();
+          assert.ok(bounds.height <= 56, 'All five header controls stay on a single compact row');
+          const controls = await mobileHeader.getByRole('button').all();
+          assert.equal(controls.length, 5);
+          let previousRight = 0;
+          for (const control of controls) {
+            const box = await control.boundingBox();
+            assert.ok(box.x >= previousRight && box.x + box.width <= narrowWidth,
+              'Every control fits the viewport without overlap or clipping');
+            assert.ok(box.y >= bounds.y && box.y + box.height <= bounds.y + bounds.height);
+            previousRight = box.x + box.width;
+          }
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        }
         await page.setViewportSize({ width, height: 1000 });
       }
       const title = page.getByPlaceholder('e.g. The Architecture of Unspoken Leverage', { exact: true });
@@ -120,6 +147,25 @@ let phase = 'setup';
       await page.getByRole('button', { name: 'Close guide and return to your dashboard', exact: true }).click();
       assert.equal(await content.inputValue(), '## Header saved text\nA synthetic revision.');
       assert.equal(writes.length, 0, 'Guide never saves or resets edits');
+
+      const main = page.locator('#writer-dashboard-root > main');
+      const editingScroll = await main.evaluate(element => { element.scrollTop = 450; return element.scrollTop; });
+      assert.ok(editingScroll > 0);
+      await security.click();
+      const securityPanel = page.locator('#writer-account-security');
+      await securityPanel.getByText('Writer account recovery has been activated.', { exact: false }).waitFor();
+      assert.equal(await security.getAttribute('aria-expanded'), 'true');
+      assert.equal(await main.evaluate(element => element.scrollTop), 0, 'Opening security from a scrolled editor reveals the panel');
+      assert.equal(securityReads, 1);
+      await securityPanel.getByRole('button', { name: 'Close security', exact: true }).click();
+      await securityPanel.waitFor({ state: 'detached' });
+      assert.equal(await security.getAttribute('aria-expanded'), 'false');
+      assert.ok(Math.abs(await main.evaluate(element => element.scrollTop) - editingScroll) <= 1,
+        'Closing security restores the editor scroll position');
+      assert.equal(await title.inputValue(), 'Edited synthetic piece');
+      assert.equal(await content.inputValue(), '## Header saved text\nA synthetic revision.');
+      assert.equal(writes.length, 0, 'Opening and closing security never saves, resets a draft or sends recovery email');
+      await page.screenshot({ path: path.join(output, `security-header-${width}.png`), fullPage: true });
 
       // Two native clicks in the same browser task exercise the synchronous
       // guard before React has time to disable the control.
@@ -175,6 +221,7 @@ let phase = 'setup';
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
       results.push({ width, oneCompactHeaderSave: true, footerRemoved: true, currentPayloadPersisted: true,
+        compactHeaderSecurity: true, noMobileStickySecurityRow: true, securityOpenPreservesDraft: true, securityCloseRestoresScroll: true, securityNoWrites: true,
         duplicateClicksFenced: true, inFlightEditsPreserved: true, validationAndConflictRetry: true,
         selectedVisibilitySaved: true, reloadVerified: true, guidePreservesDraft: true, noOverflow: true, browserErrors: 0 });
       await context.close();

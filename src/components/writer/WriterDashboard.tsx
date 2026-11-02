@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { 
   LayoutDashboard, 
   FileText, 
@@ -104,6 +104,19 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  const mainContentRef = useRef<HTMLElement | null>(null);
+  const securityReturnScrollRef = useRef<number | null>(null);
+  const toggleAccountSecurity = () => {
+    if (!securityOpen) securityReturnScrollRef.current = mainContentRef.current?.scrollTop ?? 0;
+    setSecurityOpen(open => !open);
+  };
+  useLayoutEffect(() => {
+    if (securityOpen) mainContentRef.current?.scrollTo({ top: 0 });
+    else if (securityReturnScrollRef.current !== null) {
+      mainContentRef.current?.scrollTo({ top: securityReturnScrollRef.current });
+      securityReturnScrollRef.current = null;
+    }
+  }, [securityOpen]);
 
   // Sync with initialTab prop if it changes externally
   useEffect(() => {
@@ -456,10 +469,22 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
           <div className="w-6 h-6 rounded bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold font-serif">
             IW
           </div>
-          <span className="font-serif font-bold text-sm tracking-tight text-white" aria-label="Writer Studio"><span className="hidden min-[360px]:inline">Writer </span>Studio</span>
+          <span className="sr-only min-[360px]:not-sr-only font-serif font-bold text-sm tracking-tight text-white" aria-label="Writer Studio"><span className="hidden min-[400px]:inline">Writer </span>Studio</span>
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            id="mobile-account-security-btn"
+            type="button"
+            onClick={toggleAccountSecurity}
+            aria-label="Account security"
+            title="Account security"
+            aria-expanded={securityOpen}
+            aria-controls="writer-account-security"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 text-slate-200"
+          >
+            <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+          </button>
           <button
             id="mobile-writer-guide-btn"
             type="button"
@@ -906,12 +931,13 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto">
+      <main ref={mainContentRef} className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto">
-          <header className="sticky top-0 z-30 mb-4 flex items-center justify-end gap-2 bg-[#050811]/95 py-2">
-            <button type="button" onClick={() => setSecurityOpen(open => !open)} aria-expanded={securityOpen}
-              aria-controls="writer-account-security" className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 text-[11px] font-semibold text-slate-200">
-              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Account security
+          <header className="hidden sticky top-0 z-30 mb-4 items-center justify-end gap-2 bg-[#050811]/95 py-2 md:flex">
+            <button id="desktop-account-security-btn" type="button" onClick={toggleAccountSecurity}
+              aria-label="Account security" title="Account security" aria-expanded={securityOpen}
+              aria-controls="writer-account-security" className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-700 text-slate-200">
+              <ShieldCheck className="h-4 w-4" aria-hidden="true" />
             </button>
             <button
               id="desktop-writer-guide-btn"
