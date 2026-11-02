@@ -2,24 +2,15 @@ import React, { useMemo } from 'react';
 import { ArrowUpRight, BookOpen, Clock3, Sparkles } from 'lucide-react';
 
 import type { Article } from '../../types.js';
+import { orderArticlesNewestFirst } from '../../utils/articleOrder.js';
 
 interface LiteraryCircleLibraryProps {
   articles: Article[];
   onOpenArticle: (article: Article) => void;
 }
 
-const timestamp = (value?: string): number => {
-  const parsed = value ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
 export const orderLiteraryCircleLibrary = (articles: Article[]): Article[] => (
-  [...articles]
-    .filter(article => !article.status || article.status === 'published')
-    .sort((left, right) => {
-      if (Boolean(left.featured) !== Boolean(right.featured)) return left.featured ? -1 : 1;
-      return timestamp(right.publishedAt || right.updatedAt) - timestamp(left.publishedAt || left.updatedAt);
-    })
+  orderArticlesNewestFirst(articles.filter(article => !article.status || article.status === 'published'))
 );
 
 export const LiteraryCircleLibrary: React.FC<LiteraryCircleLibraryProps> = ({
@@ -29,9 +20,7 @@ export const LiteraryCircleLibrary: React.FC<LiteraryCircleLibraryProps> = ({
   const orderedArticles = useMemo(() => orderLiteraryCircleLibrary(articles), [articles]);
   const newestIds = useMemo(
     () => new Set(
-      [...orderedArticles]
-        .sort((left, right) => timestamp(right.publishedAt || right.updatedAt) - timestamp(left.publishedAt || left.updatedAt))
-        .slice(0, 3)
+      orderedArticles.slice(0, 3)
         .map(article => article.id)
     ),
     [orderedArticles]

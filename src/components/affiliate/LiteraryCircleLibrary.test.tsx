@@ -27,14 +27,14 @@ const article = (overrides: Partial<Article>): Article => ({
 });
 
 describe('LiteraryCircleLibrary', () => {
-  it('keeps drafts out and places writer recommendations first', () => {
+  it('keeps drafts out and places the latest publications before older recommendations', () => {
     const ordered = orderLiteraryCircleLibrary([
       article({ id: 'newer', title: 'Newer', publishedAt: '2026-03-01' }),
       article({ id: 'featured', title: 'Featured', featured: true, publishedAt: '2025-01-01' }),
       article({ id: 'draft', title: 'Draft', status: 'draft' }),
     ]);
 
-    expect(ordered.map(item => item.id)).toEqual(['featured', 'newer']);
+    expect(ordered.map(item => item.id)).toEqual(['newer', 'featured']);
   });
 
   it('renders unlocked catalogue context without calling complimentary access a purchase', () => {

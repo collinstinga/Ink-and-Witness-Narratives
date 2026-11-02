@@ -3,6 +3,7 @@ import { Search, Filter, Plus, BookOpen, Layers, Sparkles } from 'lucide-react';
 import { Article, Category, ContentBookQuote, ContentBundle } from '../../types.js';
 import { HomepageBundles, type HomepageBundle } from '../HomepageBundles.js';
 import { visibleStandaloneArticles } from '../../utils/bookCatalogue.js';
+import { orderArticlesNewestFirst } from '../../utils/articleOrder.js';
 import { ArticleCard } from '../ArticleCard.js';
 import { CategoryManagerModal } from '../writer/CategoryManagerModal.js';
 import { api } from '../../utils/api.js';
@@ -116,7 +117,7 @@ export const AllPiecesView: React.FC<AllPiecesViewProps> = ({
 
   // Filtered articles
   const filteredArticles = useMemo(() => {
-    return visibleStandaloneArticles(articles, onPurchaseBundle ? books : []).filter(art => {
+    return orderArticlesNewestFirst(visibleStandaloneArticles(articles, onPurchaseBundle ? books : []).filter(art => {
       const q = activeSearch.toLowerCase().trim();
       const matchesSearch = !q || 
         art.title.toLowerCase().includes(q) ||
@@ -134,7 +135,7 @@ export const AllPiecesView: React.FC<AllPiecesViewProps> = ({
       const matchesTag = !activeTag || art.tags.includes(activeTag);
 
       return matchesSearch && matchesCategory && matchesTag;
-    });
+    }));
   }, [articles, books, onPurchaseBundle, activeSearch, activeCategory, activeTag]);
 
   const matchingBooks = books.filter(book => {
