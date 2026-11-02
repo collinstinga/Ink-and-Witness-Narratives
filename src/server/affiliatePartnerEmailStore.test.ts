@@ -64,7 +64,7 @@ function harness(count = 1) {
 describe('manual partner email eligibility and immutable campaigns', () => {
   it.each([undefined, null, [], { ...input, subject: 'a\r\nBcc: victim@example.test' }, { ...input, body: 'x'.repeat(12001) },
     { ...input, audience: 'selected' }, { ...input, affiliateIds: ['partner-one'] }, { ...input, role: 'admin' },
-    { ...input, audience: 'selected', affiliateIds: ['bad/id'] }])('rejects malformed or authority-bearing input %j', value => {
+    { ...input, audience: 'selected', affiliateIds: ['bad/id'] }, { ...input, replyTo: 'attacker@example.test' }])('rejects malformed or authority-bearing input %j', value => {
     expect(() => validateAffiliatePartnerEmailInput(value)).toThrow();
   });
   it('keeps plain text literal while rejecting controls and normalizing selection', () => {
@@ -179,6 +179,53 @@ describe('manual partner email production fencing and delivery', () => {
     const stored = h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`); expect(stored).toMatchObject({ sentCount: 1, remainingCount: 1, status: 'paused' });
     stored.body = 'Corrupted content';
     await expect(h.store.send(campaign.id, writer)).rejects.toThrow(/not found/); expect(h.email).toHaveBeenCalledOnce();
+  });
+
+  it('freezes the scoped reply address and sends it without replacing the verified website sender', async () => {
+    const h = harness(); h.env.NEWSLETTER_REPLY_TO = 'newsletter@example.test';
+    h.env.AFFILIATE_EMAIL_REPLY_TO = ' Partner.Replies@Example.Test ';
+    const campaign = await h.create();
+    expect(h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`)).toMatchObject({ fromEmail: h.env.NEWSLETTER_FROM_EMAIL, replyTo: 'partner.replies@example.test' });
+    await h.store.send(campaign.id, writer);
+    expect(h.email.mock.calls[0][0]).toMatchObject({ to: 'partner0@example.test', replyTo: 'partner.replies@example.test' });
+    expect(h.env.NEWSLETTER_REPLY_TO).toBe('newsletter@example.test');
+  });
+
+  it('blocks a reply-address change after preparation without sending or rewriting the campaign', async () => {
+    const h = harness(); h.env.AFFILIATE_EMAIL_REPLY_TO = 'first@example.test';
+    const campaign = await h.create(), original = structuredClone(h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`));
+    h.env.AFFILIATE_EMAIL_REPLY_TO = 'second@example.test';
+    await expect(h.store.send(campaign.id, writer)).rejects.toMatchObject({ statusCode: 409 });
+    expect(h.email).not.toHaveBeenCalled();
+    expect(h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`)).toEqual(original);
+  });
+
+  it('pauses before the next recipient if the reply address changes during a batch', async () => {
+    const h = harness(2); h.env.AFFILIATE_EMAIL_REPLY_TO = 'first@example.test';
+    const campaign = await h.create();
+    h.email.mockImplementationOnce(async () => { h.env.AFFILIATE_EMAIL_REPLY_TO = 'second@example.test'; return { providerMessageId: 'accepted-before-reply-change' }; });
+    await expect(h.store.send(campaign.id, writer)).rejects.toMatchObject({ statusCode: 409 });
+    expect(h.email).toHaveBeenCalledOnce();
+    expect(h.email.mock.calls[0][0]).toMatchObject({ replyTo: 'first@example.test' });
+    expect(h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`)).toMatchObject({ replyTo: 'first@example.test', sentCount: 1, remainingCount: 1, status: 'paused' });
+  });
+
+  it('keeps legacy campaign history visible and refuses an unpinned pending send under new reply settings', async () => {
+    const h = harness(), campaign = await h.create();
+    const stored = h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`); delete stored.replyTo;
+    const original = structuredClone(stored); h.env.AFFILIATE_EMAIL_REPLY_TO = 'new-replies@example.test';
+    expect((await h.store.overview()).campaigns.map(row => row.id)).toContain(campaign.id);
+    await expect(h.store.send(campaign.id, writer)).rejects.toMatchObject({ statusCode: 409 });
+    expect(h.email).not.toHaveBeenCalled(); expect(h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`)).toEqual(original);
+  });
+
+  it('returns an already completed legacy campaign without resending after reply settings change', async () => {
+    const h = harness(), campaign = await h.create(); await h.store.send(campaign.id, writer);
+    const stored = h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`); delete stored.replyTo;
+    const original = structuredClone(stored); h.env.AFFILIATE_EMAIL_REPLY_TO = 'new-replies@example.test';
+    expect(await h.store.send(campaign.id, writer)).toMatchObject({ complete: true, campaign: { id: campaign.id, sentCount: 1 } });
+    expect((await h.store.overview()).campaigns.map(row => row.id)).toContain(campaign.id);
+    expect(h.email).toHaveBeenCalledOnce(); expect(h.documents.get(`${PARTNER_EMAIL_CAMPAIGNS}/${campaign.id}`)).toEqual(original);
   });
 });
 

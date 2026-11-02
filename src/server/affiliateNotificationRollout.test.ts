@@ -152,15 +152,31 @@ describe('production affiliate notification rollout', () => {
   });
 
   it('sends exactly one owner-allowlisted operational probe even when the writer account has a different email', async () => {
-    const h = harness(); await h.review();
+    const h = harness(); h.env.NEWSLETTER_REPLY_TO = 'newsletter@example.test'; h.env.AFFILIATE_EMAIL_REPLY_TO = ' Partner.Replies@Example.Test ';
+    await h.review();
     expect(await sendProductionAffiliateNotificationTest(h.input, h.env)).toMatchObject({ status: 'accepted' });
     expect(await sendProductionAffiliateNotificationTest(h.input, h.env)).toMatchObject({ status: 'already_processed' });
     expect(h.input.sendEmail).toHaveBeenCalledTimes(1);
-    expect(h.input.sendEmail.mock.calls[0]).toEqual([expect.objectContaining({ to: RECIPIENT,
+    expect(h.input.sendEmail.mock.calls[0]).toEqual([expect.objectContaining({ to: RECIPIENT, replyTo: 'partner.replies@example.test',
       idempotencyKey: expect.stringMatching(/^affiliate-writer-test-v1:nld_/), deliveryId: expect.stringMatching(/^nld_/) })]);
     const status = await getProductionAffiliateNotificationRolloutStatus({ db: h.input.db, now: NOW }, h.env);
     expect(status.testDeliveryStatus).toBe('accepted');
     expect(JSON.stringify(status)).not.toContain(RECIPIENT);
+    expect(h.env.NEWSLETTER_REPLY_TO).toBe('newsletter@example.test');
+  });
+
+  it('blocks a controlled probe whose injected reply address differs from the real transport configuration', async () => {
+    const h = harness(); await h.review();
+    const readsBefore = h.reads.length, writesBefore = h.writes.length;
+    const fetchMock = vi.fn(async () => { throw new Error('Synthetic provider must never be contacted'); });
+    try {
+      for (const key of ['RESEND_API_KEY', 'NEWSLETTER_FROM_EMAIL', 'NEWSLETTER_REPLY_TO']) vi.stubEnv(key, h.env[key] || '');
+      vi.stubEnv('AFFILIATE_EMAIL_REPLY_TO', 'runtime@example.test');
+      vi.stubGlobal('fetch', fetchMock);
+      h.env.AFFILIATE_EMAIL_REPLY_TO = 'injected@example.test';
+      expect(await sendProductionAffiliateNotificationTest({ ...h.input, sendEmail: undefined }, h.env)).toEqual({ status: 'blocked' });
+      expect(h.reads).toHaveLength(readsBefore); expect(h.writes).toHaveLength(writesBefore); expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
   });
 
   it('rejects an uncommitted probe address before database access and does not substitute the actor address', async () => {

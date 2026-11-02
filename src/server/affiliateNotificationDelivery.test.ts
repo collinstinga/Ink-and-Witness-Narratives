@@ -197,6 +197,29 @@ describe('guarded partner notification delivery', () => {
     expect(email.html).toContain('https://circle-staging.example.test/?monograph=piece-one');
   });
 
+  it.each(['new_commission', 'new_release'] as const)('uses the scoped reply address for %s without changing the recipient or shared default', async eventType => {
+    const h = harness(eventType), env = h.input.env as NodeJS.ProcessEnv;
+    env.NEWSLETTER_REPLY_TO = 'newsletter@example.test'; env.AFFILIATE_EMAIL_REPLY_TO = ' Partner.Replies@Example.Test ';
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'accepted' });
+    expect(h.sendEmail).toHaveBeenCalledOnce();
+    expect(h.sendEmail.mock.calls[0][0]).toMatchObject({ to: 'reader@example.test', replyTo: 'partner.replies@example.test' });
+    expect(env.NEWSLETTER_FROM_EMAIL).toBe(h.review.fromEmail);
+    expect(env.NEWSLETTER_REPLY_TO).toBe('newsletter@example.test');
+  });
+
+  it('blocks an injected reply configuration that does not match the real transport before any reads or send', async () => {
+    const h = harness(), env = h.input.env as NodeJS.ProcessEnv;
+    const fetchMock = vi.fn(async () => { throw new Error('Synthetic provider must never be contacted'); });
+    try {
+      for (const key of ['RESEND_API_KEY', 'NEWSLETTER_FROM_EMAIL', 'NEWSLETTER_REPLY_TO']) vi.stubEnv(key, env[key] || '');
+      vi.stubEnv('AFFILIATE_EMAIL_REPLY_TO', 'runtime@example.test');
+      vi.stubGlobal('fetch', fetchMock);
+      env.AFFILIATE_EMAIL_REPLY_TO = 'injected@example.test';
+      expect(await deliverHeldAffiliateNotification({ ...h.input, sendEmail: undefined })).toEqual({ status: 'blocked' });
+      expect(h.reads).toEqual([]); expect(h.writes).toEqual([]); expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+  });
+
   it('leases concurrency and never resends a provider-accepted intent', async () => {
     const h = harness();
     const results = await Promise.all([deliverHeldAffiliateNotification(h.input), deliverHeldAffiliateNotification(h.input)]);
@@ -380,6 +403,20 @@ describe('guarded partner notification delivery', () => {
     expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'accepted' });
     expect(h.sendEmail.mock.calls[1][0]).toEqual(h.sendEmail.mock.calls[0][0]);
     expect(h.delivery().attemptCount).toBe(2);
+  });
+
+  it('never replays an uncertain send with a changed reply address under the previous idempotency key', async () => {
+    const h = harness(), env = h.input.env as NodeJS.ProcessEnv;
+    env.AFFILIATE_EMAIL_REPLY_TO = 'first@example.test';
+    h.sendEmail.mockRejectedValueOnce(new NewsletterProviderError('Synthetic uncertain provider response', 503));
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'retry_pending' });
+    expect(h.sendEmail.mock.calls[0][0]).toMatchObject({ replyTo: 'first@example.test' });
+    const originalContentHash = h.delivery().contentSha256;
+    h.advance(121_000); env.AFFILIATE_EMAIL_REPLY_TO = 'second@example.test';
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'ineligible' });
+    expect(h.delivery()).toMatchObject({ status: 'cancelled', lastErrorCode: 'eligibility_changed', contentSha256: originalContentHash, attemptCount: 1 });
+    expect(await deliverHeldAffiliateNotification(h.input)).toMatchObject({ status: 'already_processed' });
+    expect(h.sendEmail).toHaveBeenCalledOnce();
   });
 
   it('dead-letters rejected configuration and never retries after provider idempotency retention', async () => {

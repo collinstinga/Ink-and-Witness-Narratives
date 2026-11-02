@@ -5,6 +5,7 @@ import {
   buildReaderPasswordResetEmail,
   isRetryableNewsletterProviderError,
   isNewsletterProviderConfigured,
+  getAffiliateEmailReplyTo,
   NewsletterProviderConfigurationError,
   NewsletterProviderError,
   sendNewsletterEmail
@@ -14,6 +15,7 @@ const originalEnvironment = {
   key: process.env.RESEND_API_KEY,
   from: process.env.NEWSLETTER_FROM_EMAIL,
   replyTo: process.env.NEWSLETTER_REPLY_TO,
+  affiliateReplyTo: process.env.AFFILIATE_EMAIL_REPLY_TO,
   nodeEnv: process.env.NODE_ENV
 };
 
@@ -25,6 +27,8 @@ describe('newsletter email provider', () => {
     else process.env.NEWSLETTER_FROM_EMAIL = originalEnvironment.from;
     if (originalEnvironment.replyTo === undefined) delete process.env.NEWSLETTER_REPLY_TO;
     else process.env.NEWSLETTER_REPLY_TO = originalEnvironment.replyTo;
+    if (originalEnvironment.affiliateReplyTo === undefined) delete process.env.AFFILIATE_EMAIL_REPLY_TO;
+    else process.env.AFFILIATE_EMAIL_REPLY_TO = originalEnvironment.affiliateReplyTo;
     if (originalEnvironment.nodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalEnvironment.nodeEnv;
   });
@@ -122,4 +126,48 @@ describe('newsletter email provider', () => {
     expect(isRetryableNewsletterProviderError(new NewsletterProviderError('provider unavailable', 503))).toBe(true);
     expect(isRetryableNewsletterProviderError(new NewsletterProviderError('bad recipient', 422))).toBe(false);
   });
+
+  it('resolves a scoped affiliate reply address without changing the shared newsletter default', () => {
+    const env = { AFFILIATE_EMAIL_REPLY_TO: '  Partner.Replies@Example.Test  ', NEWSLETTER_REPLY_TO: 'Legacy Writer <legacy@example.test>' };
+    expect(getAffiliateEmailReplyTo(env)).toBe('partner.replies@example.test');
+    expect(getAffiliateEmailReplyTo({ ...env, AFFILIATE_EMAIL_REPLY_TO: '' })).toBe(env.NEWSLETTER_REPLY_TO);
+    expect(getAffiliateEmailReplyTo({ NEWSLETTER_REPLY_TO: env.NEWSLETTER_REPLY_TO })).toBe(env.NEWSLETTER_REPLY_TO);
+    expect(getAffiliateEmailReplyTo({})).toBeUndefined();
+    expect(env.NEWSLETTER_REPLY_TO).toBe('Legacy Writer <legacy@example.test>');
+  });
+
+  it.each(['not-an-address', 'one@example.test,two@example.test', 'one@example.test;two@example.test',
+    'one@example.test\r\nBcc: victim@example.test', 'one@example.test\u0000', 'Partner <one@example.test>'])
+    ('rejects malformed dedicated affiliate reply configuration %j', value => {
+      expect(() => getAffiliateEmailReplyTo({ AFFILIATE_EMAIL_REPLY_TO: value, NEWSLETTER_REPLY_TO: 'fallback@example.test' }))
+        .toThrow(NewsletterProviderConfigurationError);
+    });
+
+  it('sets an internal reply override while preserving the verified From, recipients and idempotency key', async () => {
+    process.env.RESEND_API_KEY = 're_test';
+    process.env.NEWSLETTER_FROM_EMAIL = 'Ink & Witness <updates@example.com>';
+    process.env.NEWSLETTER_REPLY_TO = 'newsletter@example.test';
+    process.env.AFFILIATE_EMAIL_REPLY_TO = 'partner@example.test';
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => new Response(JSON.stringify({ id: 'synthetic-email' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch;
+    const message = { to: 'reader@example.test', subject: 'Subject', html: '<p>Body</p>', text: 'Body', idempotencyKey: 'reply-routing-one', fetchImpl };
+    await sendNewsletterEmail({ ...message, replyTo: getAffiliateEmailReplyTo() });
+    const first = (fetchImpl as any).mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(first.body))).toMatchObject({ from: process.env.NEWSLETTER_FROM_EMAIL, to: ['reader@example.test'], reply_to: 'partner@example.test' });
+    expect(first.headers).toMatchObject({ 'Idempotency-Key': 'reply-routing-one' });
+    await sendNewsletterEmail({ ...message, idempotencyKey: 'newsletter-routing-two' });
+    expect(JSON.parse(String((fetchImpl as any).mock.calls[1][1].body))).toMatchObject({ from: process.env.NEWSLETTER_FROM_EMAIL, reply_to: 'newsletter@example.test' });
+    expect(process.env.NEWSLETTER_REPLY_TO).toBe('newsletter@example.test');
+  });
+
+  it.each(['one@example.test\r\nBcc: victim@example.test', 'one@example.test,two@example.test', 'one@example.test\u0000'])
+    ('rejects an unsafe internal reply override before contacting the provider %j', async replyTo => {
+      process.env.RESEND_API_KEY = 're_test';
+      process.env.NEWSLETTER_FROM_EMAIL = 'Ink & Witness <updates@example.com>';
+      const fetchImpl = vi.fn() as unknown as typeof fetch;
+      await expect(sendNewsletterEmail({ to: 'reader@example.test', subject: 'Subject', html: '<p>Body</p>', text: 'Body',
+        idempotencyKey: 'unsafe-reply', replyTo, fetchImpl })).rejects.toBeInstanceOf(NewsletterProviderConfigurationError);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
 });

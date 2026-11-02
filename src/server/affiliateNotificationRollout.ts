@@ -8,7 +8,7 @@ import type { AffiliateNotificationSource } from './affiliateNotificationPlan.js
 import { getFirestoreClientTarget } from './db.js';
 import { normalizeNewsletterEmail, newsletterEmailIndexId } from './newsletterSecurity.js';
 import { validateAffiliateNotificationSettings } from './affiliateNotifications.js';
-import { sendNewsletterEmail } from './newsletterEmail.js';
+import { getAffiliateEmailReplyTo, sendNewsletterEmail } from './newsletterEmail.js';
 
 export const AFFILIATE_NOTIFICATION_ROLLOUT_DOCUMENT_ID = 'affiliate_notification_rollout';
 export const AFFILIATE_NOTIFICATION_PRODUCTION_PROJECT = 'ink-and-witness-narratives';
@@ -367,7 +367,7 @@ export async function sendProductionAffiliateNotificationTest(input: {
   const recipient = normalizeNewsletterEmail(input.approvedTestRecipient ?? env.AFFILIATE_NOTIFICATION_TEST_RECIPIENT_EMAIL);
   if (productionAffiliateNotificationGate(input.db, env, true) !== 'allowed' || productionAffiliateNotificationMode(env) !== 'production_test'
     || !writer || !recipient || rawHash(recipient) !== env.AFFILIATE_NOTIFICATION_TEST_RECIPIENT_SHA256) return { status: 'blocked' };
-  const transportMatches = () => Boolean(input.sendEmail) || ['RESEND_API_KEY', 'NEWSLETTER_FROM_EMAIL', 'NEWSLETTER_REPLY_TO']
+  const transportMatches = () => Boolean(input.sendEmail) || ['RESEND_API_KEY', 'NEWSLETTER_FROM_EMAIL', 'NEWSLETTER_REPLY_TO', 'AFFILIATE_EMAIL_REPLY_TO']
     .every(key => (env[key] || '').trim() === (process.env[key] || '').trim());
   if (!transportMatches()) return { status: 'blocked' };
   const clock = input.clock || (() => new Date().toISOString()); const now = clock();
@@ -381,7 +381,7 @@ export async function sendProductionAffiliateNotificationTest(input: {
     text: 'This is the writer’s controlled Literary Circle email delivery test. No affiliate or customer emails were sent by this test. No accounts, purchases, commissions or marketing consent were changed.',
     html: '<p>This is the writer’s controlled Literary Circle email delivery test.</p><p>No affiliate or customer emails were sent by this test. No accounts, purchases, commissions or marketing consent were changed.</p>' };
   const contentSha256 = affiliateNotificationRolloutHash({ message, from: loaded.review.fromEmail,
-    providerAccountSha256: loaded.review.providerAccountSha256, replyTo: env.NEWSLETTER_REPLY_TO?.trim() || null });
+    providerAccountSha256: loaded.review.providerAccountSha256, replyTo: getAffiliateEmailReplyTo(env) || null });
   try {
     const claimed = await input.db.runTransaction(async transaction => {
       const fresh = await readProductionAffiliateNotificationReview({ db: input.db, transaction, now: clock() }, env);
@@ -410,7 +410,8 @@ export async function sendProductionAffiliateNotificationTest(input: {
     if (!dispatch || at === null || at >= time(dispatch.leaseExpiresAt)! || at >= time(dispatch.authorizationExpiresAt)! || !transportMatches()) return { status: 'ineligible', deliveryId: id };
     let providerMessageId: string;
     try {
-      const result = await (input.sendEmail || sendNewsletterEmail)({ ...message, idempotencyKey: `affiliate-writer-test-v1:${id}`, deliveryId: id });
+      const result = await (input.sendEmail || sendNewsletterEmail)({ ...message, idempotencyKey: `affiliate-writer-test-v1:${id}`, deliveryId: id,
+        replyTo: getAffiliateEmailReplyTo(env) });
       if (!result || !/^[A-Za-z0-9_-]{1,200}$/.test(result.providerMessageId)) throw new Error('Unconfirmed provider acknowledgement.');
       providerMessageId = result.providerMessageId;
     } catch {

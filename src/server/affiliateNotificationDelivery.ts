@@ -6,7 +6,7 @@ import { planAffiliateNotifications, type AffiliateNotificationSource, type Held
 import { renderAffiliateNotificationTemplate, validateAffiliateNotificationSettings } from './affiliateNotifications.js';
 import { createAffiliateMarketingOptOutToken } from './affiliateNotificationSecurity.js';
 import { normalizeNewsletterEmail, newsletterEmailIndexId } from './newsletterSecurity.js';
-import { NewsletterProviderError, sendNewsletterEmail } from './newsletterEmail.js';
+import { getAffiliateEmailReplyTo, NewsletterProviderError, sendNewsletterEmail } from './newsletterEmail.js';
 import { newsletterOutcomeForResendEvent, verifyResendWebhook, type NewsletterWebhookHeaders } from './newsletterWebhook.js';
 import { AFFILIATE_RELEASE_NOTIFICATION_MAX_AGE_MS } from './affiliateNotificationEvents.js';
 import { verifiedManualAffiliateNotificationTierIds } from './affiliateNotificationTierFilter.js';
@@ -360,7 +360,7 @@ async function loadEligible(input: {
     // changed reply-to or provider account cannot replay a different envelope
     // under the previous account's idempotency key after an ambiguous failure.
     contentSha256: affiliateNotificationDeliveryHash({
-      message, from: review.fromEmail, replyTo: env.NEWSLETTER_REPLY_TO?.trim() || null,
+      message, from: review.fromEmail, replyTo: getAffiliateEmailReplyTo(env) || null,
       providerAccountSha256: affiliateNotificationDeliveryHash(env.RESEND_API_KEY!.trim()),
     }),
     ...(evidence.cooldown ? { cooldown: {
@@ -389,7 +389,7 @@ export async function deliverHeldAffiliateNotification(input: {
   if (mode !== 'allowed') return { status: mode };
   // The shared transport intentionally reads process.env. A test-only injected
   // environment must never authorize a different real provider account/sender.
-  const transportMatchesReview = () => Boolean(input.sendEmail) || ['RESEND_API_KEY', 'NEWSLETTER_FROM_EMAIL', 'NEWSLETTER_REPLY_TO']
+  const transportMatchesReview = () => Boolean(input.sendEmail) || ['RESEND_API_KEY', 'NEWSLETTER_FROM_EMAIL', 'NEWSLETTER_REPLY_TO', 'AFFILIATE_EMAIL_REPLY_TO']
     .every(key => (env[key] || '').trim() === (process.env[key] || '').trim());
   if (!transportMatchesReview()) return { status: 'blocked' };
   if (!INTENT_ID.test(input.intentId) || typeof input.verifySource !== 'function') return { status: 'ineligible' };
@@ -512,6 +512,7 @@ export async function deliverHeldAffiliateNotification(input: {
     try {
       outcome = await (input.sendEmail || sendNewsletterEmail)({
         ...dispatch.email, idempotencyKey: `affiliate-notification-v1:${id}`, deliveryId: id,
+        replyTo: getAffiliateEmailReplyTo(env),
       });
       if (!outcome || typeof outcome.providerMessageId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(outcome.providerMessageId)) throw new NewsletterProviderError('Invalid provider acknowledgement.', 503);
     } catch (error) {

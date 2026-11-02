@@ -7,7 +7,7 @@ import { hasValidAffiliateWriterApproval } from './affiliateApproval.js';
 import { normalizeAffiliateNotificationPreferences } from './affiliateNotificationPreferences.js';
 import { createAffiliateMarketingOptOutToken } from './affiliateNotificationSecurity.js';
 import { normalizeNewsletterEmail, newsletterEmailIndexId } from './newsletterSecurity.js';
-import { buildNewsletterCampaignEmail, NewsletterProviderConfigurationError, NewsletterProviderError, sendNewsletterEmail } from './newsletterEmail.js';
+import { buildNewsletterCampaignEmail, getAffiliateEmailReplyTo, NewsletterProviderConfigurationError, NewsletterProviderError, sendNewsletterEmail } from './newsletterEmail.js';
 import type { NewsletterWebhookOutcome } from './newsletterWebhook.js';
 
 export const PARTNER_EMAIL_CAMPAIGNS = 'affiliate_partner_email_campaigns';
@@ -22,7 +22,7 @@ const digest = (value: unknown) => crypto.createHash('sha256').update(JSON.strin
 const deliveryId = (campaign: string, affiliateId: string) => `nld_${digest(['partner-email', campaign, affiliateId]).slice(0, 48)}`;
 type Recipient = { id: string; name: string; email: string };
 type StoredCampaign = AffiliatePartnerEmailCampaign & { schemaVersion: 1; contentHash: string; createdBy: string;
-  recipients: Recipient[]; baseUrl: string; fromEmail: string; nextIndex: number; leaseToken?: string; leaseUntil?: number };
+  recipients: Recipient[]; baseUrl: string; fromEmail: string; replyTo?: string; nextIndex: number; leaseToken?: string; leaseUntil?: number };
 type Delivery = { schemaVersion: 1; kind: 'manual_partner_email'; id: string; campaignId: string; affiliateId: string;
   emailHash: string; status: 'queued' | 'dispatching' | 'accepted' | 'excluded' | 'failed' | 'uncertain';
   createdAt: string; updatedAt: string; providerMessageId?: string; outcome?: string; lastWebhookHash?: string };
@@ -51,7 +51,7 @@ export function validateAffiliatePartnerEmailInput(value: unknown, withRequestId
 
 /** Native production only. A preview with copied secrets must never send to real partners. */
 export function affiliatePartnerEmailConfiguration(db: Firestore, env: NodeJS.ProcessEnv,
-  target = getFirestoreClientTarget(db)): { baseUrl: string; fromEmail: string; secret: string } | null {
+  target = getFirestoreClientTarget(db)): { baseUrl: string; fromEmail: string; replyTo?: string; secret: string } | null {
   if (env.VERCEL_ENV !== 'production' || target?.projectId !== 'ink-and-witness-narratives'
     || target.firestoreDatabaseId !== '(default)' || env.FIRESTORE_EMULATOR_HOST || env.FIREBASE_AUTH_EMULATOR_HOST
     || !env.RESEND_API_KEY?.trim() || !env.RESEND_WEBHOOK_SECRET?.trim()
@@ -62,7 +62,8 @@ export function affiliatePartnerEmailConfiguration(db: Firestore, env: NodeJS.Pr
     const url = new URL(env.AFFILIATE_NOTIFICATION_PRODUCTION_BASE_URL || '');
     if (url.protocol !== 'https:' || !['inkandwitness-narratives.co.ke', 'www.inkandwitness-narratives.co.ke'].includes(url.hostname)
       || url.username || url.password || url.port || url.search || url.hash || url.pathname !== '/') return null;
-    return { baseUrl: url.origin, fromEmail, secret: env.AFFILIATE_NOTIFICATION_SIGNING_SECRET!.trim() };
+    const replyTo = getAffiliateEmailReplyTo(env);
+    return { baseUrl: url.origin, fromEmail, ...(replyTo ? { replyTo } : {}), secret: env.AFFILIATE_NOTIFICATION_SIGNING_SECRET!.trim() };
   } catch { return null; }
 }
 
@@ -121,6 +122,7 @@ function validCampaign(value: unknown, id: string): value is StoredCampaign {
   try { content = validateAffiliatePartnerEmailInput({ subject: value.subject, body: value.body, audience: value.audience, affiliateIds: value.affiliateIds }); }
   catch { return false; }
   return value.schemaVersion === 1 && value.id === id && CAMPAIGN_ID.test(id)
+    && (value.replyTo === undefined || (typeof value.replyTo === 'string' && value.replyTo.length <= 320 && !/[\u0000-\u001f\u007f]/.test(value.replyTo)))
     && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash)
     && digest(content) === value.contentHash
     && Array.isArray(value.recipients) && value.recipients.length > 0 && value.recipients.length <= MAX_RECIPIENTS
@@ -174,7 +176,7 @@ export class AffiliatePartnerEmailStore {
       const rows = await audience(db, tx, content), recipients = rows.filter(r => r.eligible).map(({ id, email, name }) => ({ id, email, name }));
       if (!recipients.length) throw new AffiliatePartnerEmailError(409, 'No partners are eligible. Partners must opt into campaign emails in their dashboard.');
       const row: StoredCampaign = { schemaVersion: 1, ...content, id, contentHash, createdBy: actor, recipients,
-        baseUrl: config.baseUrl, fromEmail: config.fromEmail, nextIndex: 0, status: 'draft', createdAt: now,
+        baseUrl: config.baseUrl, fromEmail: config.fromEmail, ...(config.replyTo ? { replyTo: config.replyTo } : {}), nextIndex: 0, status: 'draft', createdAt: now,
         eligibleCount: recipients.length, remainingCount: recipients.length, excludedCount: rows.length - recipients.length,
         sentCount: 0, failedCount: 0, uncertainCount: 0 };
       tx.create(ref, row);
@@ -200,8 +202,8 @@ export class AffiliatePartnerEmailStore {
     let campaign = await db.runTransaction(async tx => {
       const snapshot = await tx.get(ref), row = snapshot.data();
       if (!validCampaign(row, id)) throw new AffiliatePartnerEmailError(404, 'Partner email was not found.');
-      if (row.baseUrl !== config.baseUrl || row.fromEmail !== config.fromEmail) throw new AffiliatePartnerEmailError(409, 'Email sender settings changed. Prepare a new email instead of resending this campaign.');
       if (!row.remainingCount) return row;
+      if (row.baseUrl !== config.baseUrl || row.fromEmail !== config.fromEmail || row.replyTo !== config.replyTo) throw new AffiliatePartnerEmailError(409, 'Email sender settings changed. Prepare a new email instead of resending this campaign.');
       if (row.leaseUntil && row.leaseUntil > this.now()) throw new AffiliatePartnerEmailError(409, 'This email is already being sent. Refresh its status shortly.');
       tx.update(ref, { leaseToken, leaseUntil: this.now() + LEASE_MS, status: 'sending' });
       return { ...row, leaseToken, leaseUntil: this.now() + LEASE_MS, status: 'sending' as const };
@@ -210,7 +212,7 @@ export class AffiliatePartnerEmailStore {
     try {
       for (let step = 0; step < BATCH_SIZE && campaign.remainingCount; step++) {
         const activeConfig = this.config(db);
-        if (!activeConfig || activeConfig.baseUrl !== campaign.baseUrl || activeConfig.fromEmail !== campaign.fromEmail || activeConfig.secret !== config.secret) {
+        if (!activeConfig || activeConfig.baseUrl !== campaign.baseUrl || activeConfig.fromEmail !== campaign.fromEmail || activeConfig.replyTo !== campaign.replyTo || activeConfig.secret !== config.secret) {
           throw new AffiliatePartnerEmailError(409, 'Email settings changed while sending. Refresh status before continuing.');
         }
         const prepared = await db.runTransaction(async tx => {
@@ -249,6 +251,7 @@ export class AffiliatePartnerEmailStore {
         let status: Delivery['status'] = 'accepted', providerMessageId: string | undefined;
         try {
           const result = await (this.deps.sendEmail || sendNewsletterEmail)({ to: recipient.email, ...email, unsubscribeUrl,
+            ...(campaign.replyTo ? { replyTo: campaign.replyTo } : {}),
             deliveryId: key, idempotencyKey: `manual-partner-email-${key}` });
           providerMessageId = result.providerMessageId;
         } catch (error) {

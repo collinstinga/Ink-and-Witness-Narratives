@@ -1,4 +1,5 @@
 import type { NewsletterCampaignContent } from '../types.js';
+import { normalizeNewsletterEmail } from './newsletterSecurity.js';
 
 const RESEND_EMAIL_ENDPOINT = 'https://api.resend.com/emails';
 
@@ -17,6 +18,31 @@ export class NewsletterProviderError extends Error {
     this.name = 'NewsletterProviderError';
     this.status = status;
   }
+}
+
+/** Affiliate-only configuration; never changes the shared sender or other mail. */
+export function getAffiliateEmailReplyTo(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const dedicated = env.AFFILIATE_EMAIL_REPLY_TO?.trim();
+  if (!dedicated) return env.NEWSLETTER_REPLY_TO?.trim() || undefined;
+  const email = normalizeNewsletterEmail(dedicated);
+  if (!email || /[<>,;\u0000-\u0020\u007f]/.test(dedicated)) {
+    throw new NewsletterProviderConfigurationError('Affiliate reply-to must be one valid email address.');
+  }
+  return email;
+}
+
+function explicitReplyTo(value: string): string {
+  if (typeof value !== 'string' || value.length > 320 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new NewsletterProviderConfigurationError('Reply-to must be one valid email address.');
+  }
+  const header = value.trim();
+  // Preserve an existing single named mailbox when inheriting the global setting.
+  const named = /^(?:"[^"]*"|[^"<>@,;]+)\s*<([^<>]+)>$/.exec(header);
+  const address = named ? named[1] : header;
+  if (!normalizeNewsletterEmail(address) || /[<>,;]/.test(address)) {
+    throw new NewsletterProviderConfigurationError('Reply-to must be one valid email address.');
+  }
+  return header;
 }
 
 export function isRetryableNewsletterProviderError(error: unknown): boolean {
@@ -183,11 +209,15 @@ export async function sendNewsletterEmail(options: {
   idempotencyKey: string;
   deliveryId?: string;
   unsubscribeUrl?: string;
+  replyTo?: string;
   fetchImpl?: typeof fetch;
 }): Promise<{ providerMessageId: string }> {
   const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.NEWSLETTER_FROM_EMAIL?.trim();
   if (!apiKey || !from) throw new NewsletterProviderConfigurationError();
+  const replyTo = options.replyTo === undefined
+    ? process.env.NEWSLETTER_REPLY_TO?.trim() || undefined
+    : explicitReplyTo(options.replyTo);
 
   const request = options.fetchImpl || fetch;
   const headers: Record<string, string> = {
@@ -212,7 +242,7 @@ export async function sendNewsletterEmail(options: {
         subject: options.subject,
         html: options.html,
         text: options.text,
-        reply_to: process.env.NEWSLETTER_REPLY_TO?.trim() || undefined,
+        reply_to: replyTo,
         headers: Object.keys(emailHeaders).length ? emailHeaders : undefined,
         tags: deliveryTags
       }),
