@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useImperativeHandle } from 'react';
 import { 
   Save, 
   Globe, 
@@ -74,6 +74,19 @@ interface WriterEditorProps {
   onSave: (article: Partial<Article>, options?: ArticleSaveOptions) => Promise<ArticleSaveResult>;
   onCancel: () => void;
   onPreview: (article: Article) => void;
+  headerSave?: boolean;
+  onSaveStateChange?: (state: WriterEditorSaveState | null) => void;
+}
+
+export interface WriterEditorHandle {
+  save: () => Promise<void>;
+}
+
+export interface WriterEditorSaveState {
+  isDirty: boolean;
+  isSaving: boolean;
+  lastSavedAt: string | null;
+  error: string | null;
 }
 
 const PRESET_COVERS = [
@@ -112,13 +125,15 @@ async function persistEmbeddedImage(value: string, prefix: string): Promise<stri
   return uploaded.url;
 }
 
-export const WriterEditor: React.FC<WriterEditorProps> = ({
+export const WriterEditor = React.forwardRef<WriterEditorHandle, WriterEditorProps>(({
   initialArticle,
   allPublishedArticles = [],
   onSave,
   onCancel,
-  onPreview
-}) => {
+  onPreview,
+  headerSave = false,
+  onSaveStateChange
+}, ref) => {
   const [currentArticleId, setCurrentArticleId] = useState<string | null>(initialArticle?.id || null);
   const [title, setTitle] = useState(initialArticle?.title || '');
   const [subtitle, setSubtitle] = useState(initialArticle?.subtitle || '');
@@ -214,6 +229,18 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   const [uploadingImage, setUploadingImage] = useState(false);
   const [savingPermanentCover, setSavingPermanentCover] = useState(false);
   const [permanentCoverSaved, setPermanentCoverSaved] = useState(false);
+
+  // Report only status values. Keeping the changing save closure out of this
+  // effect prevents parent/child render loops and never triggers a save itself.
+  useEffect(() => {
+    onSaveStateChange?.({
+      isDirty,
+      isSaving: saving || autosaving || uploadingImage || savingPermanentCover,
+      lastSavedAt: lastSavedTime,
+      error
+    });
+  }, [isDirty, saving, autosaving, uploadingImage, savingPermanentCover, lastSavedTime, error, onSaveStateChange]);
+  useEffect(() => () => onSaveStateChange?.(null), [onSaveStateChange]);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingEditorSelectionRef = useRef<{ content: string; selectionStart: number; selectionEnd: number } | null>(null);
@@ -640,6 +667,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
     cropSettings: CropSettings;
     originalUrl?: string;
   }) => {
+    setUploadingImage(true);
+    setError(null);
     try {
       const croppedDataUrl = await prepareImageDataUrlForUpload(result.croppedDataUrl);
       const originalCandidate = pendingCoverOriginalDataUrl || result.originalUrl || coverImageOriginal;
@@ -669,6 +698,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       setTimeout(() => setSaveSuccessMsg(null), 3000);
     } catch (err: any) {
       setError(err.message || 'Failed to upload the cropped cover image.');
+    } finally {
+      setUploadingImage(false);
     }
   };
 
@@ -744,6 +775,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
   };
 
   const handleSaveAction = async (targetStatus?: ArticleStatus) => {
+    if (manualSaveInProgressRef.current || saving || uploadingImage || savingPermanentCover) return;
     if (!title.trim()) {
       setError('Please provide a piece title.');
       return;
@@ -872,6 +904,10 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
       setSaving(false);
     }
   };
+
+  // The header uses the same validation, autosave ordering and onSave pipeline
+  // as the standalone editor. Refresh this handle with the latest form closure.
+  useImperativeHandle(ref, () => ({ save: () => handleSaveAction() }));
 
   const handleAiAssist = async () => {
     setAiLoading(true);
@@ -1036,7 +1072,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
             <span>Preview Mode</span>
           </button>
 
-          {/* Save Draft */}
+          {/* Standalone editor actions; the portal owns its single header Save. */}
+          {!headerSave && <>
           <button
             onClick={() => handleSaveAction('draft')}
             disabled={saving}
@@ -1045,7 +1082,6 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
             <Save className="w-3.5 h-3.5" />
             <span>{saving ? 'Saving...' : 'Save Draft'}</span>
           </button>
-
           {/* Publish / Update Button */}
           <button
             onClick={() => handleSaveAction('published')}
@@ -1055,6 +1091,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
             <Globe className="w-3.5 h-3.5" />
             <span>{status === 'published' ? 'Update Published' : 'Publish Live'}</span>
           </button>
+          </>}
 
         </div>
       </div>
@@ -1510,6 +1547,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
               <label className="block text-xs font-mono text-slate-300 mb-2">
                 Visibility Status
               </label>
+              {headerSave && <p className="mb-2 text-xs text-slate-400">Choose visibility, then use Save in the header.</p>}
               <div className="grid grid-cols-3 gap-2">
                 <button
                   type="button"
@@ -1603,6 +1641,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
                       </span>
                       <input
                         type="number"
+                        aria-label="Piece price (KES)"
                         min={50}
                         step={50}
                         value={priceKes}
@@ -2328,8 +2367,8 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
         onCategoriesUpdated={(updated) => setAvailableCategories(updated)}
       />
 
-      {/* Bottom Sticky Save Status Bar */}
-      <div className="sticky bottom-4 z-40">
+      {/* Standalone fallback only: the portal keeps Save in its header. */}
+      {!headerSave && <div className="sticky bottom-4 z-40">
         <SaveStatusBar
           idPrefix="writer-editor"
           onSave={() => handleSaveAction()}
@@ -2339,7 +2378,7 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
           errorMessage={error}
           saveButtonText={status === 'published' ? 'SAVE & UPDATE' : 'SAVE CHANGES'}
         />
-      </div>
+      </div>}
 
       {/* Unsaved Changes Prompt Modal */}
       <UnsavedChangesPromptModal
@@ -2360,5 +2399,6 @@ export const WriterEditor: React.FC<WriterEditorProps> = ({
 
     </div>
   );
-};
+});
+WriterEditor.displayName = 'WriterEditor';
 

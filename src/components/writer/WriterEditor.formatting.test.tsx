@@ -32,4 +32,20 @@ describe('writer publication format and accessible text formatting', () => {
     expect(markup).toContain('## Quiet\nA **bold** and *soft* sentence.');
     expect(markup).toContain('choose its book and chapter order');
   });
+
+  it('keeps standalone save controls while omitting duplicates when the portal owns Save', () => {
+    const standalone = renderEditor(null);
+    expect(standalone).toContain('id="writer-editor-bar"');
+    expect(standalone).toContain('Save Draft');
+    expect(standalone).toContain('Publish Live');
+    const portal = renderToStaticMarkup(<WriterEditor headerSave initialArticle={null}
+      onSave={vi.fn()} onCancel={vi.fn()} onPreview={vi.fn()} />);
+    expect(portal).not.toContain('id="writer-editor-bar"');
+    expect(portal).not.toContain('Save Draft');
+    expect(portal).not.toContain('Publish Live');
+    expect(portal).toContain('Choose visibility, then use Save in the header.');
+    expect(portal).toContain('Visibility Status');
+    expect(portal).toContain('>Publish</span>');
+    expect(portal).toContain('aria-label="Piece price (KES)"');
+  });
 });

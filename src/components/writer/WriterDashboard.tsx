@@ -45,7 +45,7 @@ import { api, getWriterToken, setWriterToken, clearWriterToken } from '../../uti
 import { WriterLogin } from './WriterLogin.js';
 import { WriterOverview } from './WriterOverview.js';
 import { WriterPiecesList } from './WriterPiecesList.js';
-import { WriterEditor } from './WriterEditor.js';
+import { WriterEditor, type WriterEditorHandle, type WriterEditorSaveState } from './WriterEditor.js';
 import { WriterPayments } from './WriterPayments.js';
 import { WriterTips } from './WriterTips.js';
 import { WriterSettings } from './WriterSettings.js';
@@ -96,6 +96,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
   const [savingPermanently, setSavingPermanently] = useState<boolean>(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
   const [lastSavedTimestamp, setLastSavedTimestamp] = useState<string | null>(null);
+  const snapshotInFlightRef = useRef(false);
 
   // Active View Tab
   const [currentTab, setCurrentTab] = useState<WriterNavTab>(initialTab || 'overview');
@@ -133,6 +134,11 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
   // Editor state
   const [editingPiece, setEditingPiece] = useState<Article | null>(null);
+  const editorRef = useRef<WriterEditorHandle | null>(null);
+  const [editorSaveState, setEditorSaveState] = useState<WriterEditorSaveState | null>(null);
+  const handleEditorSaveStateChange = useCallback((state: WriterEditorSaveState | null) => {
+    setEditorSaveState(state);
+  }, []);
 
   const [loading, setLoading] = useState<boolean>(false);
   const loadedSections = useRef<Set<string>>(new Set());
@@ -308,7 +314,8 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
   };
 
   const handleSavePermanently = async () => {
-    if (savingPermanently) return;
+    if (snapshotInFlightRef.current) return;
+    snapshotInFlightRef.current = true;
     setSavingPermanently(true);
     setSaveSuccessNotice(null);
     try {
@@ -327,9 +334,35 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
     } catch (err: any) {
       alert(err.message || 'Network error while saving permanently.');
     } finally {
+      snapshotInFlightRef.current = false;
       setSavingPermanently(false);
     }
   };
+
+  const handleHeaderSave = async () => {
+    if (currentTab === 'editor') {
+      // A missing/loading editor must never fall back to a snapshot and claim
+      // its unsaved form was saved. The ref owns the editor's real save flow.
+      await editorRef.current?.save();
+      return;
+    }
+    await handleSavePermanently();
+  };
+
+  const editorOwnsSave = currentTab === 'editor';
+  const headerSaving = editorOwnsSave ? editorSaveState?.isSaving === true : savingPermanently;
+  const headerSaved = editorOwnsSave
+    ? !!editorSaveState?.lastSavedAt && !editorSaveState.isDirty && !editorSaveState.error
+    : !!saveSuccessNotice;
+  const headerSaveDisabled = headerSaving || (editorOwnsSave && !editorSaveState);
+  const headerSaveLabel = headerSaving ? 'Saving…' : headerSaved ? 'Saved' : 'Save';
+  const headerSaveTitle = editorOwnsSave
+    ? editorSaveState?.error || (editorSaveState?.isDirty ? 'Save unsaved piece changes' : 'Save piece')
+    : lastSavedTimestamp ? `Save a recovery snapshot. Last saved at ${lastSavedTimestamp}` : 'Save a recovery snapshot of stored data';
+  const headerSaveIcon = headerSaving
+    ? <span className="h-3.5 w-3.5 rounded-full border border-current border-t-transparent animate-spin" aria-hidden="true" />
+    : headerSaved ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+      : <Save className="h-3.5 w-3.5" aria-hidden="true" />;
 
   const handleNewPiece = () => {
     setEditingPiece(null);
@@ -418,28 +451,31 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
     <div id="writer-dashboard-root" className="fixed inset-0 z-50 bg-[#050811] text-slate-100 flex flex-col md:flex-row overflow-hidden font-sans">
       
       {/* Mobile Top Header */}
-      <header className="md:hidden flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-[#080d1a] border-b border-slate-800">
-        <div className="flex items-center gap-2">
+      <header className="md:hidden flex shrink-0 items-center justify-between gap-2 px-3 py-2 bg-[#080d1a] border-b border-slate-800">
+        <div className="flex shrink-0 items-center gap-1.5">
           <div className="w-6 h-6 rounded bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold font-serif">
             IW
           </div>
-          <span className="font-serif font-bold text-sm tracking-tight text-white">Writer Studio</span>
+          <span className="font-serif font-bold text-sm tracking-tight text-white" aria-label="Writer Studio"><span className="hidden min-[360px]:inline">Writer </span>Studio</span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             id="mobile-writer-guide-btn"
             type="button"
             onClick={() => setGuideOpen(true)}
             aria-haspopup="dialog"
-            className="min-h-11 rounded-lg border border-sky-800 bg-sky-950 px-2.5 py-1.5 text-[11px] font-mono text-sky-200"
+            aria-label="Guide & Demo"
+            title="Guide & Demo"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-sky-800 bg-sky-950 text-sky-200"
           >
-            Guide &amp; Demo
+            <BookOpen className="h-4 w-4" aria-hidden="true" />
           </button>
           <button
             id="mobile-email-terminal-btn"
             onClick={() => handleTabChange('newsletter')}
-            className={`px-2.5 py-1.5 rounded-lg border text-xs font-mono flex items-center gap-1.5 cursor-pointer ${
+            type="button"
+            className={`h-9 w-9 justify-center rounded-lg border text-xs font-mono flex items-center cursor-pointer ${
               currentTab === 'newsletter'
                 ? 'bg-sky-900 border-sky-500 text-white'
                 : 'bg-slate-900 border-slate-800 text-slate-300'
@@ -447,30 +483,29 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
             title="Open Email Terminal"
             aria-label="Open Email Terminal"
           >
-            <Mail className="w-3.5 h-3.5 text-sky-400" />
-            <span>Email</span>
+            <Mail className="w-4 h-4 text-sky-400" aria-hidden="true" />
           </button>
 
           <button
             id="mobile-save-permanently-btn"
-            onClick={handleSavePermanently}
-            disabled={savingPermanently}
-            className="px-2.5 py-1.5 rounded-lg bg-sky-950 border border-sky-600/70 text-sky-200 text-xs font-mono flex items-center gap-1.5 cursor-pointer"
-            title="Save Permanently"
+            type="button"
+            onClick={handleHeaderSave}
+            disabled={headerSaveDisabled}
+            className="h-9 px-2 rounded-lg bg-sky-950 border border-sky-600/70 text-sky-200 text-xs font-mono flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            title={headerSaveTitle}
+            aria-label={editorOwnsSave ? 'Save piece' : 'Save workspace snapshot'}
+            aria-busy={headerSaving}
           >
-            {savingPermanently ? (
-              <div className="w-3 h-3 rounded-full border border-sky-400 border-t-transparent animate-spin" />
-            ) : saveSuccessNotice ? (
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            ) : (
-              <Save className="w-3.5 h-3.5 text-sky-400" />
-            )}
-            <span className="text-[11px]">{savingPermanently ? 'Saving...' : saveSuccessNotice ? 'Saved' : 'Save'}</span>
+            {headerSaveIcon}
+            <span className="text-[11px]" aria-live="polite">{headerSaveLabel}</span>
           </button>
 
           <button
+            type="button"
             onClick={() => setMobileNavOpen(!mobileNavOpen)}
-            className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
+            aria-label={mobileNavOpen ? 'Close writer menu' : 'Open writer menu'}
+            aria-expanded={mobileNavOpen}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
           >
             {mobileNavOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
@@ -501,45 +536,6 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
           </div>
         </div>
 
-        {/* Global Save Permanently Action Button */}
-        <div className="px-3 pt-3 pb-1">
-          <button
-            id="sidebar-save-permanently-btn"
-            onClick={handleSavePermanently}
-            disabled={savingPermanently}
-            className={`w-full p-2.5 rounded-xl border flex items-center justify-between transition-all cursor-pointer shadow-md text-xs font-mono font-semibold ${
-              savingPermanently
-                ? 'bg-amber-950/70 border-amber-500/80 text-amber-300 animate-pulse'
-                : saveSuccessNotice
-                ? 'bg-emerald-950/80 border-emerald-500/80 text-emerald-200'
-                : 'bg-gradient-to-r from-sky-950/90 via-indigo-950/90 to-slate-900 border-sky-600/70 hover:border-sky-400 text-sky-200 hover:text-white shadow-sky-950/50'
-            }`}
-            title="Atomically synchronize all monographs, configs, media, and settings to Cloud Firestore and take a recovery snapshot"
-          >
-            <div className="flex items-center gap-2">
-              {savingPermanently ? (
-                <div className="w-4 h-4 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
-              ) : saveSuccessNotice ? (
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              ) : (
-                <ShieldCheck className="w-4 h-4 text-sky-400" />
-              )}
-              <span>
-                {savingPermanently
-                  ? 'Saving to Cloud...'
-                  : saveSuccessNotice
-                  ? 'Saved Permanently ✓'
-                  : 'Save Permanently'}
-              </span>
-            </div>
-            {lastSavedTimestamp && !savingPermanently && !saveSuccessNotice && (
-              <span className="text-[10px] text-slate-400 font-mono">
-                {lastSavedTimestamp}
-              </span>
-            )}
-          </button>
-        </div>
-
         {/* Navigation Items */}
         <div className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
 
@@ -548,7 +544,7 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
             type="button"
             onClick={() => { setGuideOpen(true); setMobileNavOpen(false); }}
             aria-haspopup="dialog"
-            className="flex min-h-11 w-full items-center gap-2.5 rounded-xl border border-sky-800/60 bg-sky-950/40 px-3 py-2.5 text-xs font-semibold text-sky-200 hover:bg-sky-950"
+            className="flex h-9 w-full items-center gap-2 rounded-lg border border-sky-800/60 bg-sky-950/40 px-3 text-[11px] font-semibold text-sky-200 hover:bg-sky-950"
           >
             <BookOpen className="h-4 w-4" aria-hidden="true" />
             <span>Guide &amp; Demo</span>
@@ -912,25 +908,35 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
       {/* Main Content Area */}
       <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto">
-          <div className="mb-4 flex justify-end">
+          <header className="sticky top-0 z-30 mb-4 flex items-center justify-end gap-2 bg-[#050811]/95 py-2">
             <button type="button" onClick={() => setSecurityOpen(open => !open)} aria-expanded={securityOpen}
-              aria-controls="writer-account-security" className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200">
-              <ShieldCheck className="h-4 w-4" aria-hidden="true" />Account security
+              aria-controls="writer-account-security" className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 text-[11px] font-semibold text-slate-200">
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />Account security
             </button>
-          </div>
-          {securityOpen ? <WriterAccountSecurityPanel onClose={() => setSecurityOpen(false)} /> : null}
-          <div className="mb-4 hidden justify-end md:flex">
             <button
               id="desktop-writer-guide-btn"
               type="button"
               onClick={() => setGuideOpen(true)}
               aria-haspopup="dialog"
-              className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-sky-800 bg-sky-950/40 px-3 py-2 text-xs font-semibold text-sky-200 hover:bg-sky-950"
+              className="hidden h-9 items-center gap-1.5 rounded-lg border border-sky-800 bg-sky-950/40 px-2.5 text-[11px] font-semibold text-sky-200 hover:bg-sky-950 md:inline-flex"
             >
               <BookOpen className="h-4 w-4" aria-hidden="true" />
               Guide &amp; Demo
             </button>
-          </div>
+            <button
+              id="desktop-save-permanently-btn"
+              type="button"
+              onClick={handleHeaderSave}
+              disabled={headerSaveDisabled}
+              title={headerSaveTitle}
+              aria-label={editorOwnsSave ? 'Save piece' : 'Save workspace snapshot'}
+              aria-busy={headerSaving}
+              className="hidden h-9 items-center gap-1.5 rounded-lg border border-sky-600/70 bg-sky-950 px-2.5 text-[11px] font-mono text-sky-200 disabled:opacity-50 md:inline-flex"
+            >
+              {headerSaveIcon}<span aria-live="polite">{headerSaveLabel}</span>
+            </button>
+          </header>
+          {securityOpen ? <WriterAccountSecurityPanel onClose={() => setSecurityOpen(false)} /> : null}
           {currentTab === 'overview' && (
             <WriterOverview
               stats={stats}
@@ -938,8 +944,6 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
               onNavigateTab={(tab) => setCurrentTab(tab)}
               onEditPiece={handleEditPiece}
               onNewPiece={handleNewPiece}
-              onSavePermanently={handleSavePermanently}
-              savingPermanently={savingPermanently}
             />
           )}
 
@@ -984,6 +988,9 @@ export const WriterDashboard: React.FC<WriterDashboardProps> = ({
 
           {currentTab === 'editor' && (
             <WriterEditor
+              ref={editorRef}
+              headerSave
+              onSaveStateChange={handleEditorSaveStateChange}
               initialArticle={editingPiece}
               allPublishedArticles={pieces.filter(p => p.status === 'published')}
               onSave={handleSavePiece}

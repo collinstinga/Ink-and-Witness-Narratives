@@ -2,7 +2,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { ReaderAccountDirectory, ReaderAccountDirectoryView, ReaderAccountPieceGrantView, appendReaderAccountPage, canGrantReaderPiece, publishedReaderGrantPieces } from './ReaderAccountDirectory.js';
+import { ReaderAccountDirectory, ReaderAccountDirectoryView, ReaderAccountPieceGrantView, appendReaderAccountPage, canGrantReaderPiece, publishedReaderGrantPieces, requireReaderAccountPage } from './ReaderAccountDirectory.js';
 import type { ReaderAccountAdminPage } from '../../types.js';
 
 const directory: ReaderAccountAdminPage = { totalReaderAccounts: 42, matchingReaderAccounts: 42, pageSize: 25, readers: [
@@ -10,11 +10,12 @@ const directory: ReaderAccountAdminPage = { totalReaderAccounts: 42, matchingRea
   { id: 'user_reader0002', name: 'Other Reader', email: 'other@example.com', createdAt: '', status: 'suspended', revision: 2, suspensionReason: 'Writer review' },
   { id: 'user_reader0003', name: 'Legacy Reader', email: 'legacy@example.com', createdAt: '', status: 'unavailable', revision: 0 },
 ], nextCursor: 'safe-cursor' };
-const render = (loading = false, busy = false) => renderToStaticMarkup(<ReaderAccountDirectoryView directory={directory} loading={loading} busy={busy} error="" notice="" onRefresh={vi.fn()} onNext={vi.fn()} onFirst={vi.fn()} onSelect={vi.fn()} onGrant={vi.fn()} hasGrantPieces />);
+const render = (loading = false, busy = false) => renderToStaticMarkup(<ReaderAccountDirectoryView directory={directory} loading={loading} busy={busy} error="" notice="" onRefresh={vi.fn()} onSelect={vi.fn()} onGrant={vi.fn()} hasGrantPieces />);
 describe('private writer reader directory', () => {
   it('shows registered count, ownership, registration date and separate suspend/reactivate controls', () => {
     const markup = render();
-    for (const text of ['42', 'registered reader accounts', 'Reader Name', 'reader@example.com', 'Suspend account', 'Reactivate account', 'Status needs review', 'Writer accounts are excluded', 'purchases, licences and reading history remain preserved', 'Load more accounts', 'Loaded 3 of 42', '39 remaining', 'Grant piece access']) expect(markup).toContain(text);
+    for (const text of ['42', 'registered reader accounts', 'Reader Name', 'reader@example.com', 'Suspend account', 'Reactivate account', 'Status needs review', 'Writer accounts are excluded', 'purchases, licences and reading history remain preserved', '3 of 42 accounts are shown', 'Grant piece access']) expect(markup).toContain(text);
+    expect(markup).not.toMatch(/Load more accounts|Refresh from first page/);
     expect(markup).not.toMatch(/passwordHash|sessionGeneration|type="password"/);
     expect(markup).toMatch(/disabled=""[^>]*>Suspend account/);
   });
@@ -23,10 +24,20 @@ describe('private writer reader directory', () => {
     expect(render(false, true)).toContain('disabled=""');
     expect(render()).toContain('visible only in Writer Studio');
   });
-  it('offers bounded exact-email lookup without reader role or password editing', () => {
+  it('presents an automatically loaded list without requiring lookup or exposing account editing', () => {
     const markup = renderToStaticMarkup(<ReaderAccountDirectory />);
-    expect(markup).toContain('Find an exact email address'); expect(markup).toContain('type="email"');
+    expect(markup).toContain('Loading all reader accounts');
+    expect(markup).not.toMatch(/Find an exact email address|Find reader|Show all|type="email"|Load more accounts/);
     expect(markup).not.toContain('type="password"'); expect(markup).not.toContain('Administrator');
+  });
+  it('rejects the old licence response and malformed directory payloads rather than showing a blank list', () => {
+    for (const value of [undefined, null, { readers: [] }, { ...directory, totalReaderAccounts: NaN },
+      { ...directory, matchingReaderAccounts: 1 }, { ...directory, readers: [directory.readers[0], directory.readers[0]] },
+      { ...directory, readers: [{ ...directory.readers[0], email: undefined }] }, { ...directory, nextCursor: 'bad/cursor' }]) {
+      expect(() => requireReaderAccountPage(value)).toThrow('registered reader account list could not be confirmed');
+    }
+    expect(requireReaderAccountPage(directory)).toBe(directory);
+    expect(requireReaderAccountPage({ totalReaderAccounts: 0, matchingReaderAccounts: 0, pageSize: 25, readers: [] }).readers).toEqual([]);
   });
   it('requires explicit confirmation, rejects repeat taps and avoids optimistic changes or auto-retries', () => {
     const source = readFileSync(new URL('./ReaderAccountDirectory.tsx', import.meta.url), 'utf8');
@@ -78,10 +89,13 @@ describe('private writer reader directory', () => {
     const ready = renderToStaticMarkup(<ReaderAccountPieceGrantView {...props} articleId="piece-one" confirmed />);
     expect(ready).not.toMatch(/disabled=""[^>]*>Confirm piece access/);
   });
-  it('requests only explicit bounded pages and a single idempotent account-piece grant', () => {
+  it('loads bounded pages automatically with progress guards and retains a single idempotent account-piece grant', () => {
     const source = readFileSync(new URL('./ReaderAccountDirectory.tsx', import.meta.url), 'utf8');
     expect(source).toContain('pageSize: 25');
-    expect(source).toContain('appendReaderAccountPage(previous, response.directory)');
+    expect(source).toContain('appendReaderAccountPage(accumulated, page)');
+    expect(source).toContain('Math.ceil(page.totalReaderAccounts / page.pageSize)');
+    expect(source).toContain('seenCursors.has(page.nextCursor)');
+    expect(source).toContain('generation !== readGeneration.current || controller.signal.aborted');
     expect(source).toContain('api.grantReaderAccountPieceAccess(grantReader.id, { articleId })');
     expect(source.match(/api\.grantReaderAccountPieceAccess\(/g)).toHaveLength(1);
     expect(source).not.toMatch(/pageSize:\s*(?:100|1000)|while\s*\(/);

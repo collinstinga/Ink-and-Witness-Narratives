@@ -28,10 +28,12 @@ describe('permanent Writer Studio guide content', () => {
       'Homepage Layout', 'Topic Catalogue', 'Categories', 'Reader Experience',
       'Reader Passes', 'Media & Branding', 'Analytics & Sales', 'Readers & Licenses',
       'Email Terminal', 'Pay-to-Read M-Pesa', 'Reader Tips', 'Comments', 'Affiliates Control', 'Settings & Till',
-      'Save Draft', 'Publish Live', 'Update Published', 'Save Homepage', 'Save Reader Pass',
+      'header Save', 'Publishing & Access', 'Draft', 'Publish', 'Schedule', 'Save Homepage', 'Save Reader Pass',
       'Save collection', 'Save bundle', 'Save Literary Circle settings', 'Save payout minimum',
     ]) expect(text).toContain(label);
     expect(text).toContain('does not submit every open form');
+    expect(text).toContain('It saves the current title, content, price and publishing options');
+    expect(text).toContain('Outside the piece editor');
   });
 
   it('distinguishes access, money, referral eligibility and unreleased automation', () => {

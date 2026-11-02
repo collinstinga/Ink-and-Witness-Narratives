@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { Article, ReaderAccountAdminItem, ReaderAccountAdminPage } from '../../types.js';
-import { api } from '../../utils/api.js';
+import { api, ApiResponseError } from '../../utils/api.js';
 
 function dateLabel(value: string): string {
   return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleDateString('en-KE') : 'Not recorded';
@@ -14,7 +14,7 @@ export function publishedReaderGrantPieces(articles: readonly ReaderGrantPiece[]
   return [...new Map(articles.filter(article => article.status === 'published' && article.id !== 'all' && article.title.trim()
     && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(article.id)).map(article => [article.id, article])).values()];
 }
-/** Merge only an explicitly requested page; retain newer local status revisions. */
+/** Retain earlier accounts and newer status revisions while pages arrive. */
 export function appendReaderAccountPage(previous: ReaderAccountAdminPage | null, next: ReaderAccountAdminPage): ReaderAccountAdminPage {
   if (!previous) return next;
   const readers = new Map(previous.readers.map(reader => [reader.id, reader]));
@@ -25,24 +25,41 @@ export function appendReaderAccountPage(previous: ReaderAccountAdminPage | null,
   return { ...next, readers: [...readers.values()] };
 }
 
-export function ReaderAccountDirectoryView({ directory, loading, busy, error, notice, onRefresh, onNext, onFirst, onSelect, onGrant, hasGrantPieces = false }: {
+export function requireReaderAccountPage(value: unknown): ReaderAccountAdminPage {
+  const page = value as ReaderAccountAdminPage | null;
+  if (!page || typeof page !== 'object' || !Number.isSafeInteger(page.totalReaderAccounts) || page.totalReaderAccounts < 0
+    || page.matchingReaderAccounts !== page.totalReaderAccounts || page.pageSize !== 25
+    || !Array.isArray(page.readers) || page.readers.length > page.pageSize || page.readers.length > page.totalReaderAccounts
+    || (page.nextCursor !== undefined && (typeof page.nextCursor !== 'string' || !/^[A-Za-z0-9_-]{1,2100}$/.test(page.nextCursor)))
+    || page.readers.some(reader => !reader || typeof reader !== 'object' || typeof reader.id !== 'string' || !reader.id || reader.id.includes('/')
+      || typeof reader.name !== 'string' || typeof reader.email !== 'string' || typeof reader.createdAt !== 'string'
+      || !['active', 'suspended', 'unavailable'].includes(reader.status) || !Number.isSafeInteger(reader.revision) || reader.revision < 0
+      || (reader.statusUpdatedAt !== undefined && typeof reader.statusUpdatedAt !== 'string')
+      || (reader.suspensionReason !== undefined && typeof reader.suspensionReason !== 'string'))
+    || new Set(page.readers.map(reader => reader.id)).size !== page.readers.length) {
+    throw new Error('The registered reader account list could not be confirmed. Refresh accounts to try again.');
+  }
+  return page;
+}
+
+export function ReaderAccountDirectoryView({ directory, loading, busy, error, notice, onRefresh, onSelect, onGrant, hasGrantPieces = false }: {
   directory: ReaderAccountAdminPage | null; loading: boolean; busy: boolean; error: string; notice: string;
-  onRefresh: () => void; onNext: () => void; onFirst: () => void; onSelect: (reader: ReaderAccountAdminItem) => void;
+  onRefresh: () => void; onSelect: (reader: ReaderAccountAdminItem) => void;
   onGrant?: (reader: ReaderAccountAdminItem) => void; hasGrantPieces?: boolean;
 }) {
-  const remaining = directory ? Math.max(0, directory.matchingReaderAccounts - directory.readers.length) : 0;
   return <div aria-busy={loading || busy}>
-    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      <p className="text-slate-200"><strong className="text-cyan-300 text-2xl">{directory ? directory.totalReaderAccounts : '—'}</strong> registered reader accounts</p>
-      <button type="button" onClick={onRefresh} disabled={loading || busy} className="border border-slate-600 rounded-lg px-4 py-2 disabled:opacity-50">{loading ? 'Loading accounts…' : 'Refresh accounts'}</button>
+    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+      <p className="text-sm text-slate-200"><strong className="text-cyan-300 text-xl">{directory ? directory.totalReaderAccounts : loading ? 'Loading…' : 'Not loaded'}</strong> registered reader accounts</p>
+      <button type="button" onClick={onRefresh} disabled={loading || busy} className="min-h-9 border border-slate-600 rounded-lg px-3 py-1.5 text-xs disabled:opacity-50">{loading ? 'Loading accounts…' : 'Refresh accounts'}</button>
     </div>
-    <p className="text-slate-400 text-sm mb-4">Writer accounts are excluded. Each row is a registered reader account, not a visitor or a purchase. All existing reader accounts can be browsed below, loading up to 25 more at a time. Legacy accounts needing review remain included in the total. Suspension signs the reader out and blocks account access; purchases, licences and reading history remain preserved.</p>
+    <p className="text-slate-400 text-xs mb-3">Writer accounts are excluded. Names and email addresses are visible only in Writer Studio.</p>
     {error ? <p role="alert" className="text-rose-200 bg-rose-950/40 border border-rose-700 rounded-lg p-3 mb-4">{error}</p> : null}
     {notice ? <p role="status" className="text-emerald-200 mb-4">{notice}</p> : null}
+    {loading ? <p role="status" className="text-cyan-200 text-sm mb-3">Loading all reader accounts…{directory ? ` ${directory.readers.length} of ${directory.totalReaderAccounts} loaded.` : ''}</p> : null}
     {directory ? <>
-      <p className="text-slate-400 text-sm mb-3">Loaded {directory.readers.length} of {directory.matchingReaderAccounts} matching accounts. {directory.nextCursor
-        ? `${remaining} remaining (about ${Math.max(1, Math.ceil(remaining / directory.pageSize))} more ${remaining > directory.pageSize ? 'pages' : 'page'}).`
-        : 'All matching accounts are loaded.'} Names and email addresses are visible only in Writer Studio.</p>
+      {!loading ? <p className="text-slate-400 text-xs mb-3">{directory.readers.length === directory.totalReaderAccounts && !directory.nextCursor
+        ? `All ${directory.readers.length} reader accounts are shown.`
+        : `${directory.readers.length} of ${directory.totalReaderAccounts} accounts are shown. Refresh accounts to load the complete list.`}</p> : null}
       <div className="space-y-3">{directory.readers.map(reader => <article key={reader.id} className="border border-slate-700 rounded-xl p-4 bg-slate-950/40">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0"><h4 className="font-semibold text-slate-100 break-words">{reader.name}</h4><p className="text-cyan-200 break-all">{reader.email || 'Email not recorded'}</p></div>
@@ -55,9 +72,9 @@ export function ReaderAccountDirectoryView({ directory, loading, busy, error, no
           <button type="button" disabled={loading || busy || !onGrant || !hasGrantPieces || !canGrantReaderPiece(reader)} onClick={() => onGrant?.(reader)} title={reader.status === 'suspended' ? 'Reactivate this account before granting access.' : !hasGrantPieces ? 'Publish a piece before granting access.' : 'Grant a published piece directly to this reader account.'} className="border border-cyan-700 rounded-lg px-4 py-2 text-cyan-200 disabled:opacity-50">Grant piece access</button>
         </div>
       </article>)}</div>
-      {!directory.readers.length ? <p className="text-slate-400 py-6">No reader accounts match this page or email address.</p> : null}
-      <div className="flex flex-wrap gap-3 mt-4"><button type="button" disabled={loading || busy} onClick={onFirst} className="border border-slate-600 rounded-lg px-4 py-2 disabled:opacity-50">Refresh from first page</button><button type="button" disabled={loading || busy || !directory.nextCursor} onClick={onNext} className="border border-slate-600 rounded-lg px-4 py-2 disabled:opacity-50">{loading ? 'Loading accounts…' : 'Load more accounts'}</button></div>
+      {!directory.readers.length && !loading && !error ? <p className="text-slate-400 py-6">No reader accounts have registered yet.</p> : null}
     </> : null}
+    <details className="text-xs text-slate-500 mt-4"><summary className="cursor-pointer">About these accounts</summary><p className="mt-2">Each row is a registered reader account, not a visitor or a purchase. Legacy accounts needing review remain included in the total. Suspension signs the reader out and blocks account access; purchases, licences and reading history remain preserved.</p></details>
   </div>;
 }
 
@@ -86,10 +103,9 @@ interface ReaderAccountDirectoryProps { articles?: readonly ReaderGrantPiece[] }
 const NO_ARTICLES: readonly ReaderGrantPiece[] = [];
 export const ReaderAccountDirectory: React.FC<ReaderAccountDirectoryProps> = ({ articles = NO_ARTICLES }) => {
   const [directory, setDirectory] = useState<ReaderAccountAdminPage | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [email, setEmail] = useState('');
   const [selected, setSelected] = useState<ReaderAccountAdminItem | null>(null);
   const [grantReader, setGrantReader] = useState<ReaderAccountAdminItem | null>(null);
   const [articleId, setArticleId] = useState('');
@@ -100,36 +116,68 @@ export const ReaderAccountDirectory: React.FC<ReaderAccountDirectoryProps> = ({ 
   const abortRead = useRef<AbortController | null>(null);
   const loadingRef = useRef(false);
   const savingRef = useRef(false);
+  const accessRejectedRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const currentFilter = useRef<{ email?: string }>({});
   const pieces = publishedReaderGrantPieces(articles);
 
-  const load = async (page: { cursor?: string; email?: string } = currentFilter.current, append = false) => {
-    if (savingRef.current || (append && loadingRef.current)) return;
+  const clearRejectedAccess = (failure: unknown): boolean => {
+    if (!(failure instanceof ApiResponseError) || (failure.status !== 401 && failure.status !== 403)) return false;
+    accessRejectedRef.current = true;
+    setDirectory(null); setSelected(null); setGrantReader(null);
+    setConfirmed(false); setReason(''); setArticleId(''); setNotice('');
+    return true;
+  };
+
+  const load = async () => {
+    if (savingRef.current) return;
     abortRead.current?.abort();
     const controller = new AbortController(); abortRead.current = controller;
     const generation = ++readGeneration.current;
     loadingRef.current = true; setLoading(true); setError('');
-    if (!append) { setDirectory(null); setSelected(null); setGrantReader(null); }
+    setSelected(null); setGrantReader(null);
     try {
-      const response = await api.getAdminReaderAccounts({ ...page, pageSize: 25, signal: controller.signal });
-      if (generation === readGeneration.current && !controller.signal.aborted) {
-        currentFilter.current = { email: page.email };
-        setDirectory(previous => append ? appendReaderAccountPage(previous, response.directory) : response.directory);
+      let accumulated: ReaderAccountAdminPage | null = null;
+      let cursor: string | undefined;
+      let pageLimit = 1;
+      const seenCursors = new Set<string>();
+      for (let pageNumber = 0; pageNumber < pageLimit; pageNumber += 1) {
+        const response = await api.getAdminReaderAccounts({ cursor, pageSize: 25, signal: controller.signal });
+        if (generation !== readGeneration.current || controller.signal.aborted) return;
+        const page = requireReaderAccountPage(response?.success === true ? response.directory : null);
+        accessRejectedRef.current = false;
+        if (pageNumber === 0) pageLimit = Math.max(1, Math.ceil(page.totalReaderAccounts / page.pageSize)) + 1;
+        const next = appendReaderAccountPage(accumulated, page);
+        if (accumulated && next.readers.length <= accumulated.readers.length) {
+          throw new Error('Reader account pages stopped advancing. Refresh accounts to load the complete list.');
+        }
+        accumulated = next;
+        setDirectory(accumulated);
+        if (!page.nextCursor) {
+          if (accumulated.readers.length !== page.totalReaderAccounts) throw new Error('The reader account list changed while loading. Refresh accounts to load the complete list.');
+          return;
+        }
+        if (!page.readers.length || seenCursors.has(page.nextCursor) || accumulated.readers.length >= page.totalReaderAccounts) {
+          throw new Error('Reader account pages could not be confirmed. Refresh accounts to load the complete list.');
+        }
+        seenCursors.add(page.nextCursor); cursor = page.nextCursor;
       }
+      throw new Error('The reader account list changed while loading. Refresh accounts to load the complete list.');
     } catch (failure) {
-      if (generation === readGeneration.current && !controller.signal.aborted) setError(failure instanceof Error ? failure.message : 'Reader accounts could not be loaded.');
+      if (generation === readGeneration.current && !controller.signal.aborted) {
+        clearRejectedAccess(failure);
+        setError(failure instanceof Error ? failure.message : 'Reader accounts could not be loaded.');
+      }
     } finally {
       if (generation === readGeneration.current && !controller.signal.aborted) { loadingRef.current = false; setLoading(false); }
     }
   };
   useEffect(() => {
-    void load({});
+    void load();
     return () => { readGeneration.current += 1; abortRead.current?.abort(); };
   }, []);
   useEffect(() => { if (selected || grantReader) dialogRef.current?.focus(); }, [selected, grantReader]);
   const save = async () => {
-    if (savingRef.current || loadingRef.current || !selected || !confirmed || selected.status === 'unavailable') return;
+    if (savingRef.current || loadingRef.current || !selected || !confirmed || selected.status === 'unavailable' || accessRejectedRef.current) return;
     savingRef.current = true; setSaving(true); setError(''); setNotice('');
     try {
       const response = await api.setAdminReaderAccountStatus(selected.id, { status: selected.status === 'suspended' ? 'active' : 'suspended', expectedRevision: selected.revision, reason });
@@ -137,11 +185,12 @@ export const ReaderAccountDirectory: React.FC<ReaderAccountDirectoryProps> = ({ 
       setNotice(response.reader.status === 'suspended' ? 'Reader suspended. Existing sessions are invalid; purchases and history were preserved.' : 'Reader reactivated. They must sign in again; previous sessions remain invalid.');
       setSelected(null); setConfirmed(false); setReason('');
     } catch (failure) {
+      clearRejectedAccess(failure);
       setError(`${failure instanceof Error ? failure.message : 'Account status was not confirmed.'} No automatic retry was sent. Close this confirmation and refresh accounts before retrying.`);
     } finally { savingRef.current = false; setSaving(false); }
   };
   const savePieceGrant = async () => {
-    if (savingRef.current || loadingRef.current || !grantReader || !canGrantReaderPiece(grantReader) || !confirmed || !pieces.some(piece => piece.id === articleId)) return;
+    if (savingRef.current || loadingRef.current || !grantReader || !canGrantReaderPiece(grantReader) || !confirmed || !pieces.some(piece => piece.id === articleId) || accessRejectedRef.current) return;
     savingRef.current = true; setSaving(true); setError(''); setNotice('');
     try {
       const response = await api.grantReaderAccountPieceAccess(grantReader.id, { articleId });
@@ -149,18 +198,14 @@ export const ReaderAccountDirectory: React.FC<ReaderAccountDirectoryProps> = ({ 
       setNotice(response.changed ? `${title}: account-bound access granted to ${grantReader.email}.` : `${title}: access was already granted to ${grantReader.email}; no duplicate grant was created.`);
       setGrantReader(null); setArticleId(''); setConfirmed(false);
     } catch (failure) {
+      clearRejectedAccess(failure);
       setError(`${failure instanceof Error ? failure.message : 'Piece access was not confirmed.'} No automatic retry was sent. A retry for the same account and piece cannot duplicate the grant.`);
     } finally { savingRef.current = false; setSaving(false); }
   };
   const closeConfirmation = () => { if (!savingRef.current) { setSelected(null); setGrantReader(null); } };
   return <section aria-labelledby="reader-account-directory-title" className="bg-slate-900/50 border border-slate-700 rounded-2xl p-4 sm:p-6 mb-6">
     <h3 id="reader-account-directory-title" className="text-xl font-serif text-slate-100 mb-4">Reader accounts</h3>
-    <form className="flex flex-wrap gap-3 mb-5" onSubmit={event => { event.preventDefault(); setNotice(''); void load({ email: email.trim().toLowerCase() || undefined }); }}>
-      <label className="w-full sm:w-auto sm:flex-1 min-w-0"><span className="block text-sm text-slate-400 mb-1">Find an exact email address</span><input type="email" value={email} onChange={event => setEmail(event.target.value)} maxLength={254} placeholder="reader@example.com" className="w-full bg-slate-950 border border-slate-600 rounded-lg px-3 py-2" /></label>
-      <button type="submit" disabled={loading || saving} className="self-end bg-cyan-700 rounded-lg px-4 py-2 disabled:opacity-50">Find reader</button>
-      <button type="button" disabled={loading || saving} onClick={() => { setEmail(''); setNotice(''); void load({}); }} className="self-end border border-slate-600 rounded-lg px-4 py-2 disabled:opacity-50">Show all</button>
-    </form>
-    <ReaderAccountDirectoryView directory={directory} loading={loading} busy={saving} error={error} notice={notice} hasGrantPieces={pieces.length > 0} onRefresh={() => { void load(); }} onFirst={() => { void load(); }} onNext={() => { if (directory?.nextCursor) void load({ ...currentFilter.current, cursor: directory.nextCursor }, true); }} onSelect={reader => { setSelected(reader); setGrantReader(null); setConfirmed(false); setReason(''); setError(''); }} onGrant={reader => { if (!canGrantReaderPiece(reader)) return; setGrantReader(reader); setSelected(null); setArticleId(''); setConfirmed(false); setError(''); }} />
+    <ReaderAccountDirectoryView directory={directory} loading={loading} busy={saving} error={error} notice={notice} hasGrantPieces={pieces.length > 0} onRefresh={() => { setNotice(''); void load(); }} onSelect={reader => { if (accessRejectedRef.current) return; setSelected(reader); setGrantReader(null); setConfirmed(false); setReason(''); setError(''); }} onGrant={reader => { if (accessRejectedRef.current || !canGrantReaderPiece(reader)) return; setGrantReader(reader); setSelected(null); setArticleId(''); setConfirmed(false); setError(''); }} />
     {selected || grantReader ? <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={grantReader ? 'reader-piece-grant-title' : 'reader-status-confirm-title'} onKeyDown={event => {
       if (event.key === 'Escape' && !saving) { event.preventDefault(); closeConfirmation(); }
       if (event.key === 'Tab') {

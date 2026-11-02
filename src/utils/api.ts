@@ -228,6 +228,14 @@ export function clearAffiliateToken() {
  * Robust JSON fetch helper with defensive non-JSON error trapping
  * Prevents HTML/doctype JSON parse errors from escaping into UI state
  */
+/** Preserve HTTP status so callers can discard private state after access expires. */
+export class ApiResponseError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiResponseError';
+  }
+}
+
 export async function safeFetchJson<T = any>(
   url: string,
   options?: RequestInit,
@@ -276,18 +284,18 @@ export async function safeFetchJson<T = any>(
   if (res.status === 401 || res.status === 403) {
     if (url.includes("/affiliate/")) {
       clearAffiliateToken();
-      throw new Error(data?.error || data?.message || "Affiliate session expired. Please log in again.");
+      throw new ApiResponseError(res.status, data?.error || data?.message || "Affiliate session expired. Please log in again.");
     }
     if (url.includes("/admin/")) {
       clearWriterToken();
-      throw new Error(data?.error || data?.message || "Writer session expired. Please log in again.");
+      throw new ApiResponseError(res.status, data?.error || data?.message || "Writer session expired. Please log in again.");
     }
-    throw new Error(data?.error || data?.message || "Authentication required.");
+    throw new ApiResponseError(res.status, data?.error || data?.message || "Authentication required.");
   }
 
   if (!res.ok) {
     const msg = data?.error || data?.message || (typeof data === "string" ? data : null) || fallbackErrorMessage;
-    throw new Error(msg);
+    throw new ApiResponseError(res.status, msg);
   }
 
   if (data === null) {
@@ -2983,7 +2991,7 @@ export const api = {
     if (options.cursor) query.set('cursor', options.cursor);
     if (options.pageSize !== undefined) query.set('pageSize', String(options.pageSize));
     if (options.email) query.set('email', options.email);
-    return safeFetchJson(`/api/admin/readers${query.size ? `?${query}` : ''}`, {
+    return safeFetchJson(`/api/admin/reader-accounts${query.size ? `?${query}` : ''}`, {
       cache: 'no-store', signal: options.signal, headers: { 'x-admin-token': getWriterToken() || '' },
     }, 'Reader accounts could not be loaded.');
   },

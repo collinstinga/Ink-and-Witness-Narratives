@@ -163,7 +163,7 @@ describe('writer reader directory and suspension', () => {
     const routes: any[] = []; const admin = vi.fn(); const writeGuard = vi.fn();
     registerReaderAccountAdminRoutes({ get: (path: string, ...handlers: any[]) => routes.push(['get', path, handlers]), patch: (path: string, ...handlers: any[]) => routes.push(['patch', path, handlers]) } as any,
       { getDb: () => h.db, requireAdminAuth: admin, writeGuard });
-    expect(routes[0].slice(0, 2)).toEqual(['get', '/api/admin/readers']); expect(routes[0][2][1]).toBe(admin);
+    expect(routes[0].slice(0, 2)).toEqual(['get', '/api/admin/reader-accounts']); expect(routes[0][2][1]).toBe(admin);
     expect(routes[1].slice(0, 2)).toEqual(['patch', '/api/admin/readers/:id/status']); expect(routes[1][2].slice(1, 3)).toEqual([admin, writeGuard]);
     const headers = new Map(); const next = vi.fn();
     routes[0][2][0]({}, { setHeader: (key: string, value: string) => headers.set(key, value) }, next);

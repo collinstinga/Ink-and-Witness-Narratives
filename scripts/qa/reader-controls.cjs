@@ -42,6 +42,8 @@ let phase = 'setup';
       const page = await context.newPage();
       const errors = [], unexpected = [], readerReads = [], readerWrites = [], grantWrites = [], commentWrites = [], moderationWrites = [], payoutWrites = [], reviewWrites = [];
       let ownCommentReads = 0, ambiguousReview = true;
+      let legacyAccountPayload = true, failReaderContinuation = false;
+      let readerAccessFailure = 0;
       const approvedReview = { id: 'synthetic-legacy-approved', articleId: 'synthetic-piece', rating: 5,
         review: 'Previously approved original response.', status: 'approved', featured: true, verifiedReader: true,
         createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' };
@@ -66,14 +68,22 @@ let phase = 'setup';
         if (url.origin !== origin) { unexpected.push('external'); return route.abort(); }
         if (!url.pathname.startsWith('/api/')) return route.continue();
         const send = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
-        if (request.method() === 'GET' && url.pathname === '/api/admin/readers') {
+        if (request.method() === 'GET' && url.pathname === '/api/admin/reader-accounts') {
           readerReads.push(Object.fromEntries(url.searchParams));
           assert.equal(url.searchParams.get('pageSize'), '25');
-          const filtered = url.searchParams.has('email') ? readers.filter(reader => reader.email === url.searchParams.get('email')) : readers;
+          assert.equal(url.searchParams.has('email'), false, 'The presented directory is never an email lookup');
+          if (legacyAccountPayload) { legacyAccountPayload = false; return send({ readers: [] }); }
+          if (readerAccessFailure) {
+            const status = readerAccessFailure; readerAccessFailure = 0;
+            return send({ error: `Synthetic writer access rejected (${status}). Sign in again.` }, status);
+          }
           assert.ok(!url.searchParams.has('cursor') || url.searchParams.get('cursor') === 'synthetic-page-two');
+          if (url.searchParams.has('cursor') && failReaderContinuation) {
+            failReaderContinuation = false; return send({ error: 'Synthetic reader page unavailable' }, 503);
+          }
           const offset = url.searchParams.has('cursor') ? 25 : 0;
-          return send({ success: true, directory: { totalReaderAccounts: readers.length, matchingReaderAccounts: filtered.length,
-            readers: filtered.slice(offset, offset + 25), pageSize: 25, ...(filtered.length > offset + 25 ? { nextCursor: 'synthetic-page-two' } : {}) } });
+          return send({ success: true, directory: { totalReaderAccounts: readers.length, matchingReaderAccounts: readers.length,
+            readers: readers.slice(offset, offset + 25), pageSize: 25, ...(readers.length > offset + 25 ? { nextCursor: 'synthetic-page-two' } : {}) } });
         }
         if (request.method() === 'PATCH' && url.pathname === '/api/admin/readers/user_synthetic_reader_one/status') {
           const body = request.postDataJSON(); readerWrites.push(body);
@@ -145,28 +155,51 @@ let phase = 'setup';
       phase = `reader_directory_${width}`;
       await page.goto(origin, { waitUntil: 'networkidle', timeout: 30000 });
       const directory = page.getByTestId('directory-lab');
-      await directory.getByText('Synthetic Reader One', { exact: true }).waitFor();
+      await directory.getByRole('alert').filter({ hasText: 'registered reader account list could not be confirmed' }).waitFor();
+      assert.equal(await directory.locator('article').count(), 0);
+      assert.equal(await directory.locator('strong').textContent(), 'Not loaded', 'A malformed old response must not silently show an empty count');
+      for (const name of ['Find reader', 'Show all', 'Load more accounts', 'Refresh from first page']) {
+        assert.equal(await directory.getByRole('button', { name, exact: true }).count(), 0);
+      }
+      assert.equal(await directory.getByPlaceholder('reader@example.com', { exact: true }).count(), 0);
+      await directory.getByRole('button', { name: 'Refresh accounts', exact: true }).click();
+      await directory.getByText('All 26 reader accounts are shown.', { exact: true }).waitFor();
       assert.equal(await directory.locator('strong').textContent(), '26');
       assert.ok(await directory.getByText('reader-one@example.invalid', { exact: true }).isVisible());
       assert.ok(await directory.getByText('reader-two@example.invalid', { exact: true }).isVisible());
-      assert.equal(await directory.locator('article').count(), 25);
-      assert.equal(readerReads.length, 1, 'No automatic full-directory scan');
-      await directory.getByLabel('Find an exact email address', { exact: true }).fill('reader-one@example.invalid');
-      await directory.getByRole('button', { name: 'Find reader', exact: true }).click();
-      await directory.getByText(/Loaded 1 of 1 matching accounts/).waitFor();
-      assert.equal(await directory.locator('strong').textContent(), '26', 'Filtering preserves the total account count');
-      await directory.getByRole('button', { name: 'Show all', exact: true }).click();
-      await directory.getByText(/Loaded 25 of 26 matching accounts/).waitFor();
-      await directory.getByRole('button', { name: 'Load more accounts', exact: true }).click();
       await directory.getByText('Synthetic Reader 26', { exact: true }).waitFor();
       assert.equal(await directory.locator('article').count(), 26);
-      assert.ok(await directory.getByText('Synthetic Reader One', { exact: true }).isVisible(), 'Appending preserves earlier accounts');
-      assert.equal(await directory.getByRole('button', { name: 'Load more accounts', exact: true }).isDisabled(), true);
+      assert.equal(readerReads.length, 3, 'One malformed response followed by the two automatically loaded bounded pages');
+      assert.ok(await directory.getByText('Synthetic Reader One', { exact: true }).isVisible(), 'Automatic appending preserves earlier accounts');
+      failReaderContinuation = true;
       await directory.getByRole('button', { name: 'Refresh accounts', exact: true }).click();
-      await directory.getByText(/Loaded 25 of 26 matching accounts/).waitFor();
-      assert.equal(await directory.locator('article').count(), 25, 'Refresh starts with the first bounded page');
-      await directory.getByRole('button', { name: 'Load more accounts', exact: true }).click();
+      await directory.getByRole('alert').filter({ hasText: 'Synthetic reader page unavailable' }).waitFor();
+      assert.equal(await directory.locator('article').count(), 25, 'A later-page failure keeps already loaded reader accounts visible');
+      assert.equal(await directory.locator('strong').textContent(), '26');
+      assert.equal(readerReads.length, 5, 'Failed continuation is not automatically retried');
+      await directory.getByRole('button', { name: 'Refresh accounts', exact: true }).click();
+      await directory.getByText('All 26 reader accounts are shown.', { exact: true }).waitFor();
+      assert.equal(await directory.locator('article').count(), 26);
+      assert.equal(readerReads.length, 7, 'Explicit refresh reloads the complete directory in bounded pages');
       await directory.getByText('Synthetic Reader 26', { exact: true }).waitFor();
+      for (const status of [401, 403]) {
+        readerAccessFailure = status;
+        const readsBefore = readerReads.length;
+        await directory.getByRole('button', { name: 'Refresh accounts', exact: true }).click();
+        await directory.getByRole('alert').filter({ hasText: `Synthetic writer access rejected (${status})` }).waitFor();
+        assert.equal(await directory.locator('article').count(), 0, 'Definitive authentication rejection clears all private reader rows');
+        assert.equal(await directory.locator('strong').textContent(), 'Not loaded');
+        assert.equal(await directory.getByText('reader-one@example.invalid', { exact: true }).count(), 0);
+        assert.equal(await directory.getByRole('button', { name: 'Suspend account', exact: true }).count(), 0);
+        assert.equal(await directory.getByRole('button', { name: 'Grant piece access', exact: true }).count(), 0);
+        assert.equal(await page.getByRole('dialog').count(), 0);
+        assert.equal(readerReads.length, readsBefore + 1, 'Authentication rejection does not cause automatic retry');
+        assert.equal(readerWrites.length, 0); assert.equal(grantWrites.length, 0);
+        // Only this isolated fixture restores authorisation; no real sign-in or account mutation occurs.
+        await directory.getByRole('button', { name: 'Refresh accounts', exact: true }).click();
+        await directory.getByText('All 26 reader accounts are shown.', { exact: true }).waitFor();
+        assert.equal(await directory.locator('article').count(), 26);
+      }
       await directory.getByRole('button', { name: 'Suspend account', exact: true }).first().click();
       let dialog = page.getByRole('dialog');
       assert.equal(readerWrites.length, 0);
@@ -324,8 +357,10 @@ let phase = 'setup';
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await page.screenshot({ path: path.join(output, `payout-${width}.png`), fullPage: true });
       assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
-      results.push({ width, exactReaderCount: 26, boundedExplicitDirectoryPages: true, appendPreservesEarlierAccounts: true,
-        refreshResetsFirstPage: true, accountBoundPieceGrant: true, explicitGrantConfirmation: true, idempotentRegrant: true,
+      results.push({ width, exactReaderCount: 26, boundedAutomaticDirectoryPages: true, appendPreservesEarlierAccounts: true,
+        allAccountsPresentedWithoutSearch: true, malformedPayloadShownAsError: true, partialFailureKeepsAccounts: true,
+        authRejectionClearsPrivateAccounts: true,
+        explicitRefreshCompletesList: true, accountBoundPieceGrant: true, explicitGrantConfirmation: true, idempotentRegrant: true,
         explicitSuspendAndReactivate: true, cancelDoesNotWrite: true,
         sameReaderMultipleComments: true, distinctIntentionalSubmissionIds: true, privatePendingOnly: true,
         explicitWriterPublication: true, secondCommentStillPending: true, payoutCodeAndAcknowledgementRequired: true,

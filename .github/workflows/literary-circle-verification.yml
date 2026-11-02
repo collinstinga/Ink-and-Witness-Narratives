@@ -90,6 +90,12 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/qa/partner-email.cjs 2>&1 | tee data/ci-browser-qa/partner-email.log
+      - name: Verify compact writer header saves actual piece edits with synthetic services only
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && steps.browser_setup.conclusion == 'success' }}
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          node scripts/qa/writer-header-save.cjs 2>&1 | tee data/ci-browser-qa/writer-header-save.log
       - name: Preserve synthetic browser proof and failure diagnostics
         if: ${{ !cancelled() && steps.browser_setup.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
@@ -112,3 +118,5 @@ jobs:
             data/reader-password-reset-qa/*.png
             data/partner-email-qa/*.json
             data/partner-email-qa/*.png
+            data/writer-header-save-qa/*.json
+            data/writer-header-save-qa/*.png

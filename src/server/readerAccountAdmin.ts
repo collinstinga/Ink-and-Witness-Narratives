@@ -173,7 +173,8 @@ export function registerReaderAccountAdminRoutes(app: Pick<Express, 'get' | 'pat
   };
   const replyError = (res: Response, error: unknown) => res.status(error instanceof ReaderAccountAdminError ? error.statusCode : 503)
     .json({ success: false, error: error instanceof ReaderAccountAdminError ? error.message : 'Reader account operation could not be confirmed. Refresh before retrying.' });
-  app.get('/api/admin/readers', privateResponse, options.requireAdminAuth, async (req: Request, res: Response) => {
+  // Keep the account directory separate from the existing reader-licence API.
+  app.get('/api/admin/reader-accounts', privateResponse, options.requireAdminAuth, async (req: Request, res: Response) => {
     try {
       if (Object.keys(req.query).some(key => !['cursor', 'pageSize', 'email'].includes(key))) throw new ReaderAccountAdminError(400, 'Unsupported reader directory filter.');
       return res.json({ success: true, directory: await listReaderAccounts(options.getDb(), (req as any).user, req.query) });
